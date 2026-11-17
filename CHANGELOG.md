@@ -5,7 +5,8 @@
 - **Media tool-call titles support incremental arguments.** Image and video
   toolviews read DSH RC3's incremental `args` while running, including prompt
   text and image-reference counts, and retain the legacy raw-JSON fallback on
-  older hosts. Missing or malformed arguments do not invent a title.
+  older hosts. Missing arguments produce an empty prompt, while malformed legacy
+  JSON keeps its truncated raw first line.
 - **Upstream review updated.** The ledger and bilingual source snapshots now
   cover `e2ed02b9`. Antigravity's `xhigh` grouping remains pending with the
   provider-native grouped-catalog design; the fork has no corresponding grouped
