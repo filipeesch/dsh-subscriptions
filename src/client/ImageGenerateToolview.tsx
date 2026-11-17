@@ -24,15 +24,13 @@ import type {
   MessageImageLabels,
 } from './ImageGallery.js'
 import { hostIcon } from './host-icons.js'
+import { mediaArguments } from './media-arguments.js'
 import { callSubscriptionsAuth } from './subscriptions-rpc.js'
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
 
 /** DSH 0.1.7 renamed IconSparkle16; resolving it by name keeps older hosts working too. */
 const SparkleIcon = hostIcon(primitives, 'Sparkle')
-
-/** Title prompt truncation budget (characters). */
-const PROMPT_MAX_LENGTH = 60
 
 /** Mirror of ui-tool's ToolCallOwnerProps (see the module header). */
 interface ToolCallOwnerProps {
@@ -108,35 +106,6 @@ function fallbackTranslate(
     text = text.replaceAll(`{${name}}`, String(value))
   }
   return text
-}
-
-/** Extract the prompt from the call's raw args JSON; falls back to the first string value, then the raw line. */
-function derivePrompt(argsRaw: string): string {
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(argsRaw)
-  } catch {
-    // Non-JSON args (mid-stream truncation): fall back to the raw string below.
-    parsed = undefined
-  }
-  let prompt: string | undefined
-  if (typeof parsed === 'object' && parsed !== null) {
-    const args = parsed as Record<string, unknown>
-    if (typeof args.prompt === 'string' && args.prompt !== '')
-      prompt = args.prompt
-    else {
-      for (const value of Object.values(args)) {
-        if (typeof value === 'string' && value !== '') {
-          prompt = value
-          break
-        }
-      }
-    }
-  }
-  const line = (prompt ?? argsRaw).split('\n', 1)[0] ?? ''
-  return line.length > PROMPT_MAX_LENGTH
-    ? `${line.slice(0, PROMPT_MAX_LENGTH)}…`
-    : line
 }
 
 /** Flatten a settled result's text blocks (the degraded text-only route and the error line). */
@@ -217,21 +186,8 @@ export function ImageGenerateToolview(props: ImageGenerateToolviewProps) {
   const t = props.t ?? fallbackTranslate
   if (block === undefined) return null
   const settled = 'kind' in block
-  const argsRaw =
-    (settled
-      ? block.call?.argsRaw
-      : block.phase === 'start'
-        ? block.argsRaw
-        : undefined) ?? ''
-  let references = 0
-  try {
-    const args = JSON.parse(argsRaw)
-    if (Array.isArray(args?.referenceImages))
-      references = args.referenceImages.length
-  } catch {
-    /* Arguments may still be streaming. */
-  }
-  const title = `image_generate${references > 0 ? ` (${references} ref)` : ''}: ${derivePrompt(argsRaw)}`
+  const { prompt, references } = mediaArguments(block)
+  const title = `image_generate${references > 0 ? ` (${references} ref)` : ''}: ${prompt}`
   const images = resultImages(block)
   const text = settled ? resultText(block) : ''
   const labels: MessageImageLabels = {

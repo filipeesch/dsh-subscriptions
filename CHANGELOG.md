@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.3.7 — 2026-11-17
+
+- **Media tool-call titles support incremental arguments.** Image and video
+  toolviews read DSH RC3's incremental `args` while running, including prompt
+  text and image-reference counts, and retain the legacy raw-JSON fallback on
+  older hosts. Missing or malformed arguments do not invent a title.
+- **Upstream review updated.** The ledger and bilingual source snapshots now
+  cover `e2ed02b9`. Antigravity's `xhigh` grouping remains pending with the
+  provider-native grouped-catalog design; the fork has no corresponding grouped
+  model-registry path to patch independently.
+
 ## v0.3.6 — 2026-11-13
 
 - **DSH 0.2.2-rc.3 support.** The gated window now covers DSH `0.1.7-rc.2`,
