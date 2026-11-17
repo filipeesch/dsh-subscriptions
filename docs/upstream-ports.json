@@ -7,10 +7,10 @@
     "date": "2026-09-28"
   },
   "upstreamRef": {
-    "sha": "9d1415c0",
+    "sha": "e2ed02b9",
     "note": "Full sha is re-derived by the check from the remote ref; recorded here for humans."
   },
-  "updatedAt": "2026-11-11",
+  "updatedAt": "2026-11-17",
   "entries": [
     {
       "upstream": "527f4d90",
@@ -734,6 +734,44 @@
       "area": "codex",
       "evidence": { "test": "test/pool.spec.ts" },
       "reason": "Directly reverses the fork's explicit guarantee that an applicable window at >=100% cannot silently spill into paid credits. There is no user opt-in for that spending; existing tests keep exhausted accounts and stale failure snapshots blocked. Reconsider only through a separately designed opt-in billing policy."
+    },
+    {
+      "upstream": "59764ff2",
+      "subject": "fix: support DSH 0.2.2-rc.3",
+      "status": "ported",
+      "area": "ui",
+      "forkCommits": ["4db7609"],
+      "evidence": { "test": "test/media-arguments.spec.ts" },
+      "reason": "Ports incremental media tool-call arguments with legacy raw-JSON fallback. RC3 support, anchored positioning, LlmError compatibility and AgentRegistry fixture adaptations were already covered independently by 8ba471c, 5f1d29a and 6c9ccad."
+    },
+    {
+      "upstream": "b5b0605a",
+      "subject": "revert: preserve upstream readme content",
+      "status": "not-applicable",
+      "area": "docs",
+      "reason": "README-only upstream content correction with no fork runtime effect; the bilingual source snapshots are refreshed to the final e2ed02b9 content in this sync."
+    },
+    {
+      "upstream": "185ab5e9",
+      "subject": "fix(antigravity): group xhigh tiers into their model family",
+      "status": "pending",
+      "area": "antigravity",
+      "reason": "Applies only to the provider-native grouped model registry introduced by d5f2b9da, which this fork has not adopted. The fork has no antigravity-model-id.ts or grouped AntigravityModelGroup path; include xhigh when that architecture is designed rather than inventing a partial grouping implementation."
+    },
+    {
+      "upstream": "48f1fa10",
+      "subject": "Merge pull request #217 from victorwads/fix/dsh-0.2.2-rc3",
+      "status": "already-covered",
+      "area": "host",
+      "forkCommits": ["8ba471c", "4db7609"],
+      "reason": "Merge-only integration covered by the fork's independently gated RC3 support and the incremental media-argument port from 59764ff2."
+    },
+    {
+      "upstream": "e2ed02b9",
+      "subject": "Merge pull request #220 from orangedy/fix/antigravity-xhigh-grouping",
+      "status": "not-applicable",
+      "area": "antigravity",
+      "reason": "Merge-only integration with no changes beyond 185ab5e9; the actual grouped-registry decision remains pending."
     }
   ]
 }

@@ -1,4 +1,4 @@
-<!-- 上游 V1ki/dsh-plugin-subscriptions README.zh.md 在 9d1415c0（2026-11-11）的快照。同步状态见 docs/upstream-sync.md。 -->
+<!-- 上游 V1ki/dsh-plugin-subscriptions README.zh.md 在 e2ed02b9（2026-11-17）的快照。同步状态见 docs/upstream-sync.md。 -->
 # dsh-plugin-subscriptions [![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
 
 [English](README.md) | 中文

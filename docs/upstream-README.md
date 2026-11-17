@@ -1,4 +1,4 @@
-<!-- Snapshot of upstream V1ki/dsh-plugin-subscriptions README.md at 9d1415c0 (2026-11-11). Sync state: docs/upstream-sync.md. -->
+<!-- Snapshot of upstream V1ki/dsh-plugin-subscriptions README.md at e2ed02b9 (2026-11-17). Sync state: docs/upstream-sync.md. -->
 # dsh-plugin-subscriptions [![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
 
 English | [中文](README.zh.md)
