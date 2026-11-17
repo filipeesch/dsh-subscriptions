@@ -27,7 +27,9 @@ section is the human summary; the JSON is the source of truth.
   under a fork commit that is not a descendant of the upstream sha, which is why
   the ledger exists. Later review also found independent coverage for the
   WebRuntime adaptation in `f35b3b7b` and the Claude fallback restored by
-  `0bd56951`; neither requires another port.
+  `0bd56951`; neither requires another port. The independent RC3 support in
+  `8ba471c` and the media-argument port in `4db7609` also cover the integration
+  node `48f1fa10`.
 - **Ported since:** Codex reasoning-effort `ultra` handling (`0c65c7d0`,
   `527f4d90`); Codex reset credits, end to end (`62453f2f`, `9c0ae036`,
   `d7a7f752`, `53577040`, `b0c6220a`); the Claude prompt-cache TTL setting
@@ -68,7 +70,9 @@ section is the human summary; the JSON is the source of truth.
   catalogs on an explicit user action, so it has no schedule to harden.
   `9d1415c0` (credit-funded Codex routing after included-quota exhaustion) is
   declined because the fork has no opt-in for paid spillover and deliberately
-  keeps known exhausted accounts blocked.
+  keeps known exhausted accounts blocked. `b5b0605a` is README-only upstream
+  content covered by this sync's refreshed snapshots. `e2ed02b9` is a merge-only
+  node with no independent change beyond the grouped-registry decision below.
 - **Open decisions:** `998cea06` and `a85fb93a` (display names) collide with
   this fork's own localized naming; `f359301e` (hourly catalog refresh) changes
   list freshness. `d5f2b9da` introduces provider-native grouped catalogs and a
