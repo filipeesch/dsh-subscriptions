@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.3.8 — 2026-11-18
+
+- **DSH 0.2.2-rc.4 support.** The gated window now covers DSH `0.1.7-rc.2`,
+  `0.2.0-rc.2`, `0.2.1-rc.5`, and `0.2.2-rc.4`; RC3 leaves the window under the
+  existing four-entry policy. Peers remain `>=0.1.7-rc.2 <0.3.0-0`, and
+  development dependencies remain pinned to `0.1.7-rc.2`. No runtime code or
+  provider behavior changed.
+
 ## v0.3.7 — 2026-11-17
 
 - **Media tool-call titles support incremental arguments.** Image and video
