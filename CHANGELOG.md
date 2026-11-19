@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.3.9 — 2026-11-19
+
+- **DSH 0.2.2-rc.5 support.** The gated window now covers DSH `0.1.7-rc.2`,
+  `0.2.0-rc.2`, `0.2.1-rc.5`, and `0.2.2-rc.5`; RC4 leaves the window under the
+  existing four-entry policy. Peers remain `>=0.1.7-rc.2 <0.3.0-0`, and
+  development dependencies remain pinned to `0.1.7-rc.2`. No runtime code or
+  provider behavior changed.
+
 ## v0.3.8 — 2026-11-18
 
 - **DSH 0.2.2-rc.4 support.** The gated window now covers DSH `0.1.7-rc.2`,
