@@ -1,6 +1,6 @@
 {
   "name": "dsh-subscriptions",
-  "version": "0.3.9",
+  "version": "0.4.0",
   "description": "Unified subscription providers and usage dashboard for DeepSeek Harness",
   "icon": "./icon.svg",
   "license": "MIT",
@@ -131,5 +131,8 @@
     "*.{json,yml,yaml,css,md}": [
       "prettier --write"
     ]
+  },
+  "dependencies": {
+    "@cursor/sdk": "1.4.2"
   }
 }

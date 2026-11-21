@@ -36,6 +36,8 @@ import { useDismissOnOutsidePointer } from '@deepseek-ai/dsh-client-ui-primitive
 import { useSubscriptionAnchoredPosition } from './useSubscriptionAnchoredPosition.js'
 import { callSubscriptionsAuth } from './SubscriptionsSection.js'
 import { UsageMeter } from './UsageMeter.js'
+import { UsageBar, windowTooltip } from './UsageBar.js'
+import { readAccountModelId } from '../providers/account-model.js'
 import { quotaPercent, quotaText, useQuotaClock } from './quota-display.js'
 import type { QuotaDisplayMode } from './usage-badge-preferences.js'
 import type {
@@ -124,6 +126,23 @@ export function pillAccountOf(d: ProviderUsageDisplay): AccountUsageDisplay {
   return d.accounts.find((a) => a.isDefault) ?? d.accounts[0]!
 }
 
+/**
+ * The account the selected model belongs to: an account-scoped model id names
+ * one, and an ordinary id follows the default account.
+ */
+export function pillAccountFor(
+  display: ProviderUsageDisplay,
+  model: string | undefined,
+): AccountUsageDisplay {
+  const account =
+    model === undefined ? undefined : readAccountModelId(model)?.account
+  if (account !== undefined) {
+    const scoped = display.accounts.find((entry) => entry.key === account)
+    if (scoped !== undefined) return scoped
+  }
+  return pillAccountOf(display)
+}
+
 /** Brand display names (short form for the compact badge). */
 export type BadgeProvider =
   | SubscriptionProvider
@@ -132,6 +151,7 @@ export type BadgeProvider =
   | 'minimax'
   | 'minimax-cn'
   | 'ollama-cloud'
+  | 'cursor'
 
 const PROVIDER_NAMES: Record<BadgeProvider, string> = {
   codex: 'Codex',
@@ -144,6 +164,7 @@ const PROVIDER_NAMES: Record<BadgeProvider, string> = {
   minimax: 'MiniMax',
   'minimax-cn': 'MiniMax CN',
   'ollama-cloud': 'Ollama Cloud',
+  cursor: 'Cursor',
 }
 
 export interface UsageRosterEntry {
@@ -208,7 +229,12 @@ export async function loadBadgeRoster(rpc: ConnectionHandle['rpc']): Promise<{
     }>(rpc, 'status', {}),
     callSubscriptionsAuth<
       Record<
-        'opencode-go' | 'kimi-code' | 'minimax' | 'minimax-cn' | 'ollama-cloud',
+        | 'opencode-go'
+        | 'kimi-code'
+        | 'minimax'
+        | 'minimax-cn'
+        | 'ollama-cloud'
+        | 'cursor',
         { configured: boolean }
       >
     >(rpc, 'externalStatus', {}),
@@ -238,6 +264,7 @@ export async function loadBadgeRoster(rpc: ConnectionHandle['rpc']): Promise<{
       ['minimax', 'minimax'],
       ['minimax-cn', 'minimax-cn'],
       ['ollama-cloud', 'ollama-cloud'],
+      ['cursor', 'cursor'],
     ] as const) {
       refreshed.add(provider)
       if (external.value[source]?.configured)
@@ -259,7 +286,8 @@ export async function usageOf(
     provider === 'kimi-coding' ||
     provider === 'minimax' ||
     provider === 'minimax-cn' ||
-    provider === 'ollama-cloud'
+    provider === 'ollama-cloud' ||
+    provider === 'cursor'
   ) {
     return callSubscriptionsAuth(rpc, 'externalUsage', {
       source: provider === 'kimi-coding' ? 'kimi-code' : provider,
@@ -834,6 +862,21 @@ export function SubscriptionUsageBadge({
       : badgeSelection?.model
   const expanded = expandedDisplays(displays, dialogProvider)
   const title = translate('usageBadgeTitle')
+  // The bar always describes the selected model's account: an account-scoped
+  // model id names one, and an ordinary id follows the default account. Only
+  // the bar is visible; the numbers live in the native tooltip and the dialog.
+  const pillDisplay = collapsed[0]!
+  const pillAccount = pillAccountFor(pillDisplay, pillModel)
+  const pillWindow = pillAccount.windows[0]
+  const pillTooltip =
+    pillWindow === undefined
+      ? title
+      : `${pillDisplay.name} · ${windowTooltip(
+          pillWindow,
+          translate,
+          quotaMode,
+          pillAccount.stale === true,
+        )}`
 
   const toggle = (): void => {
     const next = !open
@@ -852,7 +895,7 @@ export function SubscriptionUsageBadge({
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-label={`${title} · ${label}`}
-        title={title}
+        title={pillTooltip}
         onMouseEnter={() => {
           setHover(true)
         }}
@@ -862,7 +905,28 @@ export function SubscriptionUsageBadge({
         onClick={toggle}
       >
         <UsageBadgeIcon />
-        <span style={styles.label}>{label}</span>
+        <span
+          style={{
+            ...styles.label,
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 6,
+          }}
+        >
+          {pillWindow === undefined ? (
+            label
+          ) : (
+            <>
+              {pillDisplay.name}
+              <UsageBar
+                window={pillWindow}
+                t={translate}
+                observedAt={pillAccount.observedAt}
+                stale={pillAccount.stale === true}
+              />
+            </>
+          )}
+        </span>
       </button>
       {open &&
         createPortal(

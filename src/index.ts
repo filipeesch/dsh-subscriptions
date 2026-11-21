@@ -97,6 +97,19 @@ import {
 } from './providers/registration.js'
 import { ImageAccountPool } from './providers/image-pool.js'
 import { assembleRpc } from './rpc/registration.js'
+import {
+  createCredentialResolver,
+  registerKeyRoute,
+} from './providers/key-route.js'
+import { CursorAdapter, CURSOR_ROUTE } from './providers/cursor/adapter.js'
+import {
+  DEFAULT_CURSOR_API_KEY_REF,
+  DEFAULT_CURSOR_CONTEXT,
+} from './providers/cursor/models.js'
+import { createCursorGateway } from './providers/cursor/sdk.js'
+import type { CursorImageRef } from './providers/cursor/transcript.js'
+import type { Image } from './providers/cursor/prompt.js'
+import { CursorSettingsStore } from './providers/cursor-settings.js'
 import type { UsageFetchers } from './rpc/registration.js'
 import { registerWithAlias } from './tools/registration.js'
 import { buildAccountPools, poolKey } from './providers/pool-family.js'
@@ -239,6 +252,18 @@ export interface Config {
     /** Extra picker entries with heterogeneous fallbacks, listed under the first member's provider. */
     tiers?: Record<string, PoolMemberRef[]>
   }
+  /**
+   * Cursor key-based route (no OAuth session): models and subscription quota
+   * through the account's own API key.
+   */
+  cursor?: {
+    /** Credential reference naming the Cursor API key (default CURSOR_API_KEY). */
+    apiKeyRef?: string
+    /** Context tier preference: `max` (default) or an offered tier such as `300k`. */
+    context?: string
+    /** Working directory for Cursor agents; default is the session's directory. */
+    cwd?: string
+  }
 }
 
 const providerIdSchema = z.union([
@@ -290,6 +315,11 @@ export const Config: z<Config> = z.object({
     baseURL: z.string(),
     userAgent: z.string(),
     onboard: z.boolean().default(true),
+  }),
+  cursor: z.object({
+    apiKeyRef: z.string().default(DEFAULT_CURSOR_API_KEY_REF),
+    context: z.string().default(DEFAULT_CURSOR_CONTEXT),
+    cwd: z.string(),
   }),
   ollama: z.object({
     apiKeyRef: z.string().default(DEFAULT_OLLAMA_API_KEY_REF),
@@ -919,6 +949,60 @@ export class SubscriptionsAuthController implements AuthController {
 export { presentedVersion } from './rpc/registration.js'
 export type { UsageFetchers } from './rpc/registration.js'
 
+/**
+ * Resolve the working directory for one Cursor session: the configured
+ * override, then the session's own directory when the host exposes it, then
+ * the process directory. Both host services are optional on minimal
+ * compositions.
+ */
+function cursorWorkingDirectory(
+  ctx: Context,
+  sessionId: string | undefined,
+  override: string | undefined,
+): string {
+  const configured = override?.trim()
+  if (configured) return configured
+  try {
+    const services = ctx as unknown as { get(name: string): unknown }
+    const sessions = services.get('sessions') as
+      { get?(id: string): unknown } | undefined
+    const session =
+      sessionId === undefined ? undefined : sessions?.get?.(sessionId)
+    if (session !== undefined) {
+      const directories = services.get('workingDirectory') as
+        { get?(session: unknown): unknown } | undefined
+      const directory = directories?.get?.(session)
+      if (typeof directory === 'string' && directory) return directory
+    }
+  } catch {
+    /* the working directory service is optional */
+  }
+  return process.cwd()
+}
+
+/**
+ * Read one image attachment for Cursor. An unreadable image returns nothing and
+ * the transcript carries a text note in its place, so one bad attachment never
+ * fails the whole message.
+ */
+function cursorImageReader(
+  ctx: Context,
+): (ref: CursorImageRef, signal?: AbortSignal) => Promise<Image | undefined> {
+  return async (ref, signal) => {
+    const attachments = ctx.get('attachments') as AttachmentStore | undefined
+    if (!attachments) return undefined
+    try {
+      const stored = await attachments.readImage(ref, signal)
+      return {
+        data: Buffer.from(stored.data).toString('base64'),
+        mimeType: stored.ref.mediaType,
+      }
+    } catch {
+      return undefined
+    }
+  }
+}
+
 export function apply(ctx: Context, config: Config): void {
   // Outbound requests (catalog discovery, the npm version lookup, token
   // refresh) must survive links where one TCP handshake exceeds Node's 250ms
@@ -1305,6 +1389,37 @@ export function apply(ctx: Context, config: Config): void {
       )
   }
 
+  // Cursor is a key-based route: it authenticates with a DSH credential and
+  // stays outside the OAuth account machinery, like the Ollama Cloud route.
+  const cursorSettings = new CursorSettingsStore(undefined, (message) => {
+    ctx.logger.warn(`${name}: ${message}`)
+  })
+  const cursorApiKeyRef = (): string =>
+    config.cursor?.apiKeyRef ?? DEFAULT_CURSOR_API_KEY_REF
+  const cursorContext = (): string =>
+    config.cursor?.context ?? DEFAULT_CURSOR_CONTEXT
+  let cursorAdapter: CursorAdapter | undefined
+  ctx.inject(['credentials'], (credentialsCtx) => {
+    const resolveCredential = createCredentialResolver(credentialsCtx)
+    const adapter = new CursorAdapter({
+      gateway: createCursorGateway(),
+      apiKey: async () => (await resolveCredential(cursorApiKeyRef()))?.value,
+      cwd: (sessionId) =>
+        cursorWorkingDirectory(ctx, sessionId, config.cursor?.cwd),
+      contextPreference: cursorContext,
+      readImage: cursorImageReader(ctx),
+      onWarn: (message) => ctx.logger.warn(`${name}: ${message}`),
+    })
+    cursorAdapter = adapter
+    registerKeyRoute(credentialsCtx, CURSOR_ROUTE, adapter)
+  })
+  ctx.effect(
+    () => () => {
+      cursorAdapter?.dispose()
+    },
+    'dsh-subscriptions: cursor sessions',
+  )
+
   assembleRpc({
     ctx,
     config,
@@ -1341,6 +1456,16 @@ export function apply(ctx: Context, config: Config): void {
     ollamaWebEnabled,
     ollamaModelsOverridden,
     ollamaCatalog,
+    cursorSettings,
+    cursorApiKeyRef,
+    cursorContext,
+    cursorModelCount: async () => {
+      try {
+        return (await ctx.llm.listModels(CURSOR_ROUTE)).length
+      } catch {
+        return undefined
+      }
+    },
   })
 
   // Proactively keep keychain-bound Claude accounts synced with Claude Code's

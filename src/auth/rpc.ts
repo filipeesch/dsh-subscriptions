@@ -48,6 +48,8 @@ export const SUBSCRIPTIONS_AUTH_ENDPOINTS = [
   'ollamaSettings',
   'ollamaSetSettings',
   'ollamaModels',
+  'cursorSettings',
+  'cursorSetCeiling',
   'image',
   'video',
   'prepareReset',
@@ -322,6 +324,27 @@ export interface OllamaRpcController {
     input: { apiKey?: string; baseURL?: string },
     signal: AbortSignal,
   ): Promise<{ models: OllamaCloudCandidate[] }>
+}
+
+/** Cursor route settings the card reads and writes. */
+export interface CursorRpcController {
+  /** Stored settings plus the live state the card renders. */
+  settings(): Promise<CursorSettingsView>
+  /** Save the monthly ceiling; `undefined` clears it. */
+  setCeiling(ceilingUSD: number | undefined): Promise<void>
+}
+
+/** One Cursor card snapshot. */
+export interface CursorSettingsView {
+  provider: 'cursor'
+  /** Credential reference that holds the API key. */
+  keyRef: string
+  /** Context tier preference; `max` means the largest offered. */
+  context: string
+  /** Monthly ceiling in US dollars, when one is stored. */
+  ceilingUSD?: number
+  /** Models the route currently advertises; absent when the catalog failed. */
+  models?: number
 }
 
 /**
@@ -638,6 +661,7 @@ async function dispatch(
   providerSettings?: ProviderSettingsController,
   externalUsage?: ExternalUsageRpcController,
   ollama?: OllamaRpcController,
+  cursor?: CursorRpcController,
 ): Promise<RpcResult<unknown>> {
   switch (endpoint) {
     case 'providerSettings':
@@ -777,6 +801,22 @@ async function dispatch(
         ),
       )
     }
+    case 'cursorSettings':
+      if (!cursor) throw new BadRequest('Cursor settings are unavailable')
+      return ok(await cursor.settings())
+    case 'cursorSetCeiling': {
+      if (!cursor) throw new BadRequest('Cursor settings are unavailable')
+      const raw = (payload as Record<string, unknown> | null)?.ceilingUSD
+      if (raw !== null && raw !== undefined) {
+        if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) {
+          throw new BadRequest('ceilingUSD must be a positive number or null')
+        }
+      }
+      await cursor.setCeiling(
+        raw === null || raw === undefined ? undefined : raw,
+      )
+      return ok({ ok: true })
+    }
     case 'prepareReset':
       if (!controller.prepareReset)
         throw new BadRequest('Reset redemption unavailable')
@@ -850,6 +890,7 @@ export function registerAuthRpc(
   providerSettings: ProviderSettingsController | undefined = undefined,
   externalUsage: ExternalUsageRpcController | undefined = undefined,
   ollama: OllamaRpcController | undefined = undefined,
+  cursor: CursorRpcController | undefined = undefined,
 ): void {
   // `connection` is not in this plugin's inject list (headless compositions
   // lack it), so its startup order is unconstrained: defer registration until
@@ -877,6 +918,7 @@ export function registerAuthRpc(
           providerSettings,
           externalUsage,
           ollama,
+          cursor,
         )
       } catch (error) {
         return failure(error)

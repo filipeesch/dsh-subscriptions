@@ -19,6 +19,8 @@ import { OAuthFlowManager } from '../auth/oauth-flow.js'
 import { DeviceFlowManager } from '../auth/device-flow.js'
 import { ResetRedemption } from '../providers/reset-redemption.js'
 import { BadRequest, registerAuthRpc } from '../auth/rpc.js'
+import type { CursorRpcController } from '../auth/rpc.js'
+import type { CursorSettingsStore } from '../providers/cursor-settings.js'
 import {
   createCredentialResolver,
   registerKeyRoute,
@@ -154,6 +156,11 @@ export interface RpcDeps {
     session: StoredSession,
   ) => string | undefined
   SubscriptionsAuthController: typeof AuthControllerClass
+  cursorSettings: CursorSettingsStore
+  cursorApiKeyRef: () => string
+  cursorContext: () => string
+  /** Models the route advertises now; absent when the catalog is unavailable. */
+  cursorModelCount: () => Promise<number | undefined>
   resolveAttachments: () => AttachmentStore | undefined
   usageFetchers: UsageFetchers
   selectedSpeed: (sessionId: string, model?: string) => SpeedTier
@@ -193,6 +200,10 @@ export function assembleRpc(deps: RpcDeps): void {
     authChanged,
     accountOf,
     SubscriptionsAuthController,
+    cursorSettings,
+    cursorApiKeyRef,
+    cursorContext,
+    cursorModelCount,
     resolveAttachments,
     usageFetchers,
     selectedSpeed,
@@ -404,8 +415,9 @@ export function assembleRpc(deps: RpcDeps): void {
     // A custom ollama ref must reach usage status too, or chat and the
     // quota card would read different credentials. Both values are live so a
     // Settings save moves chat and usage to the same target.
-    { 'ollama-cloud': ollamaApiKeyRef },
+    { 'ollama-cloud': ollamaApiKeyRef, cursor: cursorApiKeyRef },
     ollamaBaseURL,
+    { ceilingUSD: () => cursorSettings.ceilingUSD() },
   )
   const resetRedemption = new ResetRedemption(
     async (account, signal) => {
@@ -429,6 +441,26 @@ export function assembleRpc(deps: RpcDeps): void {
     // outcome, and an invalidation actually clears that account's cache.
     async (account) => resolveAccountKey('codex', account),
   )
+  const cursor: CursorRpcController = {
+    async settings() {
+      const stored = cursorSettings.get()
+      const models = await cursorModelCount().catch(() => undefined)
+      return {
+        provider: 'cursor',
+        keyRef: cursorApiKeyRef(),
+        context: cursorContext(),
+        ...(stored.monthlyCeilingUSD === undefined
+          ? {}
+          : { ceilingUSD: stored.monthlyCeilingUSD }),
+        ...(models === undefined ? {} : { models }),
+      }
+    },
+    async setCeiling(ceilingUSD) {
+      await cursorSettings.set(
+        ceilingUSD === undefined ? {} : { monthlyCeilingUSD: ceilingUSD },
+      )
+    },
+  }
   registerAuthRpc(
     ctx,
     new SubscriptionsAuthController(
@@ -691,5 +723,6 @@ export function assembleRpc(deps: RpcDeps): void {
         }
       },
     },
+    cursor,
   )
 }

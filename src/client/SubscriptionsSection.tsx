@@ -21,6 +21,7 @@ import { ProviderAccountManager } from './ProviderAccountManager.js'
 import { providerSettingsCss } from './provider-settings-styles.js'
 import { ExternalUsageCards } from './ExternalUsageCards.js'
 import { OllamaCard } from './OllamaCard.js'
+import { CursorCard } from './CursorCard.js'
 import { UsageMeter } from './UsageMeter.js'
 import { quotaText, useQuotaClock } from './quota-display.js'
 import {
@@ -95,6 +96,14 @@ export interface UsageWindow {
   fixedWindow?: boolean
   /** Display-only assumed start; the marker rides it, never pace. */
   displayStartsAt?: number
+  /** Amount used in the currency's minor unit, when the provider reports money. */
+  usedAmount?: number
+  /** Ceiling for this window in the same minor unit. */
+  limitAmount?: number
+  /** Amount still available, when the provider reports it. */
+  remainingAmount?: number
+  /** ISO 4217 currency of the amounts. */
+  currency?: string
 }
 
 /** `usage` endpoint value: the node half owns this shape. */
@@ -1170,6 +1179,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
           </div>
         )
       })}
+      <CursorCard rpc={rpc} t={t} />
       <OllamaCard rpc={rpc} t={t} />
       <ExternalUsageCards rpc={rpc} t={t} />
       {managedProvider && (

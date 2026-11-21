@@ -16,26 +16,23 @@ import type { PoolAdapter } from './pool.js'
 import { streamAccountWithReplay } from './replay.js'
 
 /** Reserved namespace, recognized even when malformed or no longer enabled. */
-export const ACCOUNT_MODEL_PREFIX = '~account:'
-export function accountModelId(account: string, model: string): string {
-  return `${ACCOUNT_MODEL_PREFIX}${encodeURIComponent(account)}:${encodeURIComponent(model)}`
-}
+import {
+  ACCOUNT_MODEL_PREFIX,
+  accountModelId,
+  readAccountModelId,
+} from './account-model.js'
+
+export { ACCOUNT_MODEL_PREFIX, accountModelId } from './account-model.js'
+
 export function parseAccountModelId(
   id: string,
 ): { account: string; model: string } | undefined {
-  if (!id.startsWith(ACCOUNT_MODEL_PREFIX)) return undefined
-  const parts = id.slice(ACCOUNT_MODEL_PREFIX.length).split(':')
-  try {
-    if (parts.length !== 2) throw new Error()
-    const account = decodeURIComponent(parts[0])
-    const model = decodeURIComponent(parts[1])
-    if (!account || !model || accountModelId(account, model) !== id)
-      throw new Error()
-    return { account, model }
-  } catch {
-    throw new LlmError('Invalid independent account model id', 'NO_ADAPTER')
-  }
+  const parsed = readAccountModelId(id)
+  if (parsed !== undefined) return parsed
+  if (!id.startsWith('~account:')) return undefined
+  throw new LlmError('Invalid independent account model id', 'NO_ADAPTER')
 }
+
 export function accountAllowsPool(
   preferences: AccountPreferences | undefined,
   model: string,

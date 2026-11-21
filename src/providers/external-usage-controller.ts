@@ -1,4 +1,5 @@
 import { fetchMiniMaxUsage } from './minimax-usage.js'
+import { fetchCursorUsage } from './cursor/quota.js'
 import {
   fetchKimiCodeUsage,
   fetchOllamaUsage,
@@ -12,7 +13,12 @@ import type { ProviderUsage } from './common.js'
 
 /** Usage-only sources whose model routes are supplied by the DSH base install. */
 export type ExternalUsageSource =
-  'opencode-go' | 'kimi-code' | 'minimax' | 'minimax-cn' | 'ollama-cloud'
+  | 'opencode-go'
+  | 'kimi-code'
+  | 'minimax'
+  | 'minimax-cn'
+  | 'ollama-cloud'
+  | 'cursor'
 
 export const EXTERNAL_USAGE_SOURCES: readonly ExternalUsageSource[] = [
   'opencode-go',
@@ -20,6 +26,7 @@ export const EXTERNAL_USAGE_SOURCES: readonly ExternalUsageSource[] = [
   'minimax',
   'minimax-cn',
   'ollama-cloud',
+  'cursor',
 ]
 
 export interface ExternalUsageStatus {
@@ -47,6 +54,7 @@ const DEFAULT_REFS: Record<ExternalUsageSource, string> = {
   minimax: 'MINIMAX_API_KEY',
   'minimax-cn': 'MINIMAX_CN_API_KEY',
   'ollama-cloud': DEFAULT_OLLAMA_API_KEY_REF,
+  cursor: 'CURSOR_API_KEY',
 }
 
 export class ExternalUsageController {
@@ -58,6 +66,11 @@ export class ExternalUsageController {
     private readonly http: typeof fetch = fetch,
     refs: Partial<Record<ExternalUsageSource, LiveValue>> = {},
     ollamaBaseURL: LiveValue = DEFAULT_OLLAMA_BASE_URL,
+    private readonly cursor: {
+      /** Monthly ceiling in dollars, used only when Cursor reports no limit. */
+      ceilingUSD?: () => number | undefined
+      endpoint?: () => string | undefined
+    } = {},
   ) {
     this.refs = { ...DEFAULT_REFS, ...refs }
     this.ollamaBaseURL = ollamaBaseURL
@@ -100,6 +113,16 @@ export class ExternalUsageController {
       )
     if (source === 'ollama-cloud')
       return fetchOllamaUsage(credential.value, ollamaBase, this.http, signal)
+    if (source === 'cursor') {
+      const ceiling = this.cursor.ceilingUSD?.()
+      const endpoint = this.cursor.endpoint?.()
+      return fetchCursorUsage(credential.value, {
+        http: this.http,
+        ...(signal === undefined ? {} : { signal }),
+        ...(ceiling === undefined ? {} : { ceilingUSD: ceiling }),
+        ...(endpoint === undefined ? {} : { endpoint }),
+      })
+    }
     return source === 'opencode-go'
       ? fetchOpenCodeGoUsage(credential.value, this.http, signal)
       : fetchKimiCodeUsage(credential.value, this.http, signal)

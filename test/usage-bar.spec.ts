@@ -196,6 +196,7 @@ test('every signed-in usage account shows up in the bar', async (t) => {
     'claude',
     'codex',
     'copilot',
+    'cursor',
     'grok',
     'kimi-coding',
     'minimax',

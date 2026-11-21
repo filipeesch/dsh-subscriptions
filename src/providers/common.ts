@@ -671,6 +671,18 @@ export interface UsageWindow {
    * with `startsAt`.
    */
   displayStartsAt?: number
+  /**
+   * Amount already spent in this window, in the currency's minor unit
+   * (cents for USD), when the provider reports money instead of, or
+   * beside, a percentage. `usedPercent` stays the color and pace input.
+   */
+  usedAmount?: number
+  /** Ceiling the provider reports for this window, in the same minor unit. */
+  limitAmount?: number
+  /** Amount still available, when the provider reports it. */
+  remainingAmount?: number
+  /** ISO 4217 currency of the amounts; absent when the provider reports none. */
+  currency?: string
 }
 
 /** One banked reset credit (Codex), or one grant containing resets (Claude). */

@@ -87,6 +87,7 @@ test('usage-only RPC reports key presence and rejects unknown sources without ex
       minimax: { configured: false },
       'minimax-cn': { configured: false },
       'ollama-cloud': { configured: false },
+      cursor: { configured: false },
     },
   })
   assert.ok(!JSON.stringify(status).includes('go-secret'))
@@ -116,7 +117,6 @@ test('removed Cursor and proxy RPC endpoints have no routes', async () => {
     'cursorLogout',
     'cursorUsage',
     'cursorModels',
-    'cursorSettings',
     'cursorSetSettings',
     'proxyGet',
     'proxySet',
