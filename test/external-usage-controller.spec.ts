@@ -248,3 +248,68 @@ test('usage snapshots ref and host before the first await', async () => {
     { url: 'http://host-b/api/balance', auth: 'Bearer fast-key' },
   )
 })
+
+test('one successful read serves every caller until forced or invalidated', async () => {
+  let calls = 0
+  const http = (async () => {
+    calls += 1
+    return Response.json({
+      usages: {
+        limit_7d: { usedRatio: 0.25, resetAt: '2026-10-01T00:00:00Z' },
+      },
+    })
+  }) as typeof fetch
+  const controller = new ExternalUsageController(
+    async () => ({ value: 'kimi-secret' }),
+    http,
+  )
+  const first = await controller.usage('kimi-code')
+  const second = await controller.usage('kimi-code')
+  assert.equal(calls, 1)
+  assert.deepEqual(second, first)
+  await controller.usage('kimi-code', undefined, true)
+  assert.equal(calls, 2)
+  controller.invalidate('kimi-code')
+  await controller.usage('kimi-code')
+  assert.equal(calls, 3)
+})
+
+test('a failed refresh keeps the last good reading and marks it stale', async () => {
+  let calls = 0
+  const http = (async () => {
+    calls += 1
+    if (calls > 1) throw new Error('boom')
+    return Response.json({
+      usages: {
+        limit_7d: { usedRatio: 0.25, resetAt: '2026-10-01T00:00:00Z' },
+      },
+    })
+  }) as typeof fetch
+  const controller = new ExternalUsageController(
+    async () => ({ value: 'kimi-secret' }),
+    http,
+  )
+  const good = await controller.usage('kimi-code')
+  const stale = await controller.usage('kimi-code', undefined, true)
+  assert.deepEqual(stale.windows, good.windows)
+  assert.equal(stale.stale, true)
+  assert.equal(typeof stale.observedAt, 'number')
+})
+
+test('a changed credential reads again instead of serving the old account', async () => {
+  let value = 'kimi-one'
+  const keys: string[] = []
+  const http = (async (_url: string | URL | Request, init?: RequestInit) => {
+    keys.push((init?.headers as Record<string, string>).authorization ?? 'none')
+    return Response.json({
+      usages: {
+        limit_7d: { usedRatio: 0.25, resetAt: '2026-10-01T00:00:00Z' },
+      },
+    })
+  }) as typeof fetch
+  const controller = new ExternalUsageController(async () => ({ value }), http)
+  await controller.usage('kimi-code')
+  value = 'kimi-two'
+  await controller.usage('kimi-code')
+  assert.deepEqual(keys, ['Bearer kimi-one', 'Bearer kimi-two'])
+})

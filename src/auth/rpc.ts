@@ -14,6 +14,7 @@ import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { PROVIDER_IDS, type ProviderId } from './store.js'
 import type { ProviderUsage } from '../providers/common.js'
+import { MAX_CURSOR_CEILING_USD } from '../providers/cursor-settings.js'
 import type { CliVersion } from '../providers/npm-cli-version.js'
 import { EXTERNAL_USAGE_SOURCES } from '../providers/external-usage-controller.js'
 import type {
@@ -261,7 +262,10 @@ export interface ExternalUsageRpcController {
   usage(
     source: ExternalUsageSource,
     signal: AbortSignal,
+    force?: boolean,
   ): Promise<ProviderUsage>
+  /** Drop the cached reading of one source, or all of them. */
+  invalidate(source?: ExternalUsageSource): void
 }
 
 /** One model in the Ollama Cloud picker catalog, with its capability flags. */
@@ -328,8 +332,8 @@ export interface OllamaRpcController {
 
 /** Cursor route settings the card reads and writes. */
 export interface CursorRpcController {
-  /** Stored settings plus the live state the card renders. */
-  settings(): Promise<CursorSettingsView>
+  /** Stored settings plus the live state; refresh may read the catalog. */
+  settings(refresh?: boolean): Promise<CursorSettingsView>
   /** Save the monthly ceiling; `undefined` clears it. */
   setCeiling(ceilingUSD: number | undefined): Promise<void>
 }
@@ -763,7 +767,11 @@ async function dispatch(
         )
       }
       return ok(
-        await externalUsage.usage(source as ExternalUsageSource, signal),
+        await externalUsage.usage(
+          source as ExternalUsageSource,
+          signal,
+          (payload as Record<string, unknown>).force === true,
+        ),
       )
     }
     case 'ollamaSettings':
@@ -806,15 +814,30 @@ async function dispatch(
       return ok(await cursor.settings())
     case 'cursorSetCeiling': {
       if (!cursor) throw new BadRequest('Cursor settings are unavailable')
-      const raw = (payload as Record<string, unknown> | null)?.ceilingUSD
-      if (raw !== null && raw !== undefined) {
-        if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) {
-          throw new BadRequest('ceilingUSD must be a positive number or null')
+      const body = payload as Record<string, unknown> | null
+      if (
+        body === null ||
+        typeof body !== 'object' ||
+        !('ceilingUSD' in body)
+      ) {
+        throw new BadRequest(
+          'cursorSetCeiling needs an explicit ceilingUSD, null to clear',
+        )
+      }
+      const raw = body.ceilingUSD
+      if (raw !== null) {
+        if (
+          typeof raw !== 'number' ||
+          !Number.isFinite(raw) ||
+          raw <= 0 ||
+          raw > MAX_CURSOR_CEILING_USD
+        ) {
+          throw new BadRequest(
+            `ceilingUSD must be a positive number up to ${MAX_CURSOR_CEILING_USD}, or null`,
+          )
         }
       }
-      await cursor.setCeiling(
-        raw === null || raw === undefined ? undefined : raw,
-      )
+      await cursor.setCeiling(raw === null ? undefined : raw)
       return ok({ ok: true })
     }
     case 'prepareReset':

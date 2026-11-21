@@ -38,6 +38,7 @@ import {
   imagesOf,
   incrementText,
   currentTurnImages,
+  earlierImagesNote,
   renderTranscript,
   systemPromptAddition,
   textOf,
@@ -49,7 +50,6 @@ import { ERROR_CODES, Reply } from './reply.js'
 import type { CursorTranscript } from './transcript.js'
 import { buckets, runUsage, type CursorUsage } from './usage.js'
 
-const SLOTS_PER_KEY = 3
 const IDLE_CLOSE_MS = 20 * 60_000
 const PENDING_CLOSE_MS = 60 * 60_000
 const HANDOFF_DEBOUNCE_MS = 50
@@ -210,7 +210,10 @@ export class CursorSession {
     })
     void (async () => {
       try {
-        for await (const message of run.stream()) this.events.push(message)
+        for await (const message of run.stream()) {
+          this.events.push(message)
+          this.wake()
+        }
       } catch (error) {
         this.runError = error
       }
@@ -350,6 +353,8 @@ export interface CursorRuntimeOptions {
   cwd: (sessionId: string | undefined) => string
   /** Context tier preference (`max` by default). */
   contextPreference: () => string
+  /** Credential reference named in a missing-key diagnostic. */
+  keyRef: string
   /** Diagnostics sink for runs that fail in the background. */
   onWarn?: (message: string) => void
 }
@@ -399,16 +404,30 @@ export class CursorRuntime {
   /** Run one DSH model call on a persistent Cursor session. */
   async runTurn(options: CursorTurnOptions): Promise<void> {
     const { reply, transcript, signal } = options
-    const modelId = resolveModelId(options.model.id)
-    const apiKey = await this.options.apiKey()
+    if (signal?.aborted) {
+      reply.finish('aborted')
+      return
+    }
+    let apiKey: string | undefined
+    try {
+      apiKey = await this.options.apiKey()
+    } catch (error) {
+      reply.finish('error', safeError(error, 'resolve the Cursor API key'))
+      return
+    }
     if (!apiKey) {
       reply.finish(
         'error',
-        'No Cursor API key. Store CURSOR_API_KEY in DSH credentials.',
+        `No Cursor API key. Store ${this.options.keyRef} in DSH credentials.`,
         ERROR_CODES.missingKey,
       )
       return
     }
+    if (signal?.aborted) {
+      reply.finish('aborted')
+      return
+    }
+    const modelId = resolveModelId(options.model.id)
 
     let params = modelParams(
       options.model,
@@ -451,10 +470,16 @@ export class CursorRuntime {
     }
     const sendFirst = async (session: CursorSession) => {
       session.sentFirst = true
+      const text = [
+        earlierImagesNote(transcript.messages as never),
+        renderTranscript(transcript.systemPrompt, transcript.messages),
+      ]
+        .filter(Boolean)
+        .join('\n\n')
       session.startRun(
         await send(
           session,
-          renderTranscript(transcript.systemPrompt, transcript.messages),
+          text,
           currentTurnImages(transcript.messages as never),
           {},
         ),
@@ -484,6 +509,7 @@ export class CursorRuntime {
 
     let freshRun = false
     let emitted = false
+    let tierRetried = false
     const onAbort = () => session?.wake()
     signal?.addEventListener?.('abort', onAbort, { once: true })
     try {
@@ -497,7 +523,30 @@ export class CursorRuntime {
           options.sessionId,
         )
         session.busy = true
-        await sendFirst(session)
+        try {
+          await sendFirst(session)
+        } catch (error) {
+          // Cursor can reject the tier while creating or sending, before any
+          // run exists; that is the same retry as a rejected run.
+          const message = error instanceof Error ? error.message : String(error)
+          if (!isRejectedParams(message)) throw error
+          this.drop(session)
+          const lower = tierRetried
+            ? undefined
+            : smallerContext(options.model, params)
+          if (!lower) throw error
+          tierRetried = true
+          session = await this.open(
+            sessionKey,
+            modelId,
+            lower,
+            transcript,
+            apiKey,
+            options.sessionId,
+          )
+          session.busy = true
+          await sendFirst(session)
+        }
         freshRun = true
       } else if (plan.kind === 'send') {
         session.busy = true
@@ -639,16 +688,14 @@ export class CursorRuntime {
               : undefined)
         const lower =
           freshRun &&
+          !tierRetried &&
           !emitted &&
           session.modelCalls === 1 &&
           isRejectedParams(error)
             ? smallerContext(options.model, session.params)
             : undefined
         if (lower) {
-          this.workingContext.set(
-            modelId,
-            lower.find((param) => param.id === 'context')!.value,
-          )
+          tierRetried = true
           this.drop(session)
           session = await this.open(
             sessionKey,
@@ -666,14 +713,17 @@ export class CursorRuntime {
           continue
         }
         this.drop(session)
-        reply.finish(status === 'cancelled' ? 'aborted' : 'error', error)
+        reply.finish(
+          status === 'cancelled' ? 'aborted' : 'error',
+          error === undefined ? undefined : safeError(error, 'run the model'),
+        )
         return
       }
     } catch (error) {
       if (session) this.drop(session)
       reply.finish(
         signal?.aborted ? 'aborted' : 'error',
-        error instanceof Error ? error.message : String(error),
+        signal?.aborted ? undefined : safeError(error, 'run the model'),
       )
     } finally {
       signal?.removeEventListener?.('abort', onAbort)
@@ -692,6 +742,7 @@ export class CursorRuntime {
 
   // Discarded state on dispose only; kept for one process in tests.
   private async runPrewarm(apiKey: string, modelId: string): Promise<void> {
+    if (this.disposed) return
     try {
       const cwd = this.options.cwd(undefined)
       const agent = await this.options.gateway.createAgent({
@@ -704,6 +755,7 @@ export class CursorRuntime {
       await Promise.resolve(run.cancel?.()).catch(() => {})
       await Promise.resolve(run.wait()).catch(() => {})
       settle(() => agent.close?.())
+      if (this.disposed) return
       const id = agent.agentId
       if (id) {
         void this.options.gateway
@@ -739,12 +791,13 @@ export class CursorRuntime {
   }
 
   private store(session: CursorSession): void {
-    const slots = (this.sessions.get(session.key) ?? []).filter(
-      (entry) => entry.signature !== session.signature,
-    )
-    slots.unshift(session)
-    while (slots.length > SLOTS_PER_KEY) slots.pop()?.close()
-    this.sessions.set(session.key, slots)
+    // One live agent per conversation: a model or parameter change replaces
+    // the previous agent instead of parking it for a later switch back, whose
+    // transcript would already have moved on.
+    for (const entry of this.sessions.get(session.key) ?? []) {
+      if (entry !== session) entry.close()
+    }
+    this.sessions.set(session.key, [session])
   }
 
   private async open(
@@ -760,7 +813,7 @@ export class CursorRuntime {
     session.onIdle = (idle) => this.drop(idle)
     session.systemPrompt = transcript.systemPrompt
     const { local } = syncTools(session, transcript.tools)
-    session.agent = await this.options.gateway.createAgent({
+    const agent = await this.options.gateway.createAgent({
       model: { id: modelId, ...(params?.length ? { params } : {}) },
       apiKey,
       // Always "mcp": DSH tools are MCP custom tools, and tools can be added later.
@@ -773,6 +826,11 @@ export class CursorRuntime {
           : { customTools: local.customTools }),
       },
     })
+    if (this.disposed) {
+      settle(() => agent.close?.())
+      throw new Error('Cursor runtime is disposed')
+    }
+    session.agent = agent
     this.store(session)
     return session
   }
@@ -780,6 +838,28 @@ export class CursorRuntime {
   private warn(message: string): void {
     this.options.onWarn?.(message)
   }
+}
+
+/**
+ * Credential-free diagnostics: provider text can echo a key or token, so a
+ * transcript only ever sees a classified sentence.
+ */
+export function safeError(error: unknown, action: string): string {
+  const message = error instanceof Error ? error.message : String(error)
+  if (
+    /401|403|unauthori[sz]ed|forbidden|invalid api key|authentication/i.test(
+      message,
+    )
+  ) {
+    return `Cursor rejected the API key while trying to ${action}.`
+  }
+  if (/invalid parameters for registry model/i.test(message)) {
+    return 'Cursor rejected the selected model parameters.'
+  }
+  if (/ENOTFOUND|ECONNREFUSED|ETIMEDOUT|fetch failed|network/i.test(message)) {
+    return `Cursor could not be reached while trying to ${action}.`
+  }
+  return `Cursor failed while trying to ${action}.`
 }
 
 function signatureOf(

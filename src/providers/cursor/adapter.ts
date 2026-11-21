@@ -18,6 +18,7 @@ import type {
 import { withTimeout, DISCOVERY_TIMEOUT_MS } from '../common.js'
 import {
   CURSOR_ROUTE,
+  DEFAULT_CURSOR_API_KEY_REF,
   DEFAULT_CURSOR_CONTEXT,
   FALLBACK_MODELS,
   contextWindowFor,
@@ -50,6 +51,8 @@ export interface CursorAdapterOptions {
     ref: CursorImageRef,
     signal?: AbortSignal,
   ) => Promise<Image | undefined>
+  /** Credential reference the adapter reads, named in diagnostics. */
+  keyRef?: string
   /** Diagnostics sink for failures that are not the current request's. */
   onWarn?: (message: string) => void
   /** Prewarm the SDK's per-process setup after a live catalog read. */
@@ -71,6 +74,7 @@ export class CursorAdapter extends LlmAdapter {
       cwd: options.cwd,
       contextPreference: () =>
         options.contextPreference?.() ?? DEFAULT_CURSOR_CONTEXT,
+      keyRef: options.keyRef ?? DEFAULT_CURSOR_API_KEY_REF,
       ...(options.onWarn === undefined ? {} : { onWarn: options.onWarn }),
     })
   }
@@ -140,6 +144,13 @@ export class CursorAdapter extends LlmAdapter {
     const transcript = readRequest(options, images)
     const queue = new ChunkQueue()
     const reply = new Reply(queue)
+    // Closing the stream (host abort, iterator teardown) must not leave the
+    // Cursor run or its agent working in the background.
+    const controller = new AbortController()
+    const signal =
+      options.signal === undefined
+        ? controller.signal
+        : AbortSignal.any([options.signal, controller.signal])
     void this.runtime.runTurn({
       model: {
         id: options.model,
@@ -150,7 +161,7 @@ export class CursorAdapter extends LlmAdapter {
       ...(options.reasoningEffort === undefined
         ? {}
         : { reasoning: String(options.reasoningEffort) }),
-      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      signal,
       ...(options.sessionId === undefined
         ? {}
         : { sessionId: String(options.sessionId) }),
@@ -159,7 +170,16 @@ export class CursorAdapter extends LlmAdapter {
     })
     // The turn resolves the key itself so a missing credential finishes the
     // stream with the host's own error code instead of a rejected adapter call.
-    yield* queue
+    try {
+      yield* queue
+    } finally {
+      controller.abort()
+    }
+  }
+
+  /** The catalog size when one is already loaded; never triggers an SDK read. */
+  cachedModelCount(): number | undefined {
+    return this.catalog?.models.length
   }
 
   /** One-shot helper used by tests and diagnostics: the run handle is not exposed. */

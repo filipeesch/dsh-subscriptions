@@ -36,6 +36,7 @@ const {
   usageBadgeIcon,
   groupUsageDisplays,
   loadBadgeRoster,
+  pillAccountFor,
   usageOf,
 } = await import('../src/client/SubscriptionUsageBadge.js')
 css.deregister()
@@ -656,4 +657,32 @@ test('a named Kimi limit is labelled the same on the settings card and in the di
     }),
   )
   for (const label of cardLabels) assert.ok(html.includes(`>${label}<`), label)
+})
+
+test('a scoped account without a reading gets no account, not the default one', () => {
+  const display = {
+    provider: 'claude' as const,
+    name: 'Claude',
+    accounts: [
+      {
+        key: 'default',
+        isDefault: true,
+        windows: [{ kind: 'session' as const, usedPercent: 10 }],
+      },
+      {
+        key: 'second',
+        isDefault: false,
+        windows: [{ kind: 'session' as const, usedPercent: 20 }],
+      },
+    ],
+  }
+  assert.equal(
+    pillAccountFor(display, '~account:second:claude-sonnet-5')?.key,
+    'second',
+  )
+  assert.equal(
+    pillAccountFor(display, '~account:missing:claude-sonnet-5'),
+    undefined,
+  )
+  assert.equal(pillAccountFor(display, 'claude-sonnet-5')?.key, 'default')
 })

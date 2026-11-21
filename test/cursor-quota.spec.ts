@@ -72,7 +72,7 @@ test('an enterprise plan reports spend against its ceiling', async () => {
   assert.equal(window?.limitAmount, 250_000)
   assert.equal(window?.remainingAmount, 196_287)
   assert.equal(window?.currency, 'USD')
-  assert.equal(Math.round(window!.usedPercent * 100) / 100, 21.49)
+  assert.equal(Math.round(window!.usedPercent! * 100) / 100, 21.49)
   assert.equal(window?.resetsAt, Number(CYCLE.billingCycleEnd))
   assert.equal(window?.startsAt, Number(CYCLE.billingCycleStart))
   assert.equal(window?.fixedWindow, true)
@@ -115,7 +115,7 @@ test('a personal plan reports percent buckets', async () => {
   assert.deepEqual(
     usage.windows?.map((window) => [
       window.scope,
-      Math.round(window.usedPercent),
+      Math.round(window.usedPercent ?? -1),
     ]),
     [
       ['Cursor models', 13],
@@ -124,7 +124,8 @@ test('a personal plan reports percent buckets', async () => {
     ],
   )
   assert.equal(usage.windows?.[0]?.limitAmount, 100_000)
-  assert.equal(usage.windows?.[0]?.usedAmount, 13_200)
+  // A percentage of a plan allowance is not a dollar figure.
+  assert.equal(usage.windows?.[0]?.usedAmount, undefined)
 })
 
 test('spend without a limit uses the configured ceiling', async () => {
@@ -148,10 +149,10 @@ test('spend without a limit uses the configured ceiling', async () => {
   assert.equal(window?.limitAmount, 250_000)
   assert.equal(window?.usedAmount, 53_713)
   assert.equal(window?.remainingAmount, 196_287)
-  assert.equal(Math.round(window!.usedPercent), 21)
+  assert.equal(Math.round(window!.usedPercent!), 21)
 })
 
-test('spend without a limit or ceiling reports nothing rather than inventing a share', async () => {
+test('spend without a limit keeps the amount and no share', async () => {
   const { fetch } = fakeFetch([
     exchange(),
     {
@@ -162,7 +163,32 @@ test('spend without a limit or ceiling reports nothing rather than inventing a s
   ])
   const usage = await fetchCursorUsage('crsr_key', { http: fetch })
   assert.equal(usage.supported, true)
-  assert.equal(usage.windows, undefined)
+  const window = usage.windows?.[0]
+  assert.equal(window?.usedAmount, 53_713)
+  assert.equal(window?.currency, 'USD')
+  assert.equal(window?.limitAmount, undefined)
+  assert.equal(window?.usedPercent, undefined)
+  assert.equal(window?.resetsAt, Number(CYCLE.billingCycleEnd))
+})
+
+test('an invalid amount or an unknown shape fails instead of showing a number', async () => {
+  const negative = fakeFetch([
+    exchange(),
+    {
+      ...CYCLE,
+      spendLimitUsage: { overallLimit: 10_000, overallUsed: -1 },
+    },
+    { planInfo: { planName: 'Enterprise' } },
+  ])
+  await assert.rejects(
+    fetchCursorUsage('crsr_key', { http: negative.fetch }),
+    /not recognized/,
+  )
+  const drift = fakeFetch([exchange(), { unexpected: true }, {}])
+  await assert.rejects(
+    fetchCursorUsage('crsr_key', { http: drift.fetch }),
+    /not recognized/,
+  )
 })
 
 test('a rejected key fails with a fixed message and no token echo', async () => {

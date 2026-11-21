@@ -655,7 +655,7 @@ export interface UsageWindow {
   /** Model scope for model-specific windows (e.g. `Opus`), when the provider names one. */
   scope?: string
   /** Percent of the window already consumed (0–100). */
-  usedPercent: number
+  usedPercent?: number
   /** Epoch milliseconds at which the window resets, when the provider discloses it. */
   resetsAt?: number
   /** Epoch milliseconds of the billing/window start, when disclosed. */

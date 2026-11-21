@@ -4,7 +4,8 @@
  * The bar carries no numbers: the fill and its color describe usage, and the
  * numbers live in the native tooltip (and in the full dialog behind a click).
  * A window that reports money states the amount used, the ceiling, and what is
- * left; a percentage window states the used and remaining shares.
+ * left; a percentage window states the used and remaining shares in the order
+ * the preference chooses, each with its own label.
  */
 
 import type {
@@ -12,17 +13,18 @@ import type {
   UsageWindow,
 } from './SubscriptionsSection.js'
 import { formatMoney } from './money-format.js'
-import { quotaPercent } from './quota-display.js'
 import type { QuotaDisplayMode } from './usage-badge-preferences.js'
 import { useQuotaDisplayMode } from './usage-badge-preferences.js'
 import {
   displayStartPercent,
   elapsedPercent,
+  isObservationFresh,
   isUsageFresh,
-  usageBarColor,
   usageColorState,
+  usageStateColor,
   validUsage,
 } from './usage-pace.js'
+import type { UsageColorState } from './usage-pace.js'
 import { useUsageColorPreset } from './usage-color-preferences.js'
 import type { UsageObservation } from './usage-pace.js'
 
@@ -36,6 +38,10 @@ export function hasMoney(window: UsageWindow): boolean {
 /**
  * The hover text for one window: what was used, what is left, and when the
  * window resets when the provider discloses it.
+ *
+ * Money always leads with the amount used, because a spend is not a share.
+ * A percentage window states both shares, each labelled, in the preference's
+ * order; a stale reading says so instead of looking current.
  * @param window - the reported window.
  * @param t - section translate.
  * @param mode - used or remaining preference for the percentage form.
@@ -60,10 +66,17 @@ export function windowTooltip(
       const remaining = formatMoney(window.remainingAmount, window.currency)
       if (remaining) parts.push(t('usageBarRemaining', { value: remaining }))
     }
+  } else if (validUsage(window.usedPercent)) {
+    const used = Math.round(window.usedPercent as number)
+    const remaining = 100 - used
+    const usedText = t('usagePercentUsed', { value: used })
+    const remainingText = t('usagePercentRemaining', { value: remaining })
+    parts.push(
+      mode === 'remaining' ? remainingText : usedText,
+      mode === 'remaining' ? usedText : remainingText,
+    )
   } else {
-    const used = quotaPercent(window.usedPercent, mode)
-    if (used === undefined) parts.push(t('usageMeterInvalid'))
-    else parts.push(t('usageMeterUsed', { used, remaining: 100 - used }))
+    parts.push(t('usageMeterInvalid'))
   }
   if (window.resetsAt !== undefined) {
     parts.push(
@@ -74,6 +87,9 @@ export function windowTooltip(
   return parts.join(' · ')
 }
 
+/** Last measured color per footer account, kept while a reading is stale. */
+const LAST_STATE = new Map<string, UsageColorState>()
+
 /** Width of the bar in the footer; the fill scales inside it. */
 const BAR_WIDTH = 40
 const BAR_HEIGHT = 5
@@ -81,10 +97,13 @@ const BAR_HEIGHT = 5
 /**
  * One compact quota bar.
  *
+ * A window with no reported share (money without a ceiling) keeps the frame
+ * and draws no fill: the tooltip still states the spend.
  * @param window - the window the bar describes.
  * @param t - section translate.
  * @param observedAt - observation time of the reading, when known.
  * @param stale - the reading failed its last refresh.
+ * @param staleState - the last measured color, kept while the reading is stale.
  * @param width - bar width in pixels; the footer uses the default.
  */
 export function UsageBar({
@@ -92,22 +111,44 @@ export function UsageBar({
   t,
   observedAt,
   stale,
+  staleState,
+  stateKey,
   width = BAR_WIDTH,
 }: {
   window: UsageWindow
   t: Translate
+  staleState?: UsageColorState
+  stateKey?: string
   width?: number
 } & UsageObservation) {
   const preset = useUsageColorPreset()
   const mode = useQuotaDisplayMode()
   const now = Date.now()
-  const fresh = isUsageFresh(quota, { observedAt, stale }, now)
+  // A money window has no share to validate; its observation still ages.
+  const fresh = validUsage(quota.usedPercent)
+    ? isUsageFresh(quota, { observedAt, stale }, now)
+    : isObservationFresh(quota, { observedAt, stale }, now)
   const elapsed = elapsedPercent(quota, now)
-  const percent = validUsage(quota.usedPercent)
-    ? Math.min(100, Math.max(0, quota.usedPercent))
+  const reported = quota.usedPercent
+  const percent = validUsage(reported)
+    ? Math.min(100, Math.max(0, reported as number))
     : 0
   const marker = elapsed ?? displayStartPercent(quota, now)
-  const color = usageBarColor(quota.usedPercent, elapsed, preset, fresh)
+  const measured = validUsage(reported)
+    ? usageColorState(reported as number, elapsed, preset, fresh)
+    : 'neutral'
+  // A stale reading keeps the color it was measured with; the tooltip states
+  // that it is stale, so the color never flips to a healthy green on its own.
+  let remembered = staleState
+  if (stateKey !== undefined) {
+    if (fresh) {
+      LAST_STATE.set(stateKey, measured)
+      remembered = measured
+    } else {
+      remembered = LAST_STATE.get(stateKey) ?? staleState
+    }
+  }
+  const state = !fresh && remembered !== undefined ? remembered : measured
   const tooltip = windowTooltip(quota, t, mode, !fresh)
   return (
     <span
@@ -139,12 +180,8 @@ export function UsageBar({
             insetBlock: 0,
             insetInlineStart: 0,
             width: `${percent}%`,
-            background: color,
-            opacity:
-              usageColorState(quota.usedPercent, elapsed, preset, fresh) ===
-              'neutral'
-                ? 0.4
-                : 1,
+            background: usageStateColor(state),
+            opacity: state === 'neutral' ? 0.4 : 1,
           }}
         />
         {marker !== undefined && (

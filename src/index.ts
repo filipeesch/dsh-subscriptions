@@ -1407,6 +1407,7 @@ export function apply(ctx: Context, config: Config): void {
       cwd: (sessionId) =>
         cursorWorkingDirectory(ctx, sessionId, config.cursor?.cwd),
       contextPreference: cursorContext,
+      keyRef: cursorApiKeyRef(),
       readImage: cursorImageReader(ctx),
       onWarn: (message) => ctx.logger.warn(`${name}: ${message}`),
     })
@@ -1459,7 +1460,10 @@ export function apply(ctx: Context, config: Config): void {
     cursorSettings,
     cursorApiKeyRef,
     cursorContext,
-    cursorModelCount: async () => {
+    // Opening the card must not reach the SDK; only its Refresh asks for a
+    // live discovery, and the picker keeps the cache current meanwhile.
+    cursorModelCount: async (refresh?: boolean) => {
+      if (refresh !== true) return cursorAdapter?.cachedModelCount()
       try {
         return (await ctx.llm.listModels(CURSOR_ROUTE)).length
       } catch {

@@ -310,8 +310,9 @@ export class PoolUsageTracker {
     let exhausted = false
     let urgency = 0
     for (const window of windows) {
-      if (window.usedPercent >= QUOTA_FULL_PERCENT) available = false
-      if (window.usedPercent >= 100) exhausted = true
+      const used = window.usedPercent ?? 0
+      if (used >= QUOTA_FULL_PERCENT) available = false
+      if (used >= 100) exhausted = true
       urgency = Math.max(
         urgency,
         normalized
@@ -360,7 +361,10 @@ export function normalizedWindowUrgency(
   window: UsageWindow,
   now: number,
 ): number {
-  const remaining = Math.max(0, Math.min(1, 1 - window.usedPercent / 100))
+  const remaining = Math.max(
+    0,
+    Math.min(1, 1 - (window.usedPercent ?? 0) / 100),
+  )
   const { windowDurationMs, resetsAt } = window
   if (
     windowDurationMs === undefined ||
@@ -379,7 +383,7 @@ export function normalizedWindowUrgency(
 
 /** The required burn rate of one window (fraction per ms). */
 function windowUrgency(window: UsageWindow, now = Date.now()): number {
-  const remaining = Math.max(0, 1 - window.usedPercent / 100)
+  const remaining = Math.max(0, 1 - (window.usedPercent ?? 0) / 100)
   const horizon =
     window.resetsAt !== undefined
       ? Math.max(window.resetsAt - now, 1)

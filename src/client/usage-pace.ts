@@ -7,8 +7,13 @@ export interface UsageObservation {
 }
 export type UsageColorState = 'neutral' | 'red' | 'yellow' | 'green'
 export const USAGE_FRESHNESS_MS = 5 * 60_000
-export function validUsage(used: number): boolean {
-  return Number.isFinite(used) && used >= 0 && used <= 100
+export function validUsage(used: unknown): boolean {
+  return (
+    typeof used === 'number' &&
+    Number.isFinite(used) &&
+    used >= 0 &&
+    used <= 100
+  )
 }
 
 /**
@@ -51,6 +56,17 @@ export function isUsageFresh(
 ): boolean {
   return (
     validUsage(window.usedPercent) &&
+    isObservationFresh(window, observation, now)
+  )
+}
+
+/** The observation's own freshness, independent of a percentage reading. */
+export function isObservationFresh(
+  window: UsageWindow,
+  observation: UsageObservation,
+  now = Date.now(),
+): boolean {
+  return (
     observation.stale !== true &&
     observation.observedAt !== undefined &&
     Number.isFinite(observation.observedAt) &&
@@ -105,13 +121,8 @@ export function usageColorState(
   if (!fresh || preset === 'remaining' || elapsed === undefined) return 'green'
   return used - elapsed >= (preset === 'relaxed' ? 15 : 10) ? 'yellow' : 'green'
 }
-export function usageBarColor(
-  used: number,
-  elapsed?: number,
-  preset: UsageColorPreset = 'standard',
-  fresh = true,
-): string {
-  const state = usageColorState(used, elapsed, preset, fresh)
+/** The CSS color of one already-decided state. */
+export function usageStateColor(state: UsageColorState): string {
   return state === 'red'
     ? 'var(--dsw-alias-state-error-primary)'
     : state === 'yellow'
@@ -119,6 +130,16 @@ export function usageBarColor(
       : state === 'neutral'
         ? 'var(--dsw-alias-label-dimmed)'
         : 'var(--dsw-alias-state-success-primary)'
+}
+
+export function usageBarColor(
+  used: number,
+  elapsed?: number,
+  preset: UsageColorPreset = 'standard',
+  fresh = true,
+): string {
+  const state = usageColorState(used, elapsed, preset, fresh)
+  return usageStateColor(state)
 }
 
 /**

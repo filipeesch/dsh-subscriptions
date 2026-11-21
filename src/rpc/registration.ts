@@ -159,8 +159,8 @@ export interface RpcDeps {
   cursorSettings: CursorSettingsStore
   cursorApiKeyRef: () => string
   cursorContext: () => string
-  /** Models the route advertises now; absent when the catalog is unavailable. */
-  cursorModelCount: () => Promise<number | undefined>
+  /** Models the route advertises; a refresh may load the catalog. */
+  cursorModelCount: (refresh?: boolean) => Promise<number | undefined>
   resolveAttachments: () => AttachmentStore | undefined
   usageFetchers: UsageFetchers
   selectedSpeed: (sessionId: string, model?: string) => SpeedTier
@@ -442,9 +442,9 @@ export function assembleRpc(deps: RpcDeps): void {
     async (account) => resolveAccountKey('codex', account),
   )
   const cursor: CursorRpcController = {
-    async settings() {
+    async settings(refresh) {
       const stored = cursorSettings.get()
-      const models = await cursorModelCount().catch(() => undefined)
+      const models = await cursorModelCount(refresh).catch(() => undefined)
       return {
         provider: 'cursor',
         keyRef: cursorApiKeyRef(),
@@ -459,6 +459,9 @@ export function assembleRpc(deps: RpcDeps): void {
       await cursorSettings.set(
         ceilingUSD === undefined ? {} : { monthlyCeilingUSD: ceilingUSD },
       )
+      // The next read must use the new ceiling, not a reading cached under the
+      // old one.
+      externalUsage.invalidate('cursor')
     },
   }
   registerAuthRpc(

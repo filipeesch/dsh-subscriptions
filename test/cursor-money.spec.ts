@@ -6,6 +6,8 @@ import { hasMoney, windowTooltip } from '../src/client/UsageBar.js'
 type T = Parameters<typeof windowTooltip>[1]
 const DICT: Record<string, string> = {
   usageMeterUsed: 'Used {used}% · Remaining {remaining}%',
+  usagePercentUsed: 'Used {value}%',
+  usagePercentRemaining: 'Remaining {value}%',
   usageBarUsed: 'Used {value}',
   usageBarLimit: 'Ceiling {value}',
   usageBarRemaining: 'Remaining {value}',
@@ -52,12 +54,15 @@ test('a money window states used, ceiling, remaining, and reset', () => {
 
 test('a percentage window states used and remaining shares', () => {
   const text = windowTooltip({ kind: 'weekly', usedPercent: 62 }, t)
-  assert.match(text, /used 62/i)
-  assert.match(text, /remaining 38/i)
-  assert.match(
-    windowTooltip({ kind: 'weekly', usedPercent: 62 }, t, 'remaining'),
-    /used 38/i,
+  assert.match(text, /Used 62%/)
+  assert.match(text, /Remaining 38%/)
+  // Remaining mode reorders the two labelled shares; it never relabels them.
+  const remainingFirst = windowTooltip(
+    { kind: 'weekly', usedPercent: 62 },
+    t,
+    'remaining',
   )
+  assert.match(remainingFirst, /^Remaining 38% · Used 62%/)
 })
 
 test('an invalid reading and a stale one are named', () => {

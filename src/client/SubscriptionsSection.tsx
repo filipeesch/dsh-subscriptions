@@ -35,6 +35,7 @@ import {
   useQuotaDisplayMode,
 } from './usage-badge-preferences.js'
 import { subscriptionCardStyles as cardStyles } from './subscription-card-styles.js'
+import type { ProviderId } from '../providers/ids.js'
 import type { SubscriptionsKey } from './locales.js'
 
 import {
@@ -46,9 +47,8 @@ export { callSubscriptionsAuth } from './subscriptions-rpc.js'
 /** Poll cadence while a provider login attempt is busy. */
 const POLL_INTERVAL_MS = 2000
 
-/** Subscription provider ids, fixed by the node half's OAuth adapters. */
-export type SubscriptionProvider =
-  'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity'
+/** Subscription provider ids, from the node half's single tuple. */
+export type SubscriptionProvider = ProviderId
 
 /** One logged-in account as answered by the `status` endpoint. */
 export interface AccountStatus {
@@ -89,7 +89,7 @@ interface StatusResponse {
 export interface UsageWindow {
   kind: 'session' | 'weekly' | 'other'
   scope?: string
-  usedPercent: number
+  usedPercent?: number
   resetsAt?: number
   startsAt?: number
   windowDurationMs?: number

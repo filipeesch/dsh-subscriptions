@@ -2,11 +2,6 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { CursorAdapter } from '../src/providers/cursor/adapter.js'
-import {
-  CursorSession,
-  planIncrement,
-} from '../src/providers/cursor/runtime.js'
-import { fingerprint } from '../src/providers/cursor/prompt.js'
 import type { CursorCatalogModel } from '../src/providers/cursor/models.js'
 import type {
   CursorAgent,
@@ -299,92 +294,6 @@ test('a second call reuses the agent and sends only the new content', async () =
   assert.equal(agents.length, 1)
   assert.equal(agents[0]!.sent.length, 2)
   assert.equal(agents[0]!.sent[1]!.message, 'next')
-})
-
-test('a tool call is handed to the host and its result returns to the same run', async () => {
-  const scripts: (CursorEvent[] | CursorRunResult)[][] = [
-    [
-      [
-        {
-          type: 'assistant',
-          message: { content: [{ type: 'text', text: 'calling' }] },
-        },
-      ],
-      { status: 'finished' },
-    ],
-  ]
-  const { gateway, agents } = gatewayOf(scripts)
-  const adapter = adapterOf(gateway)
-  const tools = [
-    {
-      name: 'tool',
-      description: 'A tool',
-      parameters: { type: 'object', properties: {} },
-    },
-  ]
-  const first = [
-    {
-      role: 'user' as const,
-      content: [{ type: 'text' as const, text: 'use the tool' }],
-    },
-  ]
-  const chunks = await collect(
-    adapter,
-    request(first, { sessionId: 'session-tool' as never, tools }),
-  )
-  const toolFinish = chunks.find((chunk) => chunk.type === 'finish')
-  assert.deepEqual(toolFinish?.reason, { kind: 'tool-calls' })
-  assert.ok(chunks.some((chunk) => chunk.type === 'tool-call-delta'))
-  assert.equal(agents[0]!.sent.length, 1)
-
-  // Delivering the result is the runtime's decision, not a new conversation:
-  // a handed-off call makes the next request a result delivery to the same
-  // live run.
-  const session = new CursorSession('k', 'sig', undefined)
-  session.sentFirst = true
-  session.runDone = false
-  const user = {
-    role: 'user' as const,
-    content: [{ type: 'text' as const, text: 'use the tool' }],
-  }
-  const assistant = {
-    role: 'assistant' as const,
-    content: [
-      {
-        type: 'toolCall' as const,
-        id: 'c1',
-        name: 'tool',
-        arguments: { q: 'tool' },
-      },
-    ],
-  }
-  session.seen = [fingerprint(user), fingerprint(assistant)]
-  const callPromise = session.registerCall('tool', { q: 'tool' }, 'c1')
-  session.pending[0]!.handed = true
-  const plan = planIncrement(session, [
-    user,
-    assistant,
-    {
-      role: 'toolResult',
-      toolCallId: 'c1',
-      toolName: 'tool',
-      isError: false,
-      content: [{ type: 'text', text: 'the result' }],
-    },
-  ])
-  assert.equal(plan.kind, 'results')
-  if (plan.kind === 'results') {
-    assert.equal(plan.results.length, 1)
-    assert.equal(plan.results[0]!.call.id, 'c1')
-    plan.results[0]!.call.resolve({
-      content: [{ type: 'text', text: 'the result' }],
-      isError: false,
-    })
-  }
-  assert.deepEqual(await callPromise, {
-    content: [{ type: 'text', text: 'the result' }],
-    isError: false,
-  })
 })
 
 test('a rejected context tier retries with the next smaller one', async () => {

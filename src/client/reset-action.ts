@@ -4,7 +4,7 @@ export function resetActionBlock(
     windows?: {
       kind: string
       scope?: string
-      usedPercent: number
+      usedPercent?: number
       resetsAt?: number
     }[]
     resetCredits?: { id?: string; expiresAt?: number }[]
@@ -15,8 +15,10 @@ export function resetActionBlock(
   const weekly = usage.windows?.find(
     (w) => w.kind === 'weekly' && w.scope === undefined,
   )
-  if (!weekly || !Number.isFinite(weekly.usedPercent)) return 'resetUseRefresh'
-  if (weekly.usedPercent < 80) return 'resetUseGuard'
+  const used = weekly?.usedPercent
+  if (weekly === undefined || used === undefined || !Number.isFinite(used))
+    return 'resetUseRefresh'
+  if (used < 80) return 'resetUseGuard'
   if (
     weekly.resetsAt === undefined ||
     weekly.resetsAt <= now ||

@@ -72,9 +72,38 @@ export function imagesOf(
 export function currentTurnImages(
   messages: readonly { role?: unknown; content?: unknown }[],
 ): Image[] | undefined {
+  return imagesOf(messages.slice(turnStartIndex(messages)))
+}
+
+/** Index of the first message after the last assistant message. */
+function turnStartIndex(messages: readonly { role?: unknown }[]): number {
   let start = messages.length
   while (start > 0 && messages[start - 1]?.role !== 'assistant') start--
-  return imagesOf(messages.slice(start))
+  return start
+}
+
+/**
+ * A rebuild sends only the current turn's images. Earlier ones are named so
+ * the model does not silently lose attachments it saw before.
+ */
+export function earlierImagesNote(
+  messages: readonly { role?: unknown; content?: unknown }[],
+): string | undefined {
+  const earlier = imagesOf(messages.slice(0, turnStartIndex(messages)))
+  if (earlier === undefined) return undefined
+  return `[${earlier.length} earlier image attachment(s) are not forwarded again]`
+}
+
+/** Identity of the images in a message, for fingerprints. */
+function imageKeyOf(content: unknown): string {
+  if (!Array.isArray(content)) return ''
+  const keys: string[] = []
+  for (const block of content) {
+    const record = asRecord(block)
+    if (record?.type !== 'image' || typeof record.data !== 'string') continue
+    keys.push(hash(record.data).slice(0, 12))
+  }
+  return keys.join(',')
 }
 
 /** Parse tool arguments that arrive as a JSON string or an object. */
@@ -165,12 +194,16 @@ export function fingerprint(message: {
 }): string {
   switch (message?.role) {
     case 'user':
-      return hash(`u\n${textOf(message.content)}`)
+      return hash(
+        `u\n${textOf(message.content)}\n${imageKeyOf(message.content)}`,
+      )
     case 'developer':
-      return hash(`d\n${textOf(message.content)}`)
+      return hash(
+        `d\n${textOf(message.content)}\n${imageKeyOf(message.content)}`,
+      )
     case 'toolResult':
       return hash(
-        `r\n${String(message.toolCallId ?? '')}\n${message.isError ? 1 : 0}\n${textOf(message.content)}`,
+        `r\n${String(message.toolCallId ?? '')}\n${message.isError ? 1 : 0}\n${textOf(message.content)}\n${imageKeyOf(message.content)}`,
       )
     case 'assistant': {
       const parts: string[] = []
@@ -180,9 +213,13 @@ export function fingerprint(message: {
         const record = asRecord(block)
         if (record?.type === 'text' && record.text) {
           parts.push(`t:${String(record.text)}`)
-        } else if (record?.type === 'toolCall') {
+        } else if (
+          record?.type === 'toolCall' ||
+          record?.type === 'tool-call'
+        ) {
+          // Both the DSH block and the reply block describe the same call.
           parts.push(
-            `c:${String(record.id)}:${String(record.name)}:${JSON.stringify(record.arguments ?? {})}`,
+            `c:${String(record.id)}:${String(record.name)}:${JSON.stringify(asObject(record.arguments))}`,
           )
         }
       }

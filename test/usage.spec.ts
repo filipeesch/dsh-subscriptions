@@ -280,7 +280,7 @@ test('Claude and Codex adapter windows enable pace, not just duration labels', a
     assert.equal(elapsedPercent(window, now), 20)
     assert.equal(
       usageColorState(
-        window.usedPercent,
+        window.usedPercent!,
         elapsedPercent(window, now),
         'standard',
         true,

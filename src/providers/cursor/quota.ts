@@ -48,6 +48,18 @@ function integer(value: unknown): number | undefined {
   return number !== undefined && Number.isInteger(number) ? number : undefined
 }
 
+/** A finite, non-negative amount in the provider's minor unit. */
+function amount(value: unknown): number | undefined {
+  const parsed = numeric(value)
+  return parsed === undefined || parsed < 0 ? undefined : parsed
+}
+
+/** A finite, strictly positive amount. */
+function positive(value: unknown): number | undefined {
+  const parsed = amount(value)
+  return parsed === undefined || parsed === 0 ? undefined : parsed
+}
+
 function percent(value: unknown): number | undefined {
   const number = numeric(value)
   return number !== undefined && number >= 0 && number <= 100
@@ -153,71 +165,65 @@ export async function fetchCursorUsage(
   const planUsage = record(period.planUsage)
 
   const windows: UsageWindow[] = []
-  const overallLimit = numeric(spend?.overallLimit) ?? 0
-  const overallUsed = numeric(spend?.overallUsed)
-  const overallRemaining = numeric(spend?.overallRemaining)
+  const overallLimit = positive(spend?.overallLimit)
+  const overallUsed = amount(spend?.overallUsed)
+  const overallRemaining = amount(spend?.overallRemaining)
 
-  if (overallLimit > 0 && overallUsed !== undefined) {
+  if (overallUsed !== undefined) {
+    const configured = positive(
+      options.ceilingUSD === undefined
+        ? undefined
+        : Math.round(options.ceilingUSD * 100),
+    )
+    const limit = overallLimit ?? configured
+    const remaining =
+      limit === undefined
+        ? overallRemaining
+        : (overallRemaining ?? Math.max(0, limit - overallUsed))
     windows.push({
       kind: 'other',
       scope: 'Included usage',
-      usedPercent: Math.min(100, (overallUsed / overallLimit) * 100),
-      usedAmount: overallUsed,
-      limitAmount: overallLimit,
-      ...(overallRemaining === undefined
+      // Spend without a ceiling is still spend: report the amount and leave
+      // the share unknown instead of inventing a percentage.
+      ...(limit === undefined
         ? {}
-        : { remainingAmount: overallRemaining }),
+        : { usedPercent: Math.min(100, (overallUsed / limit) * 100) }),
+      usedAmount: overallUsed,
+      ...(limit === undefined ? {} : { limitAmount: limit }),
+      ...(remaining === undefined || remaining < 0
+        ? {}
+        : { remainingAmount: remaining }),
       currency: 'USD',
       ...timing,
     })
-  } else if (overallUsed !== undefined && overallUsed > 0) {
-    const ceiling = options.ceilingUSD
-    if (ceiling !== undefined && ceiling > 0) {
+  }
+
+  if (windows.length === 0 && planUsage !== undefined) {
+    const buckets: { key: string; scope: string; limitKey: string }[] = [
+      { key: 'autoPercentUsed', scope: 'Cursor models', limitKey: 'autoLimit' },
+      { key: 'apiPercentUsed', scope: 'Other models', limitKey: 'apiLimit' },
+      { key: 'totalPercentUsed', scope: 'Overall', limitKey: 'limit' },
+    ]
+    for (const bucket of buckets) {
+      const usedPercent = percent(planUsage[bucket.key])
+      if (usedPercent === undefined) continue
+      // Only amounts the provider reports are shown; a percentage of a plan
+      // allowance is not a dollar figure.
+      const limitCents = positive(planUsage[bucket.limitKey])
       windows.push({
         kind: 'other',
-        scope: 'Included usage',
-        usedPercent: Math.min(100, (overallUsed / (ceiling * 100)) * 100),
-        usedAmount: overallUsed,
-        limitAmount: Math.round(ceiling * 100),
-        remainingAmount: Math.max(0, Math.round(ceiling * 100) - overallUsed),
-        currency: 'USD',
+        scope: bucket.scope,
+        usedPercent,
+        ...(limitCents === undefined ? {} : { limitAmount: limitCents }),
         ...timing,
       })
     }
   }
 
-  if (windows.length === 0 && planUsage !== undefined) {
-    const buckets: { key: string; scope: string }[] = [
-      { key: 'autoPercentUsed', scope: 'Cursor models' },
-      { key: 'apiPercentUsed', scope: 'Other models' },
-      { key: 'totalPercentUsed', scope: 'Overall' },
-    ]
-    for (const bucket of buckets) {
-      const usedPercent = percent(planUsage[bucket.key])
-      if (usedPercent === undefined) continue
-      const limitCents =
-        bucket.key === 'autoPercentUsed'
-          ? numeric(planUsage.autoLimit)
-          : bucket.key === 'apiPercentUsed'
-            ? numeric(planUsage.apiLimit)
-            : numeric(planUsage.limit)
-      windows.push({
-        kind: 'other',
-        scope: bucket.scope,
-        usedPercent,
-        ...(limitCents === undefined || limitCents <= 0
-          ? {}
-          : {
-              limitAmount: limitCents,
-              usedAmount: Math.round((limitCents * usedPercent) / 100),
-              remainingAmount: Math.round(
-                limitCents - (limitCents * usedPercent) / 100,
-              ),
-              currency: 'USD',
-            }),
-        ...timing,
-      })
-    }
+  if (windows.length === 0) {
+    // A JSON object without either known shape is schema drift, not a plan
+    // with no usage; the card must say the read failed, not show zero.
+    throw new Error('Cursor usage response was not recognized')
   }
 
   const plan = await planName(endpoint, accessToken, http, signal).catch(
