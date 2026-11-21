@@ -17,6 +17,8 @@ import type {
 } from './runtime.js'
 
 const require = createRequire(import.meta.url)
+/** Warn once per process when the SDK's ripgrep cannot be located. */
+let warned = false
 
 /**
  * Point the SDK at its bundled ripgrep. The SDK scans the working directory
@@ -52,10 +54,13 @@ export function configureRipgrep(
       }
     }
   }
-  process.emitWarning(
-    'Cursor could not find its bundled ripgrep binary. Set CURSOR_RIPGREP_PATH to a ripgrep executable, or reinstall @cursor/sdk with its platform package.',
-    'CursorSdkWarning',
-  )
+  if (!warned) {
+    warned = true
+    process.emitWarning(
+      'Cursor could not find its bundled ripgrep binary. Set CURSOR_RIPGREP_PATH to a ripgrep executable, or reinstall @cursor/sdk with its platform package.',
+      'CursorSdkWarning',
+    )
+  }
   return undefined
 }
 
