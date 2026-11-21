@@ -20,17 +20,11 @@ import { dirname } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { parseJsonText } from '../json-text.js'
 
-/** Provider routes this plugin can serve. */
-export type ProviderId = 'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity'
+import { PROVIDER_IDS } from '../providers/ids.js'
+import type { ProviderId } from '../providers/ids.js'
 
-/** Every provider route, in display order. */
-export const PROVIDER_IDS: readonly ProviderId[] = [
-  'codex',
-  'claude',
-  'grok',
-  'copilot',
-  'antigravity',
-]
+export { PROVIDER_IDS }
+export type { ProviderId }
 
 /** Stored ChatGPT/Codex subscription session. */
 export interface CodexSession {
