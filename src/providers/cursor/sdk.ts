@@ -9,7 +9,7 @@
 
 import { existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import type { CursorCatalogModel } from './models.js'
+import type { CursorCatalogModel } from './catalog.js'
 import type {
   CursorAgent,
   CursorAgentOptions,

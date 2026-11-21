@@ -51,6 +51,9 @@ export const SUBSCRIPTIONS_AUTH_ENDPOINTS = [
   'ollamaModels',
   'cursorSettings',
   'cursorSetCeiling',
+  'cursorModels',
+  'cursorSetSettings',
+  'cursorRefreshContext',
   'image',
   'video',
   'prepareReset',
@@ -336,6 +339,28 @@ export interface CursorRpcController {
   settings(refresh?: boolean): Promise<CursorSettingsView>
   /** Save the monthly ceiling; `undefined` clears it. */
   setCeiling(ceilingUSD: number | undefined): Promise<void>
+  /** The model manager's rows, resolved the same way a request resolves them. */
+  models(refresh?: boolean): Promise<CursorModelsView>
+  /** Replace the stored settings document, keeping the rest of the route state. */
+  setSettings(settings: unknown): Promise<void>
+  /** Refresh the published capacities now and report what happened. */
+  refreshContext(): Promise<CursorRefreshView>
+}
+
+/** The published-capacity source state the card states. */
+export interface CursorKnownContextView {
+  enabled: boolean
+  /** Epoch milliseconds of the last successful projection. */
+  fetchedAt?: number
+}
+
+/** One manual refresh outcome, distinct from a successful no-op. */
+export interface CursorRefreshView extends CursorKnownContextView {
+  status: 'refreshed' | 'failed' | 'unavailable'
+  /** Why the source could not refresh, for failed and unavailable outcomes. */
+  reason?: string
+  /** How many listed ids the fresh projection describes. */
+  windows?: number
 }
 
 /** One Cursor card snapshot. */
@@ -349,6 +374,26 @@ export interface CursorSettingsView {
   ceilingUSD?: number
   /** Models the route currently advertises; absent when the catalog failed. */
   models?: number
+  /** Whether the published-capacity source may fetch. */
+  publishedContext: boolean
+  /** The source's state, for the card's status line. */
+  knownContext: CursorKnownContextView
+}
+
+/** The model manager's payload. */
+export interface CursorModelsView {
+  provider: 'cursor'
+  /** Route-wide tier preference, shown when a model has no override. */
+  context: string
+  models: import('../providers/cursor/model-rows.js').CursorModelRow[]
+  knownContext: CursorKnownContextView
+  /** Stored edits, so a save preserves models the current catalog no longer lists. */
+  storedModels: Record<
+    string,
+    { enabled?: boolean; context?: string; contextWindow?: number }
+  >
+  /** Whether the published-capacity source may fetch. */
+  publishedContext: boolean
 }
 
 /**
@@ -812,6 +857,27 @@ async function dispatch(
     case 'cursorSettings':
       if (!cursor) throw new BadRequest('Cursor settings are unavailable')
       return ok(await cursor.settings())
+    case 'cursorModels':
+      if (!cursor) throw new BadRequest('Cursor settings are unavailable')
+      return ok(await cursor.models(readForce(payload)))
+    case 'cursorSetSettings': {
+      if (!cursor) throw new BadRequest('Cursor settings are unavailable')
+      const body = payload as Record<string, unknown> | null
+      const settings =
+        body !== null && typeof body === 'object' ? body.settings : undefined
+      if (
+        settings === null ||
+        typeof settings !== 'object' ||
+        Array.isArray(settings)
+      ) {
+        throw new BadRequest('cursorSetSettings needs a settings object')
+      }
+      await cursor.setSettings(settings)
+      return ok({ ok: true })
+    }
+    case 'cursorRefreshContext':
+      if (!cursor) throw new BadRequest('Cursor settings are unavailable')
+      return ok(await cursor.refreshContext())
     case 'cursorSetCeiling': {
       if (!cursor) throw new BadRequest('Cursor settings are unavailable')
       const body = payload as Record<string, unknown> | null

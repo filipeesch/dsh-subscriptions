@@ -19,8 +19,19 @@ import { OAuthFlowManager } from '../auth/oauth-flow.js'
 import { DeviceFlowManager } from '../auth/device-flow.js'
 import { ResetRedemption } from '../providers/reset-redemption.js'
 import { BadRequest, registerAuthRpc } from '../auth/rpc.js'
-import type { CursorRpcController } from '../auth/rpc.js'
-import type { CursorSettingsStore } from '../providers/cursor-settings.js'
+import type {
+  CursorKnownContextView,
+  CursorRpcController,
+} from '../auth/rpc.js'
+import {
+  validateCursorSettings,
+  type CursorSettingsStore,
+} from '../providers/cursor-settings.js'
+import { buildCursorModelRows } from '../providers/cursor/model-rows.js'
+import type { CursorCatalogModel } from '../providers/cursor/catalog.js'
+import type { PublishedRefreshOutcome } from '../providers/cursor/published-context.js'
+import type { CursorConfigPolicy } from '../providers/cursor/policy.js'
+import { contextPreferenceFor } from '../providers/cursor/policy.js'
 import {
   createCredentialResolver,
   registerKeyRoute,
@@ -161,6 +172,18 @@ export interface RpcDeps {
   cursorContext: () => string
   /** Models the route advertises; a refresh may load the catalog. */
   cursorModelCount: (refresh?: boolean) => Promise<number | undefined>
+  /** Raw catalog for the manager rows; a refresh forces a live read. */
+  cursorCatalog: (refresh?: boolean) => Promise<readonly CursorCatalogModel[]>
+  /** Per-model configuration baseline. */
+  cursorConfig: () => CursorConfigPolicy
+  /** Capacity the public catalog publishes for one model. */
+  cursorPublishedWindow: (modelId: string) => number | undefined
+  /** The published-capacity source's state. */
+  cursorKnownContext: () => CursorKnownContextView
+  /** Refresh the projection now and report what happened. */
+  cursorRefreshContext: () => Promise<PublishedRefreshOutcome>
+  /** Re-announce the Cursor route so the host re-lists its models. */
+  cursorNotifyPicker: () => void
   resolveAttachments: () => AttachmentStore | undefined
   usageFetchers: UsageFetchers
   selectedSpeed: (sessionId: string, model?: string) => SpeedTier
@@ -204,6 +227,12 @@ export function assembleRpc(deps: RpcDeps): void {
     cursorApiKeyRef,
     cursorContext,
     cursorModelCount,
+    cursorCatalog,
+    cursorConfig,
+    cursorPublishedWindow,
+    cursorKnownContext,
+    cursorRefreshContext,
+    cursorNotifyPicker,
     resolveAttachments,
     usageFetchers,
     selectedSpeed,
@@ -449,6 +478,8 @@ export function assembleRpc(deps: RpcDeps): void {
         provider: 'cursor',
         keyRef: cursorApiKeyRef(),
         context: cursorContext(),
+        publishedContext: cursorKnownContext().enabled,
+        knownContext: cursorKnownContext(),
         ...(stored.monthlyCeilingUSD === undefined
           ? {}
           : { ceilingUSD: stored.monthlyCeilingUSD }),
@@ -456,12 +487,102 @@ export function assembleRpc(deps: RpcDeps): void {
       }
     },
     async setCeiling(ceilingUSD) {
-      await cursorSettings.set(
-        ceilingUSD === undefined ? {} : { monthlyCeilingUSD: ceilingUSD },
-      )
+      // Keep the rest of the document: models, tiers, and the source switch.
+      await cursorSettings.setCeiling(ceilingUSD)
       // The next read must use the new ceiling, not a reading cached under the
       // old one.
       externalUsage.invalidate('cursor')
+    },
+    async models(refresh) {
+      const catalog = await cursorCatalog(refresh)
+      const settings = cursorSettings.get()
+      const config = cursorConfig()
+      return {
+        provider: 'cursor',
+        context: contextPreferenceFor(settings, config, undefined),
+        models: buildCursorModelRows({
+          models: catalog,
+          settings,
+          config,
+          publishedWindow: cursorPublishedWindow,
+        }),
+        knownContext: cursorKnownContext(),
+        storedModels: settings.models ?? {},
+        publishedContext: cursorKnownContext().enabled,
+      }
+    },
+    async setSettings(patch) {
+      // A partial patch: the manager writes the whole models map (so removals
+      // stick) and the card flips one flag, while the ceiling and remembered
+      // tiers stay untouched. Validation happens before the store mutation so a
+      // bad field is a bad request, not an internal error.
+      if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) {
+        throw new BadRequest('Cursor settings must be an object')
+      }
+      const record = patch as Record<string, unknown>
+      for (const key of Object.keys(record)) {
+        if (key !== 'models' && key !== 'publishedContext') {
+          throw new BadRequest(`unsupported Cursor setting: ${key}`)
+        }
+      }
+      const candidate = {
+        ...cursorSettings.get(),
+        ...('models' in record ? { models: record.models } : {}),
+        ...('publishedContext' in record
+          ? { publishedContext: record.publishedContext }
+          : {}),
+      }
+      try {
+        validateCursorSettings(candidate)
+      } catch (error) {
+        throw new BadRequest(
+          error instanceof Error ? error.message : String(error),
+        )
+      }
+      // The store performs the merge inside its serialized write chain, so a
+      // concurrent ceiling save or learned tier cannot be lost.
+      await cursorSettings.merge({
+        ...('models' in record
+          ? {
+              models: record.models as NonNullable<
+                ReturnType<CursorSettingsStore['get']>['models']
+              >,
+            }
+          : {}),
+        ...('publishedContext' in record
+          ? { publishedContext: record.publishedContext as boolean }
+          : {}),
+      })
+      // The host caches the picker list; a saved enable/tier/window or source
+      // switch changes what the route advertises, so re-announce it.
+      cursorNotifyPicker()
+    },
+    async refreshContext() {
+      const outcome = await cursorRefreshContext()
+      const state = cursorKnownContext()
+      if (outcome.status === 'refreshed') {
+        return {
+          enabled: state.enabled,
+          status: 'refreshed' as const,
+          fetchedAt: outcome.fetchedAt,
+          windows: outcome.windows,
+        }
+      }
+      if (outcome.status === 'failed') {
+        return {
+          enabled: state.enabled,
+          status: 'failed' as const,
+          reason: outcome.reason,
+          ...(outcome.fetchedAt === undefined
+            ? {}
+            : { fetchedAt: outcome.fetchedAt }),
+        }
+      }
+      return {
+        enabled: state.enabled,
+        status: 'unavailable' as const,
+        reason: outcome.reason,
+      }
     },
   }
   registerAuthRpc(

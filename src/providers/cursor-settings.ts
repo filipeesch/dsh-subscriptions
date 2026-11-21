@@ -1,17 +1,36 @@
 /**
  * Durable, non-secret Cursor route configuration.
  *
- * The API key itself never appears here; the plugin config names its credential
- * reference. The only stored value is the monthly ceiling a reader can set for
- * an account whose plan does not disclose one (an enterprise seat, for
- * example): the quota bar then shows spend against that ceiling instead of a
- * bare amount.
+ * The API key never appears here; the plugin config names its credential
+ * reference. Stored values are the monthly ceiling an account without a
+ * disclosed limit can set, per-model settings (enablement, context tier, manual
+ * window), the context tier Cursor accepted per model after a rejection, and
+ * whether the published-capacity source may fetch.
  */
 
-import { readFileSync } from 'node:fs'
-import { mkdir, rename, rm, writeFile } from 'node:fs/promises'
-import { dirname } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
+import {
+  loadJsonFileSync,
+  serializeWrites,
+  writeJsonFile,
+} from '../json-file.js'
+
+/** Stored settings for one model. */
+export interface CursorModelSettings {
+  /** Whether the model appears in the picker; absent means enabled. */
+  enabled?: boolean
+  /** Context tier preference for this model: max, min, or an offered value. */
+  context?: string
+  /** Manual advertised window in tokens; a last resort behind the tier and published capacity. */
+  contextWindow?: number
+}
+
+/** A tier Cursor accepted after rejecting the chosen one. */
+export interface CursorAcceptedTier {
+  value: string
+  /** The preference that produced the rejection; a changed preference retries. */
+  preference: string
+}
 
 /** Stored Cursor settings; every field is optional. */
 export interface CursorSettings {
@@ -20,6 +39,18 @@ export interface CursorSettings {
    * spend without a limit, so a disclosed limit always wins.
    */
   monthlyCeilingUSD?: number
+  /** Whether the models.dev projection may fetch; absent follows configuration. */
+  publishedContext?: boolean
+  /** Per-model overrides, keyed by model id. */
+  models?: Record<string, CursorModelSettings>
+  /** Remembered accepted tiers, keyed by model id. */
+  acceptedTiers?: Record<string, CursorAcceptedTier>
+}
+
+/** The fields a settings patch may replace; every other field is preserved. */
+export interface CursorSettingsPatch {
+  models?: Record<string, CursorModelSettings>
+  publishedContext?: boolean
 }
 
 /** Upper bound for a ceiling; a larger number is a typo, not a budget. */
@@ -29,18 +60,33 @@ function fail(message: string): never {
   throw new Error(message)
 }
 
+function recordOf(value: unknown, label: string): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value))
+    fail(`${label} must be an object`)
+  return value as Record<string, unknown>
+}
+
+function positiveInteger(value: unknown, label: string): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0)
+    fail(`${label} must be a positive integer`)
+  return value
+}
+
+function nonEmptyString(value: unknown, label: string): string {
+  if (typeof value !== 'string' || value.trim().length === 0)
+    fail(`${label} must be a non-empty string`)
+  return value.trim()
+}
+
 /**
  * Validate one stored document.
  * @param input - any parsed JSON value.
  * @returns the settings with unknown fields dropped.
- * @throws when the document is not an object or the ceiling is not a positive
- *   finite number of dollars.
+ * @throws when the document is not an object or a known field is invalid; the
+ *   store then degrades to defaults and keeps the file for recovery.
  */
 export function validateCursorSettings(input: unknown): CursorSettings {
-  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
-    fail('settings must be an object')
-  }
-  const record = input as Record<string, unknown>
+  const record = recordOf(input, 'settings')
   const settings: CursorSettings = {}
   if (record.monthlyCeilingUSD !== undefined) {
     const ceiling = record.monthlyCeilingUSD
@@ -56,19 +102,68 @@ export function validateCursorSettings(input: unknown): CursorSettings {
     }
     settings.monthlyCeilingUSD = ceiling
   }
+  if (record.publishedContext !== undefined) {
+    if (typeof record.publishedContext !== 'boolean')
+      fail('publishedContext must be a boolean')
+    settings.publishedContext = record.publishedContext
+  }
+  if (record.models !== undefined) {
+    const models = recordOf(record.models, 'models')
+    const out: Record<string, CursorModelSettings> = {}
+    for (const [rawId, rawValue] of Object.entries(models)) {
+      const id = rawId.trim()
+      if (id.length === 0) fail('model ids must be non-empty')
+      const model = recordOf(rawValue, `models[${id}]`)
+      const parsed: CursorModelSettings = {}
+      if (model.enabled !== undefined) {
+        if (typeof model.enabled !== 'boolean')
+          fail(`models[${id}].enabled must be a boolean`)
+        parsed.enabled = model.enabled
+      }
+      if (model.context !== undefined) {
+        parsed.context = nonEmptyString(model.context, `models[${id}].context`)
+      }
+      if (model.contextWindow !== undefined) {
+        parsed.contextWindow = positiveInteger(
+          model.contextWindow,
+          `models[${id}].contextWindow`,
+        )
+      }
+      out[id] = parsed
+    }
+    settings.models = out
+  }
+  if (record.acceptedTiers !== undefined) {
+    const tiers = recordOf(record.acceptedTiers, 'acceptedTiers')
+    const out: Record<string, CursorAcceptedTier> = {}
+    for (const [rawId, rawValue] of Object.entries(tiers)) {
+      const id = rawId.trim()
+      if (id.length === 0) fail('model ids must be non-empty')
+      const tier = recordOf(rawValue, `acceptedTiers[${id}]`)
+      out[id] = {
+        value: nonEmptyString(tier.value, `acceptedTiers[${id}].value`),
+        preference: nonEmptyString(
+          tier.preference,
+          `acceptedTiers[${id}].preference`,
+        ),
+      }
+    }
+    settings.acceptedTiers = out
+  }
   return settings
 }
 
 /**
  * Cursor settings under the DSH home directory. Writes are serialized and
- * atomic (temp file with mode 0600, then rename), so a crash never leaves a
- * half-written document and a concurrent writer cannot lose an earlier save.
+ * atomic, so a crash never leaves a half-written document and a concurrent
+ * writer cannot lose an earlier save.
  */
 export class CursorSettingsStore {
   private current: CursorSettings = {}
-  private writes: Promise<void> = Promise.resolve()
   /** Set when the stored file existed but was unreadable or invalid. */
   private corrupt: string | undefined
+  /** A learned tier the running turn must see before its write settles. */
+  private readonly pendingTiers = new Map<string, CursorAcceptedTier>()
 
   constructor(
     readonly path = dshHomePath(
@@ -78,20 +173,19 @@ export class CursorSettingsStore {
     ),
     private readonly onCorrupt?: (message: string) => void,
   ) {
+    const loaded = loadJsonFileSync(path)
+    if (loaded.kind === 'missing') return
+    // A broken file must not take the whole plugin down: degrade to defaults,
+    // keep the file untouched for manual recovery, and let the next save
+    // overwrite it.
     try {
-      this.current = validateCursorSettings(
-        JSON.parse(readFileSync(path, 'utf8')) as unknown,
-      )
+      if (loaded.kind === 'invalid') throw loaded.error
+      this.current = validateCursorSettings(loaded.value)
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        // A broken file must not take the whole plugin down: degrade to
-        // defaults, keep the file untouched for manual recovery, and let the
-        // next save overwrite it.
-        this.corrupt = error instanceof Error ? error.message : String(error)
-        this.onCorrupt?.(
-          `Cursor settings at ${path} are unreadable and ignored; defaults serve until the next save.`,
-        )
-      }
+      this.corrupt = error instanceof Error ? error.message : String(error)
+      this.onCorrupt?.(
+        `Cursor settings at ${path} are unreadable and ignored; defaults serve until the next save.`,
+      )
     }
   }
 
@@ -109,23 +203,159 @@ export class CursorSettingsStore {
     return this.current.monthlyCeilingUSD
   }
 
-  async set(input: unknown): Promise<void> {
-    const validated = validateCursorSettings(input)
-    const run = this.writes.then(async () => {
-      await mkdir(dirname(this.path), { recursive: true })
-      const temporary = `${this.path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`
-      try {
-        await writeFile(temporary, JSON.stringify(validated, null, 2), {
-          mode: 0o600,
-        })
-        await rename(temporary, this.path)
-      } finally {
-        await rm(temporary, { force: true })
+  /** The published-capacity switch, when the settings carry one. */
+  publishedContext(): boolean | undefined {
+    return this.current.publishedContext
+  }
+
+  /** One model's stored settings, when it has an entry. */
+  modelSettings(modelId: string): CursorModelSettings | undefined {
+    const models = this.current.models
+    return models !== undefined && Object.hasOwn(models, modelId)
+      ? structuredClone(models[modelId] as CursorModelSettings)
+      : undefined
+  }
+
+  /**
+   * The tier Cursor accepted for one model, while the preference that produced
+   * the rejection still applies.
+   */
+  acceptedTier(modelId: string, preference: string): string | undefined {
+    const pending = this.pendingTiers.get(modelId)
+    if (pending !== undefined) {
+      if (pending.preference === preference) return pending.value
+      // The preference changed: the overlay for the old one no longer applies.
+      this.pendingTiers.delete(modelId)
+    }
+    const tiers = this.current.acceptedTiers
+    if (tiers === undefined || !Object.hasOwn(tiers, modelId)) return undefined
+    const entry = tiers[modelId] as CursorAcceptedTier
+    if (entry.preference === preference) return entry.value
+    // A record for another preference must not resurrect when the preference
+    // changes back, so prune it. The guarded removal keeps a concurrent,
+    // newer record alive.
+    void this.forgetAcceptedTierIf(modelId, entry).catch(() => undefined)
+    return undefined
+  }
+
+  /**
+   * Remember a tier the provider accepted after a rejection. The record is
+   * visible to the running turn at once through a memory overlay, while the
+   * document itself only changes after the write succeeds.
+   */
+  rememberAcceptedTier(
+    modelId: string,
+    value: string,
+    preference: string,
+  ): Promise<void> {
+    const record: CursorAcceptedTier = { value, preference }
+    this.pendingTiers.set(modelId, record)
+    const write = this.update((current) => ({
+      ...current,
+      acceptedTiers: {
+        ...(current.acceptedTiers ?? {}),
+        [modelId]: record,
+      },
+    }))
+    // The overlay retires once the record is durable, or when a newer record
+    // replaced it while the write was queued.
+    void write.then(
+      () => {
+        if (this.pendingTiers.get(modelId) === record) {
+          this.pendingTiers.delete(modelId)
+        }
+      },
+      () => undefined,
+    )
+    return write
+  }
+
+  /** Drop a remembered tier that no longer applies. */
+  forgetAcceptedTier(modelId: string): Promise<void> {
+    this.pendingTiers.delete(modelId)
+    return this.update((current) => {
+      const tiers = current.acceptedTiers
+      if (tiers === undefined || !Object.hasOwn(tiers, modelId)) return current
+      const next = { ...tiers }
+      delete next[modelId]
+      return { ...current, acceptedTiers: next }
+    })
+  }
+
+  /**
+   * Drop one remembered tier only when it still is the record the caller saw.
+   * A newer concurrent record survives, so pruning cannot undo a fresh result.
+   */
+  forgetAcceptedTierIf(
+    modelId: string,
+    expected: CursorAcceptedTier,
+  ): Promise<void> {
+    const pending = this.pendingTiers.get(modelId)
+    if (
+      pending !== undefined &&
+      pending.value === expected.value &&
+      pending.preference === expected.preference
+    ) {
+      this.pendingTiers.delete(modelId)
+    }
+    return this.update((current) => {
+      const entry = current.acceptedTiers?.[modelId]
+      if (
+        entry === undefined ||
+        entry.value !== expected.value ||
+        entry.preference !== expected.preference
+      ) {
+        return current
       }
+      const next = { ...(current.acceptedTiers ?? {}) }
+      delete next[modelId]
+      return { ...current, acceptedTiers: next }
+    })
+  }
+
+  /** Replace the stored document. */
+  set(input: unknown): Promise<void> {
+    return this.update(() => input)
+  }
+
+  /** Keep the rest of the document while the ceiling changes. */
+  setCeiling(ceilingUSD: number | undefined): Promise<void> {
+    return this.update((current) => {
+      const next = { ...current }
+      if (ceilingUSD === undefined) delete next.monthlyCeilingUSD
+      else next.monthlyCeilingUSD = ceilingUSD
+      return next
+    })
+  }
+
+  /**
+   * Merge one settings patch into the document. Running inside the store keeps
+   * a concurrent ceiling save or learned tier from being overwritten by a
+   * stale read-modify-write in the caller.
+   */
+  merge(patch: CursorSettingsPatch): Promise<void> {
+    return this.update((current) => ({
+      ...current,
+      ...(patch.models === undefined ? {} : { models: patch.models }),
+      ...(patch.publishedContext === undefined
+        ? {}
+        : { publishedContext: patch.publishedContext }),
+    }))
+  }
+
+  /**
+   * Apply one mutation and commit it: the new document serves readers only
+   * after the write succeeds, so a failed user save changes nothing and cannot
+   * leak into a later save.
+   */
+  private update(mutate: (current: CursorSettings) => unknown): Promise<void> {
+    return serializeWrites(this.path, async () => {
+      const validated = validateCursorSettings(
+        mutate(structuredClone(this.current)),
+      )
+      await writeJsonFile(this.path, validated, { mode: 0o600 })
       this.current = validated
       this.corrupt = undefined
     })
-    this.writes = run.catch(() => undefined)
-    return run
   }
 }

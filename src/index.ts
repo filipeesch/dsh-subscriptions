@@ -102,11 +102,20 @@ import {
   registerKeyRoute,
 } from './providers/key-route.js'
 import { CursorAdapter, CURSOR_ROUTE } from './providers/cursor/adapter.js'
+import { DEFAULT_CURSOR_API_KEY_REF } from './providers/cursor/route.js'
+import { DEFAULT_CURSOR_CONTEXT } from './providers/cursor/params.js'
 import {
-  DEFAULT_CURSOR_API_KEY_REF,
-  DEFAULT_CURSOR_CONTEXT,
-} from './providers/cursor/models.js'
+  contextPreferenceFor,
+  enabledFor,
+  manualWindowFor,
+  publishedContextEnabled,
+} from './providers/cursor/policy.js'
 import { createCursorGateway } from './providers/cursor/sdk.js'
+import { PublishedContext } from './providers/cursor/published-context.js'
+import {
+  loadPublishedContext,
+  savePublishedContext,
+} from './providers/cursor/published-context-store.js'
 import type { CursorImageRef } from './providers/cursor/transcript.js'
 import type { Image } from './providers/cursor/prompt.js'
 import { CursorSettingsStore } from './providers/cursor-settings.js'
@@ -263,6 +272,12 @@ export interface Config {
     context?: string
     /** Working directory for Cursor agents; default is the session's directory. */
     cwd?: string
+    /** Manual advertised window per model; a last resort behind tier and published capacity. */
+    contextWindows?: Record<string, unknown>
+    /** Per-model baseline: enablement and tier preference. */
+    models?: Record<string, { enabled?: boolean; context?: string }>
+    /** Whether the models.dev projection may fetch (default true). */
+    publishedContext?: boolean
   }
 }
 
@@ -320,6 +335,13 @@ export const Config: z<Config> = z.object({
     apiKeyRef: z.string().default(DEFAULT_CURSOR_API_KEY_REF),
     context: z.string().default(DEFAULT_CURSOR_CONTEXT),
     cwd: z.string(),
+    // Individual entries are validated by the policy, not the schema: one bad
+    // entry is ignored instead of rejecting the whole configuration.
+    // Raw values are accepted here and validated one entry at a time by the
+    // policy, so one bad type does not reject the whole configuration.
+    contextWindows: z.dict(z.any()),
+    models: z.dict(z.object({ enabled: z.boolean(), context: z.string() })),
+    publishedContext: z.boolean(),
   }),
   ollama: z.object({
     apiKeyRef: z.string().default(DEFAULT_OLLAMA_API_KEY_REF),
@@ -1396,9 +1418,52 @@ export function apply(ctx: Context, config: Config): void {
   })
   const cursorApiKeyRef = (): string =>
     config.cursor?.apiKeyRef ?? DEFAULT_CURSOR_API_KEY_REF
-  const cursorContext = (): string =>
-    config.cursor?.context ?? DEFAULT_CURSOR_CONTEXT
+  // Per field: the stored setting, then the configured baseline, then the route
+  // default. A model without any of them follows the route-wide tier.
+  const cursorPolicy = () => config.cursor
+  const cursorContextFor = (modelId: string | undefined): string =>
+    contextPreferenceFor(cursorSettings.get(), cursorPolicy(), modelId)
+  const cursorContext = (): string => cursorContextFor(undefined)
+  const cursorManualWindow = (modelId: string): number | undefined =>
+    manualWindowFor(cursorSettings.get(), cursorPolicy(), modelId)
+  const cursorEnabled = (modelId: string): boolean =>
+    enabledFor(cursorSettings.get(), cursorPolicy(), modelId)
+  const cursorPublishedEnabled = (): boolean =>
+    publishedContextEnabled(cursorSettings.get(), cursorPolicy())
+  const cursorTierWarning = (error: unknown): void => {
+    ctx.logger.warn(
+      `${name}: cannot save the accepted Cursor tier: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    )
+  }
+  // Published capacities are a cache read on the request path: a slow or failed
+  // refresh must never delay a turn, so the fetch runs out of band.
+  const cursorPublished = new PublishedContext({
+    enabled: () => cursorPublishedEnabled(),
+    fetch: hostFetch,
+    onWarn: (message) => ctx.logger.warn(`${name}: ${message}`),
+    persist: (snapshot) => {
+      void savePublishedContext(snapshot).catch((error: unknown) => {
+        ctx.logger.warn(
+          `${name}: cannot save published capacities: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        )
+      })
+    },
+  })
+  void loadPublishedContext().then(
+    (snapshot) => {
+      cursorPublished.load(snapshot)
+    },
+    () => undefined,
+  )
   let cursorAdapter: CursorAdapter | undefined
+  let cursorRouteHandle: AdapterRegistrationHandle | undefined
+  const notifyCursorPicker = (): void => {
+    cursorRouteHandle?.replace([CURSOR_ROUTE])
+  }
   ctx.inject(['credentials'], (credentialsCtx) => {
     const resolveCredential = createCredentialResolver(credentialsCtx)
     const adapter = new CursorAdapter({
@@ -1406,13 +1471,37 @@ export function apply(ctx: Context, config: Config): void {
       apiKey: async () => (await resolveCredential(cursorApiKeyRef()))?.value,
       cwd: (sessionId) =>
         cursorWorkingDirectory(ctx, sessionId, config.cursor?.cwd),
-      contextPreference: cursorContext,
+      contextPreference: cursorContextFor,
+      publishedWindow: (modelId) => cursorPublished.windowFor(modelId),
+      manualWindow: cursorManualWindow,
+      enabled: cursorEnabled,
+      acceptedTier: (modelId, preference) =>
+        cursorSettings.acceptedTier(modelId, preference),
+      rememberAcceptedTier: (modelId, value, preference) => {
+        void cursorSettings
+          .rememberAcceptedTier(modelId, value, preference)
+          .catch(cursorTierWarning)
+      },
+      forgetAcceptedTier: (modelId, expected) => {
+        const write =
+          expected === undefined
+            ? cursorSettings.forgetAcceptedTier(modelId)
+            : cursorSettings.forgetAcceptedTierIf(modelId, expected)
+        void write.catch(cursorTierWarning)
+      },
+      onCatalog: (ids) => cursorPublished.note(ids),
+      // Fired after the new metadata is installed, so a synchronous re-list in
+      // the host sees the same entry the notification is about.
+      onCatalogApplied: () => notifyCursorPicker(),
       keyRef: cursorApiKeyRef(),
       readImage: cursorImageReader(ctx),
       onWarn: (message) => ctx.logger.warn(`${name}: ${message}`),
     })
     cursorAdapter = adapter
-    registerKeyRoute(credentialsCtx, CURSOR_ROUTE, adapter)
+    cursorRouteHandle = registerKeyRoute(credentialsCtx, CURSOR_ROUTE, adapter)
+    // A stored catalog revalidates at plugin start, and its ids reach the
+    // public projection even before the first picker read.
+    void adapter.revalidateCatalog()
   })
   ctx.effect(
     () => () => {
@@ -1460,15 +1549,37 @@ export function apply(ctx: Context, config: Config): void {
     cursorSettings,
     cursorApiKeyRef,
     cursorContext,
+    cursorCatalog: async (refresh?: boolean) => {
+      if (refresh === true) {
+        return (await cursorAdapter?.refreshCatalog()) ?? []
+      }
+      return (await cursorAdapter?.catalogSnapshot()) ?? []
+    },
+    cursorConfig: () => config.cursor ?? {},
+    cursorPublishedWindow: (modelId: string) =>
+      cursorPublished.windowFor(modelId),
+    cursorKnownContext: () => {
+      const fetchedAt = cursorPublished.fetchedAt()
+      return {
+        enabled: cursorPublishedEnabled(),
+        ...(fetchedAt === undefined ? {} : { fetchedAt }),
+      }
+    },
+    cursorRefreshContext: async () => {
+      const models = (await cursorAdapter?.catalogSnapshot()) ?? []
+      return cursorPublished.refresh(models.map((model) => model.id))
+    },
+    cursorNotifyPicker: notifyCursorPicker,
     // Opening the card must not reach the SDK; only its Refresh asks for a
     // live discovery, and the picker keeps the cache current meanwhile.
+    // The count is the enabled models, which is what the picker lists.
     cursorModelCount: async (refresh?: boolean) => {
-      if (refresh !== true) return cursorAdapter?.cachedModelCount()
-      try {
-        return (await ctx.llm.listModels(CURSOR_ROUTE)).length
-      } catch {
-        return undefined
-      }
+      if (cursorAdapter === undefined) return undefined
+      const models =
+        refresh === true
+          ? await cursorAdapter.refreshCatalog()
+          : await cursorAdapter.catalogSnapshot()
+      return models.filter((model) => cursorEnabled(model.id)).length
     },
   })
 

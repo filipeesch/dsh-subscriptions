@@ -1,6 +1,6 @@
 {
   "name": "dsh-subscriptions",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Unified subscription providers and usage dashboard for DeepSeek Harness",
   "icon": "./icon.svg",
   "license": "MIT",
@@ -103,6 +103,7 @@
     "@deepseek-ai/schemastery": "3.18.4",
     "@eslint/js": "^10.0.1",
     "@stryker-mutator/core": "^10.0.0",
+    "@types/jsdom": "^30.0.0",
     "@types/node": "^24.0.0",
     "@types/react": "~18.3.1",
     "@types/react-dom": "~18.3.7",
@@ -112,6 +113,7 @@
     "fast-check": "^4.10.2",
     "globals": "^17.13.0",
     "husky": "^9.1.7",
+    "jsdom": "^31.0.1",
     "lint-staged": "^17.6.0",
     "prettier": "^3.9.10",
     "react": "^18.2.0",

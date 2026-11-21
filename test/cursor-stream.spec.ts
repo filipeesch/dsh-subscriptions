@@ -1,9 +1,14 @@
 import assert from 'node:assert/strict'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { CursorAdapter } from '../src/providers/cursor/adapter.js'
+import { memoryCatalogStore, memoryTierStore } from './cursor-test-helpers.js'
 import { CursorRuntime } from '../src/providers/cursor/runtime.js'
+import { CursorSettingsStore } from '../src/providers/cursor-settings.js'
 import { ChunkQueue, Reply } from '../src/providers/cursor/reply.js'
 import type {
   CursorAgent,
@@ -39,13 +44,19 @@ function request(
   }
 }
 
-function adapterOf(gateway: CursorGateway): CursorAdapter {
+function adapterOf(
+  gateway: CursorGateway,
+  overrides: Partial<ConstructorParameters<typeof CursorAdapter>[0]> = {},
+): CursorAdapter {
   return new CursorAdapter({
     gateway,
     apiKey: async () => 'crsr_test',
     cwd: () => '/tmp',
     keyRef: 'CURSOR_API_KEY',
     prewarm: false,
+    catalogPersistence: memoryCatalogStore(),
+    ...memoryTierStore(),
+    ...overrides,
   })
 }
 
@@ -919,6 +930,8 @@ test('a rotated credential opens a new agent', async () => {
     cwd: () => '/tmp',
     keyRef: 'CURSOR_API_KEY',
     prewarm: false,
+    catalogPersistence: memoryCatalogStore(),
+    ...memoryTierStore(),
   })
   const base = [
     {
@@ -1399,6 +1412,7 @@ test('a catalog refresh withdraws a learned tier from reuse', async () => {
     cwd: () => '/tmp',
     contextPreference: () => 'max',
     keyRef: 'CURSOR_API_KEY',
+    ...memoryTierStore(),
   })
   const catalog = (values: string[]) => ({
     id: 'claude-sonnet-5-5',
@@ -1555,6 +1569,8 @@ test('an older turn whose credentials resolve late cannot take over', async () =
     cwd: () => '/tmp',
     keyRef: 'CURSOR_API_KEY',
     prewarm: false,
+    catalogPersistence: memoryCatalogStore(),
+    ...memoryTierStore(),
   })
   // Warm the catalog with the immediate key so only turn credentials gate.
   await adapter.listModels('cursor')
@@ -1625,6 +1641,8 @@ test('an unload during catalog setup finishes aborted and dispatches nothing', a
     cwd: () => '/tmp',
     keyRef: 'CURSOR_API_KEY',
     prewarm: false,
+    catalogPersistence: memoryCatalogStore(),
+    ...memoryTierStore(),
   })
   const chunks: Chunk[] = []
   const stream = (async () => {
@@ -1963,6 +1981,8 @@ test('early exits release their cancellation state', async () => {
     cwd: () => '/tmp',
     keyRef: 'CURSOR_API_KEY',
     prewarm: false,
+    catalogPersistence: memoryCatalogStore(),
+    ...memoryTierStore(),
   })
   for (const session of ['a', 'b', 'c', 'd']) {
     await collect(
@@ -2004,6 +2024,8 @@ test('a standalone catalog read stops waiting when the adapter is disposed', asy
     cwd: () => '/tmp',
     keyRef: 'CURSOR_API_KEY',
     prewarm: false,
+    catalogPersistence: memoryCatalogStore(),
+    ...memoryTierStore(),
   })
   const picker = adapter.listModels('cursor')
   await delay(20)
@@ -2097,6 +2119,8 @@ test('an abandoned reservation expires and cannot take ownership', async () => {
     cwd: () => '/tmp',
     keyRef: 'CURSOR_API_KEY',
     prewarm: false,
+    catalogPersistence: memoryCatalogStore(),
+    ...memoryTierStore(),
     reservationTtlMs: 10,
   })
   const runtime = (
@@ -2175,6 +2199,8 @@ test("expiry never takes an admitted turn's ownership", async () => {
     cwd: () => '/tmp',
     keyRef: 'CURSOR_API_KEY',
     prewarm: false,
+    catalogPersistence: memoryCatalogStore(),
+    ...memoryTierStore(),
     reservationTtlMs: 10,
   })
   const slow = collect(
@@ -2230,34 +2256,107 @@ test('concurrent catalog callers share one discovery', async () => {
   }
 })
 
-test('repeated refreshes leave no catalog wait attached to the lifetime', async () => {
+test('the catalog is read once inside its TTL and disposal stops further reads', async () => {
   const { gateway } = gatewayWith(() => ({
     async send() {
       throw new Error('must not send')
     },
     close() {},
   }))
-  gateway.listModels = async () => [{ id: 'a', displayName: 'A' }]
+  let calls = 0
+  gateway.listModels = async () => {
+    calls += 1
+    return [{ id: 'a', displayName: 'A' }]
+  }
   const adapter = new CursorAdapter({
     gateway,
     apiKey: async () => 'crsr_test',
     cwd: () => '/tmp',
     keyRef: 'CURSOR_API_KEY',
     prewarm: false,
-    catalogTtlMs: 0,
+    catalogPersistence: memoryCatalogStore(),
+    ...memoryTierStore(),
+    catalogTtlMs: 60_000,
   })
   for (let index = 0; index < 5; index++) {
     const models = await adapter.listModels('cursor')
     assert.deepEqual(
       models.map((model) => model.id),
       ['a'],
-    )
-    assert.equal(
-      adapter.pendingCatalogWaits(),
-      0,
-      `refresh ${index} left a lifetime wait attached`,
+      `refresh ${index} served the catalog`,
     )
   }
+  assert.equal(calls, 1, 'a fresh catalog is not re-read')
+  const before = calls
   adapter.dispose()
-  assert.equal(adapter.pendingCatalogWaits(), 0)
+  // A disposed adapter keeps the last known catalog but never calls the SDK again.
+  assert.deepEqual(
+    (await adapter.listModels('cursor')).map((model) => model.id),
+    ['a'],
+  )
+  assert.equal(calls, before)
+})
+
+test('the accepted tier is announced after a rejection and after a restart', async () => {
+  const attempts: (string | undefined)[] = []
+  const tiers = memoryTierStore()
+  const adapter = adapterOf(retryGateway(attempts, ['1m']), tiers)
+  assert.deepEqual(
+    (await adapter.resolveModel('cursor', 'claude-sonnet-5-5')).context,
+    { contextWindow: 1_000_000 },
+  )
+  await collect(adapter, retryRequest('announce-one'))
+  assert.deepEqual(
+    (await adapter.resolveModel('cursor', 'claude-sonnet-5-5')).context,
+    { contextWindow: 200_000 },
+    'the tier Cursor accepted is the one the host must meter',
+  )
+  // A restart reads the remembered tier from the same store.
+  const restarted = adapterOf(retryGateway([], ['1m']), tiers)
+  assert.deepEqual(
+    (await restarted.resolveModel('cursor', 'claude-sonnet-5-5')).context,
+    { contextWindow: 200_000 },
+  )
+})
+
+test('a learned tier is visible immediately and survives a restart on disk', async () => {
+  const path = join(
+    mkdtempSync(join(tmpdir(), 'cursor-tier-settings-')),
+    'settings.json',
+  )
+  const store = new CursorSettingsStore(path)
+  let writing: Promise<void> = Promise.resolve()
+  const wiring = {
+    acceptedTier: (modelId: string, preference: string) =>
+      store.acceptedTier(modelId, preference),
+    rememberAcceptedTier: (
+      modelId: string,
+      value: string,
+      preference: string,
+    ) => {
+      writing = store.rememberAcceptedTier(modelId, value, preference)
+    },
+    forgetAcceptedTier: (modelId: string) => {
+      writing = store.forgetAcceptedTier(modelId)
+    },
+  }
+  const attempts: (string | undefined)[] = []
+  const adapter = adapterOf(retryGateway(attempts, ['1m']), wiring)
+  await collect(adapter, retryRequest('tier-file'))
+  // The same turn's end is followed by a resolution that already sees it.
+  assert.deepEqual(
+    (await adapter.resolveModel('cursor', 'claude-sonnet-5-5')).context,
+    { contextWindow: 200_000 },
+  )
+  await writing
+  const restarted = adapterOf(retryGateway([], ['1m']), wiring)
+  assert.deepEqual(
+    (await restarted.resolveModel('cursor', 'claude-sonnet-5-5')).context,
+    { contextWindow: 200_000 },
+    'the durable record decides the announced window after a restart',
+  )
+  assert.equal(
+    new CursorSettingsStore(path).acceptedTier('claude-sonnet-5-5', 'max'),
+    '200k',
+  )
 })

@@ -1,41 +1,22 @@
 /**
- * Cursor's catalog as DSH model info, and DSH reasoning efforts as the
- * parameters Cursor accepts.
+ * Cursor parameters: context tiers and DSH reasoning efforts as the values the
+ * provider accepts.
  *
- * Cursor describes each model with parameter definitions (`thinking`,
- * `effort`, `fast`, `context`, …) whose allowed values differ per model.
- * Everything here works from those definitions, so a new model or value needs
- * no code change.
+ * Everything works from the catalog's own parameter definitions, so a new model
+ * or value needs no code change.
  */
 
-/** Route id owned by the Cursor adapter. Not a member of the OAuth `PROVIDER_IDS`. */
-export const CURSOR_ROUTE = 'cursor'
-
-/** Default credential reference naming the Cursor API key. */
-export const DEFAULT_CURSOR_API_KEY_REF = 'CURSOR_API_KEY'
+import {
+  defsOf,
+  find,
+  values,
+  type CursorCatalogModel,
+  type CursorParam,
+  type CursorParamDef,
+} from './catalog.js'
 
 /** Context tier used when configuration names none: the largest offered. */
 export const DEFAULT_CURSOR_CONTEXT = 'max'
-
-/** One parameter definition from Cursor's catalog. */
-export interface CursorParamDef {
-  id: string
-  values?: ({ value: string } | string)[]
-}
-
-/** One parameter sent with a request. */
-export interface CursorParam {
-  id: string
-  value: string
-}
-
-/** One catalog entry Cursor reports for the account. */
-export interface CursorCatalogModel {
-  id: string
-  displayName?: string
-  parameters?: CursorParamDef[]
-  variants?: unknown[]
-}
 
 /** Rank of the effort spellings Cursor uses, least to greatest. */
 const LEVEL_RANK: Record<string, number> = {
@@ -49,38 +30,14 @@ const LEVEL_RANK: Record<string, number> = {
   max: 6,
 }
 
-function values(def: CursorParamDef | undefined): string[] {
-  return (def?.values ?? []).map((value) =>
-    String(typeof value === 'object' ? value.value : value),
-  )
-}
-
-function find(
-  defs: CursorParamDef[],
-  ...ids: string[]
-): CursorParamDef | undefined {
-  return defs.find((def) => ids.includes(def?.id))
-}
-
 // `thinking` is Claude's on/off switch and must not be mistaken for the effort
 // parameter.
 function effortDef(defs: CursorParamDef[]): CursorParamDef | undefined {
   return find(defs, 'effort', 'reasoning_effort', 'reasoning')
 }
 
-function defsOf(
-  model: { cursorParameters?: unknown; parameters?: unknown } | undefined,
-): CursorParamDef[] {
-  const defs = model?.cursorParameters ?? model?.parameters
-  return Array.isArray(defs) ? (defs as CursorParamDef[]) : []
-}
-
-/** Only `auto` is an alias; every other id goes to Cursor unchanged. */
-export function resolveModelId(id: string): string {
-  return id === 'auto' ? 'default' : id
-}
-
-function tokens(value: string): number | undefined {
+/** Tokens of one tier value such as `300k` or `1m`; undefined for anything else. */
+export function tierTokens(value: string): number | undefined {
   const match = /^(\d+(?:\.\d+)?)([km])$/i.exec(value.trim())
   return match
     ? Math.round(
@@ -93,7 +50,7 @@ function tiers(
   def: CursorParamDef | undefined,
 ): { value: string; tokens: number }[] {
   return values(def)
-    .map((value) => ({ value, tokens: tokens(value) ?? 0 }))
+    .map((value) => ({ value, tokens: tierTokens(value) ?? 0 }))
     .filter((tier) => tier.tokens > 0)
     .sort((a, b) => a.tokens - b.tokens)
 }
@@ -107,9 +64,9 @@ export function offeredContextValues(
 
 /**
  * The offered context tier a preference names. `max` (the default) selects the
- * largest tier; an exact tier such as `300k` selects itself; an unknown value
- * falls back to the largest, because the largest is what a reader expects from
- * an unset preference.
+ * largest tier; `min` the smallest; an exact tier such as `300k` selects
+ * itself; an unknown value falls back to the largest, because the largest is
+ * what a reader expects from an unset preference.
  */
 export function preferredContext(
   def: CursorParamDef | undefined,
@@ -119,9 +76,65 @@ export function preferredContext(
   if (all.length === 0) return undefined
   const want = preference.trim().toLowerCase()
   if (want === 'max') return all[all.length - 1]
+  if (want === 'min') return all[0]
   return (
     all.find((tier) => tier.value.toLowerCase() === want) ?? all[all.length - 1]
   )
+}
+
+/**
+ * The tier to request for one model.
+ *
+ * A value the provider already accepted for this model wins while the catalog
+ * still offers it; otherwise a preference of `max` (largest), `min`
+ * (smallest), or an offered value such as `300k` selects the tier. Undefined
+ * for a model that offers no tiers.
+ *
+ * @param model - the catalog entry.
+ * @param accepted - a tier the provider accepted after a rejection.
+ * @param preference - the configured tier preference.
+ * @returns the offered tier value to send, or undefined.
+ */
+export function contextTierValue(
+  model: { cursorParameters?: unknown; parameters?: unknown } | undefined,
+  accepted: string | undefined,
+  preference = DEFAULT_CURSOR_CONTEXT,
+): string | undefined {
+  const offered = offeredContextValues(model)
+  if (offered.length === 0) return undefined
+  const acceptedValue =
+    accepted === undefined ? undefined : offeredTierValue(model, accepted)
+  if (acceptedValue !== undefined) return acceptedValue
+  const wanted = preference.trim().toLowerCase()
+  if (wanted === 'max') return offered[offered.length - 1]
+  if (wanted === 'min') return offered[0]
+  return (
+    offered.find((tier) => tier.toLowerCase() === wanted) ??
+    offered[offered.length - 1]
+  )
+}
+
+/**
+ * The exact offered spelling of one tier value, matched case-insensitively.
+ * The request must carry the catalog's spelling, not the caller's, so request
+ * and announcement cannot disagree about the tier.
+ */
+export function offeredTierValue(
+  model: CursorCatalogModel | { parameters?: unknown } | undefined,
+  value: string,
+): string | undefined {
+  const wanted = value.trim().toLowerCase()
+  return offeredContextValues(model).find(
+    (tier) => tier.toLowerCase() === wanted,
+  )
+}
+
+/** Whether one model offers a tier value, matched case-insensitively. */
+export function offersTier(
+  model: CursorCatalogModel | { parameters?: unknown } | undefined,
+  value: string,
+): boolean {
+  return offeredTierValue(model, value) !== undefined
 }
 
 /**
@@ -134,7 +147,7 @@ export function smallerContext(
   params: CursorParam[] | undefined,
 ): CursorParam[] | undefined {
   const current = params?.find((param) => param.id === 'context')
-  const size = current && tokens(current.value)
+  const size = current && tierTokens(current.value)
   if (!size || !params) return undefined
   const next = tiers(find(defsOf(model), 'context'))
     .filter((tier) => tier.tokens < size)
@@ -181,6 +194,10 @@ export const ON = 'on'
  * Explicit Cursor parameters for one request. Without them Cursor picks its own
  * defaults, including Fast (priority pricing) and a smaller context than the
  * catalog offers.
+ *
+ * @param model - the catalog entry the request names.
+ * @param reasoning - DSH's selected effort, or `off`.
+ * @param contextPreference - the tier preference this model resolves.
  */
 export function modelParams(
   model: { cursorParameters?: unknown; parameters?: unknown } | undefined,
@@ -255,46 +272,3 @@ export function reasoningInfo(
     defaultEffort,
   }
 }
-
-/**
- * Display name per model id. Names Cursor shares across models (`default` and
- * `auto-smart` are both "Auto") get the id appended.
- */
-export function modelNames(
-  models: readonly CursorCatalogModel[],
-): Map<string, string> {
-  const base = (model: CursorCatalogModel) => model.displayName || model.id
-  const count = new Map<string, number>()
-  for (const model of models) {
-    count.set(base(model), (count.get(base(model)) ?? 0) + 1)
-  }
-  return new Map(
-    models.map((model) => [
-      model.id,
-      (count.get(base(model)) ?? 0) > 1
-        ? `${base(model)} (${model.id})`
-        : base(model),
-    ]),
-  )
-}
-
-/** Context window the route advertises for one model. */
-export function contextWindowFor(
-  model: { cursorParameters?: unknown; parameters?: unknown } | undefined,
-  contextPreference = DEFAULT_CURSOR_CONTEXT,
-): number {
-  return (
-    preferredContext(find(defsOf(model), 'context'), contextPreference)
-      ?.tokens ?? 200_000
-  )
-}
-
-/** Shown until the live catalog loads (no key yet, or offline). */
-export const FALLBACK_MODELS: CursorCatalogModel[] = [
-  { id: 'default', displayName: 'Cursor Default' },
-  { id: 'claude-opus-5-5', displayName: 'Claude Opus 5.5' },
-  { id: 'claude-sonnet-5-5', displayName: 'Claude Sonnet 5.5' },
-  { id: 'claude-haiku-5-5', displayName: 'Claude Haiku 5.5' },
-  { id: 'gpt-5.6-sol', displayName: 'GPT-5.6 Sol' },
-  { id: 'gemini-4-argon', displayName: 'Gemini 4 Argon' },
-]

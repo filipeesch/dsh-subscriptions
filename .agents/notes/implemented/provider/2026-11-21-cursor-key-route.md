@@ -18,18 +18,18 @@ The plugin's stated rule was zero runtime dependencies, which the SDK ends.
 
 Cursor ships as the second key-based route (`cursor`), outside `PROVIDER_IDS`: a
 credential reference defaults to `CURSOR_API_KEY`, the adapter registers under
-`ctx.inject(['credentials'])`, and the route ships no stored catalog — it lists
-what Cursor reports, hides itself without a key, and falls back to a built-in
-list of known ids when the catalog read fails. Only the provider runtime is
-ported from `cursor-to-dsh`; its plugin entry, config schema, and environment
-variables stay behind.
+`ctx.inject(['credentials'])`, and the route stores the last catalog it read —
+it seeds from that catalog, hides itself without a key, and falls back to a
+built-in list of known ids only when neither a live read nor a stored catalog is
+available. Only the provider runtime is ported from `cursor-to-dsh`; its plugin
+entry, config schema, and environment variables stay behind.
 
 `@cursor/sdk` is a pinned runtime dependency, the package's first, loaded on
 first use through an injected gateway so the entry module and the test suite
 never import it. `CursorRuntime` owns the session registry, the calibrated
-prompt overhead, the context tier that worked after a rejection, and prewarm, so
-the adapter holds no module-level mutable state and a disposer closes every
-agent.
+prompt overhead, and prewarm, so the adapter holds no module-level mutable state
+and a disposer closes every agent; the context tier Cursor accepted after a
+rejection lives in the route's stored settings instead.
 
 Quota comes from Cursor's own RPCs, not the web dashboard (which requires a
 session cookie): `POST /auth/exchange_user_api_key` with the key as a bearer,

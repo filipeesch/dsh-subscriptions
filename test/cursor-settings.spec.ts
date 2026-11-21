@@ -1,5 +1,11 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -7,6 +13,14 @@ import {
   CursorSettingsStore,
   validateCursorSettings,
 } from '../src/providers/cursor-settings.js'
+
+function storeAt(): { store: CursorSettingsStore; path: string } {
+  const path = join(
+    mkdtempSync(join(tmpdir(), 'cursor-settings-')),
+    'settings.json',
+  )
+  return { store: new CursorSettingsStore(path), path }
+}
 
 test('a positive ceiling validates and an invalid one is refused', () => {
   assert.deepEqual(validateCursorSettings({ monthlyCeilingUSD: 2500 }), {
@@ -19,13 +33,58 @@ test('a positive ceiling validates and an invalid one is refused', () => {
   assert.throws(() => validateCursorSettings([]))
 })
 
+test('per-model settings, the source switch, and accepted tiers validate', () => {
+  assert.deepEqual(
+    validateCursorSettings({
+      publishedContext: false,
+      models: {
+        ' deepseek-v41-flash-1017 ': {
+          enabled: false,
+          context: 'max',
+          contextWindow: 1_000_000,
+        },
+      },
+      acceptedTiers: {
+        'claude-sonnet-5-5': { value: '200k', preference: 'max' },
+      },
+    }),
+    {
+      publishedContext: false,
+      models: {
+        'deepseek-v41-flash-1017': {
+          enabled: false,
+          context: 'max',
+          contextWindow: 1_000_000,
+        },
+      },
+      acceptedTiers: {
+        'claude-sonnet-5-5': { value: '200k', preference: 'max' },
+      },
+    },
+  )
+  // Unknown fields are dropped rather than stored.
+  assert.deepEqual(validateCursorSettings({ extra: 1 }), {})
+  for (const invalid of [
+    { publishedContext: 'on' },
+    { models: [] },
+    { models: { '': { enabled: true } } },
+    { models: { m: { enabled: 'yes' } } },
+    { models: { m: { context: '' } } },
+    { models: { m: { contextWindow: 0 } } },
+    { models: { m: { contextWindow: 1.5 } } },
+    { acceptedTiers: { m: { value: '', preference: 'max' } } },
+    { acceptedTiers: { m: { value: '200k', preference: 3 } } },
+    { acceptedTiers: [] },
+  ]) {
+    assert.throws(
+      () => validateCursorSettings(invalid),
+      JSON.stringify(invalid),
+    )
+  }
+})
+
 test('the store round-trips and reports a corrupt file without failing', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'cursor-settings-'))
-  const path = join(dir, 'cursor-settings.json')
-  const corruptMessages: string[] = []
-  const store = new CursorSettingsStore(path, (message) => {
-    corruptMessages.push(message)
-  })
+  const { store, path } = storeAt()
   assert.equal(store.ceilingUSD(), undefined)
   await store.set({ monthlyCeilingUSD: 2500 })
   assert.equal(store.ceilingUSD(), 2500)
@@ -34,6 +93,7 @@ test('the store round-trips and reports a corrupt file without failing', async (
   const reloaded = new CursorSettingsStore(path)
   assert.equal(reloaded.ceilingUSD(), 2500)
 
+  const corruptMessages: string[] = []
   writeFileSync(path, '{not json')
   const broken = new CursorSettingsStore(path, (message) => {
     corruptMessages.push(message)
@@ -42,4 +102,149 @@ test('the store round-trips and reports a corrupt file without failing', async (
   assert.equal(corruptMessages.length, 1)
   await broken.set({})
   assert.equal(broken.corruption(), undefined)
+})
+
+test('a remembered tier is scoped to the preference that produced it', async () => {
+  const { store, path } = storeAt()
+  await store.rememberAcceptedTier('claude-sonnet-5-5', '200k', 'max')
+  assert.equal(store.acceptedTier('claude-sonnet-5-5', 'max'), '200k')
+  // A changed preference retries the configured tier.
+  assert.equal(store.acceptedTier('claude-sonnet-5-5', 'min'), undefined)
+  await store.forgetAcceptedTier('claude-sonnet-5-5')
+  assert.equal(store.acceptedTier('claude-sonnet-5-5', 'max'), undefined)
+  const reloaded = new CursorSettingsStore(path)
+  assert.equal(reloaded.acceptedTier('claude-sonnet-5-5', 'max'), undefined)
+})
+
+test('the ceiling update keeps the rest of the document', async () => {
+  const { store } = storeAt()
+  await store.set({
+    publishedContext: false,
+    models: { 'claude-sonnet-5-5': { contextWindow: 200_000 } },
+    acceptedTiers: {
+      'claude-sonnet-5-5': { value: '200k', preference: 'max' },
+    },
+  })
+  await store.setCeiling(2500)
+  const settings = store.get()
+  assert.equal(settings.monthlyCeilingUSD, 2500)
+  assert.equal(settings.publishedContext, false)
+  assert.equal(settings.models?.['claude-sonnet-5-5']?.contextWindow, 200_000)
+  assert.equal(settings.acceptedTiers?.['claude-sonnet-5-5']?.value, '200k')
+  await store.setCeiling(undefined)
+  assert.equal(store.get().monthlyCeilingUSD, undefined)
+  assert.equal(
+    store.get().models?.['claude-sonnet-5-5']?.contextWindow,
+    200_000,
+  )
+})
+
+test('serialized writes keep both per-model updates', async () => {
+  const { store } = storeAt()
+  await Promise.all([
+    store.rememberAcceptedTier('a', '200k', 'max'),
+    store.rememberAcceptedTier('b', '1m', 'max'),
+  ])
+  const reloaded = new CursorSettingsStore(store.path)
+  assert.equal(reloaded.acceptedTier('a', 'max'), '200k')
+  assert.equal(reloaded.acceptedTier('b', 'max'), '1m')
+})
+
+test('a settings write is visible before its disk write settles', () => {
+  const { store } = storeAt()
+  const pending = store.rememberAcceptedTier('claude-sonnet-5-5', '200k', 'max')
+  // The runtime reports success after the same turn; resolution must see it.
+  assert.equal(store.acceptedTier('claude-sonnet-5-5', 'max'), '200k')
+  return pending
+})
+
+test('a merge preserves concurrent ceiling, tier, and model writes', async () => {
+  const { store, path } = storeAt()
+  await Promise.all([
+    store.setCeiling(2500),
+    store.merge({ models: { 'composer-2': { contextWindow: 200_000 } } }),
+    store.rememberAcceptedTier('claude-sonnet-5-5', '200k', 'max'),
+    store.merge({ publishedContext: false }),
+  ])
+  const settings = store.get()
+  assert.equal(settings.monthlyCeilingUSD, 2500)
+  assert.equal(settings.models?.['composer-2']?.contextWindow, 200_000)
+  assert.equal(settings.acceptedTiers?.['claude-sonnet-5-5']?.value, '200k')
+  assert.equal(settings.publishedContext, false)
+  // The same document is what a fresh read sees.
+  const reloaded = new CursorSettingsStore(path)
+  assert.equal(reloaded.ceilingUSD(), 2500)
+  assert.equal(reloaded.publishedContext(), false)
+  assert.equal(reloaded.modelSettings('composer-2')?.contextWindow, 200_000)
+  assert.equal(reloaded.acceptedTier('claude-sonnet-5-5', 'max'), '200k')
+})
+
+test('a tier from another preference is pruned, never resurrected', async () => {
+  const { store } = storeAt()
+  await store.rememberAcceptedTier('claude-sonnet-5-5', '200k', 'min')
+  assert.equal(store.acceptedTier('claude-sonnet-5-5', 'max'), undefined)
+  await new Promise((resolveWait) => setTimeout(resolveWait, 20))
+  // Switching back does not bring the record back.
+  assert.equal(store.acceptedTier('claude-sonnet-5-5', 'min'), undefined)
+})
+
+test('pruning keeps a concurrent newer record', async () => {
+  const { store } = storeAt()
+  await store.rememberAcceptedTier('claude-sonnet-5-5', '200k', 'min')
+  // Reading under another preference schedules the guarded removal.
+  assert.equal(store.acceptedTier('claude-sonnet-5-5', 'max'), undefined)
+  // A newer, different record lands before the removal runs.
+  const newer = store.rememberAcceptedTier('claude-sonnet-5-5', '1m', 'max')
+  await newer
+  await new Promise((resolveWait) => setTimeout(resolveWait, 20))
+  assert.equal(store.acceptedTier('claude-sonnet-5-5', 'max'), '1m')
+})
+
+test('an invalid merge rejects without changing the document', async () => {
+  const { store } = storeAt()
+  await assert.rejects(
+    store.merge({
+      models: { m: { contextWindow: 0 } },
+    }),
+  )
+  assert.deepEqual(store.get(), {})
+})
+
+test('a failed save changes nothing and cannot leak into a later save', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'cursor-settings-'))
+  const blocker = join(root, 'blocker')
+  writeFileSync(blocker, 'not a directory')
+  const path = join(blocker, 'settings.json')
+  const store = new CursorSettingsStore(path)
+  await assert.rejects(store.merge({ publishedContext: false }))
+  // A rejected save must not change what the running route reads.
+  assert.equal(store.publishedContext(), undefined)
+  // Repair the path and save something unrelated.
+  rmSync(blocker)
+  mkdirSync(blocker)
+  await store.setCeiling(100)
+  assert.equal(store.ceilingUSD(), 100)
+  // The failed edit was neither active nor persisted by the later save.
+  assert.equal(store.publishedContext(), undefined)
+  assert.equal(new CursorSettingsStore(path).publishedContext(), undefined)
+})
+
+test('a learned tier is visible at once but a failed write stays memory-only', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'cursor-settings-'))
+  const blocker = join(root, 'blocker')
+  writeFileSync(blocker, 'not a directory')
+  const path = join(blocker, 'settings.json')
+  const store = new CursorSettingsStore(path)
+  const write = store.rememberAcceptedTier('claude-sonnet-5-5', '200k', 'max')
+  // The turn that learned it must see it without awaiting the disk.
+  assert.equal(store.acceptedTier('claude-sonnet-5-5', 'max'), '200k')
+  await assert.rejects(write)
+  rmSync(blocker)
+  mkdirSync(blocker)
+  await store.setCeiling(10)
+  // Still visible in memory, never written, so a restart does not resurrect it.
+  assert.equal(store.acceptedTier('claude-sonnet-5-5', 'max'), '200k')
+  const reloaded = new CursorSettingsStore(path)
+  assert.equal(reloaded.acceptedTier('claude-sonnet-5-5', 'max'), undefined)
+  assert.equal(reloaded.ceilingUSD(), 10)
 })
