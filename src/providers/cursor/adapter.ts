@@ -135,7 +135,18 @@ export class CursorAdapter extends LlmAdapter {
     return info
   }
 
-  override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+  override stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    // Reserve the turn's order at call time, before the generator is first
+    // iterated: a later call owns the conversation even if an earlier one
+    // starts its setup first.
+    const turnSeq = this.runtime.beginTurn()
+    return this.streamTurn(options, turnSeq)
+  }
+
+  private async *streamTurn(
+    options: GenerateOptions,
+    turnSeq: number,
+  ): AsyncIterable<StreamChunk> {
     if (options?.stop?.length) {
       throw new LlmError(
         'Cursor does not support stop sequences',
@@ -204,6 +215,7 @@ export class CursorAdapter extends LlmAdapter {
         ? {}
         : { sessionId: String(options.sessionId) }),
       ...(options.purpose === undefined ? {} : { purpose: options.purpose }),
+      turnSeq,
       reply,
     })
     // The turn resolves the key itself so a missing credential finishes the

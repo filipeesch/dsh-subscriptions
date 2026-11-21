@@ -383,6 +383,8 @@ export interface CursorTurnOptions {
   sessionId?: string
   /** Auxiliary call classification; title and compaction calls stay isolated. */
   purpose?: 'compaction' | 'session-title'
+  /** Adapter-assigned order, reserved before its async setup starts. */
+  turnSeq?: number
   reply: Reply
 }
 
@@ -397,12 +399,22 @@ export class CursorRuntime {
   private prewarmRun: CursorRun | undefined
   private prewarmCleanup: (() => Promise<void>) | undefined
   private disposed = false
+  /** Aborts every turn on unload, whether or not the SDK stream cooperates. */
+  private readonly lifetime = new AbortController()
+  private turnSeq = 0
 
   constructor(private readonly options: CursorRuntimeOptions) {}
+
+  /** Order a turn before its async setup starts; the adapter calls this. */
+  beginTurn(): number {
+    this.turnSeq += 1
+    return this.turnSeq
+  }
 
   /** Close every agent; called from the plugin's disposer. */
   dispose(): void {
     this.disposed = true
+    this.lifetime.abort()
     // The warmup's one cleanup closes whatever handle exists; its finally
     // then finds the agent already closed and does not close it again.
     void this.prewarmCleanup?.()
@@ -426,14 +438,55 @@ export class CursorRuntime {
 
   /** Run one DSH model call on a persistent Cursor session. */
   async runTurn(options: CursorTurnOptions): Promise<void> {
-    const { reply, transcript, signal } = options
-    if (signal?.aborted) {
+    const { reply, transcript } = options
+    // One signal per turn: the host's cancellation plus the runtime lifetime,
+    // so unloading interrupts credentials, creates, and sends alike.
+    const signal =
+      options.signal === undefined
+        ? this.lifetime.signal
+        : AbortSignal.any([options.signal, this.lifetime.signal])
+    const sessionKey = sessionKeyFor(
+      options.sessionId,
+      transcript,
+      options.purpose,
+    )
+    // Ownership follows the adapter's call order, reserved before any await:
+    // a later turn owns the conversation even if an earlier one sets up first.
+    const generation = options.turnSeq ?? this.beginTurn()
+    const prior = this.keyGeneration.get(sessionKey) ?? 0
+    if (generation < prior) {
+      reply.finish('aborted')
+      return
+    }
+    if (generation > prior) this.keyGeneration.set(sessionKey, generation)
+    const owns = () => (this.keyGeneration.get(sessionKey) ?? 0) === generation
+    const abortedNow = () => signal.aborted
+    let resolveAbort!: () => void
+    const aborted = new Promise<'aborted'>((resolve) => {
+      resolveAbort = () => resolve('aborted')
+    })
+    if (signal.aborted) resolveAbort()
+    let session: CursorSession | undefined
+    const onAbort = () => {
+      resolveAbort()
+      session?.wake()
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    if (signal.aborted) {
       reply.finish('aborted')
       return
     }
     let apiKey: string | undefined
     try {
-      apiKey = await this.options.apiKey()
+      const credential = await Promise.race([
+        this.options.apiKey().then((value) => ({ value })),
+        aborted,
+      ])
+      if (credential === 'aborted') {
+        reply.finish('aborted')
+        return
+      }
+      apiKey = credential.value
     } catch (error) {
       reply.finish('error', safeError(error, 'resolve the Cursor API key'))
       return
@@ -475,11 +528,6 @@ export class CursorRuntime {
       this.workingContext.delete(tierKey)
     }
     const credentialId = hash(apiKey)
-    const sessionKey = sessionKeyFor(
-      options.sessionId,
-      transcript,
-      options.purpose,
-    )
 
     const transcriptTokens = () =>
       estimateTranscript(
@@ -558,7 +606,7 @@ export class CursorRuntime {
         ))
     const candidates = (this.sessions.get(sessionKey) ?? []).filter(usable)
     const requestKey = requestKeyOf(modelId, requestedParams, credentialId)
-    let session = candidates.find((entry) => entry.requestKey === requestKey)
+    session = candidates.find((entry) => entry.requestKey === requestKey)
     let plan = planIncrement(session, messages)
     if (session === undefined) {
       // Only a verified pending handoff may reuse an agent whose parameters
@@ -594,23 +642,12 @@ export class CursorRuntime {
     let freshRun = false
     let emitted = false
     let tierRetried = false
-    let resolveAbort!: () => void
-    const aborted = new Promise<'aborted'>((resolve) => {
-      resolveAbort = () => resolve('aborted')
-    })
-    if (signal?.aborted) resolveAbort()
-    const onAbort = () => {
-      resolveAbort?.()
-      session?.wake()
-    }
-    signal?.addEventListener?.('abort', onAbort, { once: true })
-    const generation = (this.keyGeneration.get(sessionKey) ?? 0) + 1
-    this.keyGeneration.set(sessionKey, generation)
     try {
       const openFresh = async (
         effective: CursorParam[] | undefined,
         fellBack = false,
       ) => {
+        if (!owns() || abortedNow()) throw new TurnAborted()
         const created = await Promise.race([
           this.open(
             sessionKey,
@@ -628,9 +665,9 @@ export class CursorRuntime {
           }),
         ])
         created.fellBack = fellBack
-        // Creation is async: a cancel that landed meanwhile must close the
-        // agent instead of sending into it.
-        if (signal?.aborted) {
+        // Creation is async: a cancel or a newer turn that landed meanwhile
+        // must close the agent instead of sending into it.
+        if (!owns() || abortedNow()) {
           this.drop(created)
           throw new TurnAborted()
         }
@@ -657,6 +694,7 @@ export class CursorRuntime {
           if (error instanceof TurnAborted || !isRejectedParams(message)) {
             throw error
           }
+          if (!owns() || abortedNow()) throw new TurnAborted()
           const lower = smallerContext(options.model, params)
           if (!lower || tierRetried) throw error
           tierRetried = true
@@ -672,6 +710,7 @@ export class CursorRuntime {
         ]
           .filter(Boolean)
           .join('\n\n')
+        if (!owns() || abortedNow()) throw new TurnAborted()
         session.startRun(
           await sendGuarded(
             session,
@@ -690,9 +729,9 @@ export class CursorRuntime {
           note,
           sendGuarded,
           aborted,
-          () => signal?.aborted === true,
+          () => abortedNow() || !owns(),
         )
-        if (signal?.aborted) throw new TurnAborted()
+        if (abortedNow() || !owns()) throw new TurnAborted()
         if (continued) {
           session.systemPrompt = transcript.systemPrompt
         } else {
@@ -738,7 +777,7 @@ export class CursorRuntime {
             }
           }
         }
-        if (this.disposed || session.closed) {
+        if (this.disposed || session.closed || !owns()) {
           this.drop(session)
           reply.finish('aborted')
           return
@@ -832,7 +871,7 @@ export class CursorRuntime {
       }
     } catch (error) {
       if (session) this.drop(session)
-      const aborted = error instanceof TurnAborted || signal?.aborted === true
+      const aborted = error instanceof TurnAborted || abortedNow()
       reply.finish(
         aborted ? 'aborted' : 'error',
         aborted ? undefined : safeError(error, 'run the model'),

@@ -350,7 +350,7 @@ test('disposing while the agent is being created closes the late agent', async (
   assert.equal(
     (chunks.find((c) => c.type === 'finish')?.reason as { kind?: string })
       ?.kind,
-    'error',
+    'aborted',
   )
 })
 
@@ -1195,17 +1195,18 @@ test('cancelling a tool-change continuation sends no new prompt', async () => {
   )
 })
 
-test('a cancelled create never closes the agent that replaced it', async () => {
+test('a superseded turn creates no agent and leaves the newer one open', async () => {
   let created = 0
-  const pending: ((agent: CursorAgent) => void)[] = []
   const closed: string[] = []
+  const sends: string[] = []
   const makeAgent = (name: string): CursorAgent => ({
     async send() {
+      sends.push(name)
       return {
         async *stream() {
           yield {
             type: 'assistant',
-            message: { content: [{ type: 'text', text: name }] },
+            message: { content: [{ type: 'text', text: 'ok' }] },
           }
         },
         async wait() {
@@ -1219,38 +1220,32 @@ test('a cancelled create never closes the agent that replaced it', async () => {
     },
   })
   const { gateway } = gatewayWith(() => makeAgent('unused'))
-  gateway.createAgent = () => {
+  gateway.createAgent = async () => {
     created += 1
-    const index = created
-    return new Promise<CursorAgent>((resolve) => {
-      pending.push((agent) => resolve(agent))
-      void index
-    })
+    return makeAgent(created === 1 ? 'A' : 'B')
   }
   const adapter = adapterOf(gateway)
-  const controller = new AbortController()
   const first = collect(
     adapter,
     request([{ role: 'user', content: [{ type: 'text', text: 'A' }] }], {
-      sessionId: 'race' as never,
-      signal: controller.signal,
+      sessionId: 'order' as never,
     }),
   )
   const second = collect(
     adapter,
     request([{ role: 'user', content: [{ type: 'text', text: 'B' }] }], {
-      sessionId: 'race' as never,
+      sessionId: 'order' as never,
     }),
   )
-  await delay(20)
-  assert.equal(created, 2)
-  pending[1]!(makeAgent('B'))
-  await second
-  controller.abort()
-  pending[0]!(makeAgent('A'))
-  await first
-  assert.deepEqual(closed, ['A'])
-  // B stays open and serves the next turn.
+  const [firstChunks] = await Promise.all([first, second])
+  assert.equal(
+    (firstChunks.find((c) => c.type === 'finish')?.reason as { kind?: string })
+      ?.kind,
+    'aborted',
+  )
+  // The newer turn is the only one that created, and it stays open.
+  assert.equal(created, 1)
+  assert.deepEqual(closed, [])
   await collect(
     adapter,
     request(
@@ -1261,19 +1256,19 @@ test('a cancelled create never closes the agent that replaced it', async () => {
         },
         {
           role: 'assistant' as const,
-          content: [{ type: 'text' as const, text: 'B' }],
+          content: [{ type: 'text' as const, text: 'ok' }],
         },
         {
           role: 'user' as const,
           content: [{ type: 'text' as const, text: 'C' }],
         },
       ],
-      { sessionId: 'race' as never },
+      { sessionId: 'order' as never },
     ),
   )
-  assert.deepEqual(closed, ['A'])
+  assert.equal(created, 1, 'the next turn reuses the newer agent')
+  assert.equal(sends.length, 2)
 })
-
 test('an unload finishes an active turn without the SDK stream ending', async () => {
   const { gateway } = gatewayWith(() => ({
     async send() {
@@ -1360,80 +1355,6 @@ test('an abort during a blocked create finishes before the create resolves', asy
   assert.equal(closed, 1)
 })
 
-test('an out-of-order create never replaces the newer agent', async () => {
-  let created = 0
-  const pending: ((agent: CursorAgent) => void)[] = []
-  const closed: string[] = []
-  const sends: string[] = []
-  const makeAgent = (name: string): CursorAgent => ({
-    async send() {
-      sends.push(name)
-      return {
-        async *stream() {
-          yield {
-            type: 'assistant',
-            message: { content: [{ type: 'text', text: name }] },
-          }
-        },
-        async wait() {
-          return { status: 'finished' }
-        },
-        async cancel() {},
-      }
-    },
-    close() {
-      closed.push(name)
-    },
-  })
-  const { gateway } = gatewayWith(() => makeAgent('unused'))
-  gateway.createAgent = () =>
-    new Promise<CursorAgent>((resolve) => {
-      created += 1
-      pending.push((agent) => resolve(agent))
-    })
-  const adapter = adapterOf(gateway)
-  const first = collect(
-    adapter,
-    request([{ role: 'user', content: [{ type: 'text', text: 'A' }] }], {
-      sessionId: 'order' as never,
-    }),
-  )
-  const second = collect(
-    adapter,
-    request([{ role: 'user', content: [{ type: 'text', text: 'B' }] }], {
-      sessionId: 'order' as never,
-    }),
-  )
-  await delay(20)
-  assert.equal(created, 2)
-  pending[1]!(makeAgent('B'))
-  await second
-  pending[0]!(makeAgent('A'))
-  await first
-  assert.deepEqual(closed, ['A'])
-  await collect(
-    adapter,
-    request(
-      [
-        {
-          role: 'user' as const,
-          content: [{ type: 'text' as const, text: 'B' }],
-        },
-        {
-          role: 'assistant' as const,
-          content: [{ type: 'text' as const, text: 'B' }],
-        },
-        {
-          role: 'user' as const,
-          content: [{ type: 'text' as const, text: 'C' }],
-        },
-      ],
-      { sessionId: 'order' as never },
-    ),
-  )
-  assert.deepEqual(sends, ['B', 'B'])
-})
-
 test('a catalog refresh withdraws a learned tier from reuse', async () => {
   const contexts: (string | undefined)[] = []
   let sends = 0
@@ -1509,4 +1430,175 @@ test('a catalog refresh withdraws a learned tier from reuse', async () => {
   await drive(catalog(['1m']), 'two', 'catalog')
   assert.deepEqual(contexts, ['1m', '200k', '1m'])
   assert.equal(sends, 1, 'the retired-tier agent is not reused')
+})
+
+test('an unload during a blocked create finishes aborted before it resolves', async () => {
+  let resolveAgent!: (agent: CursorAgent) => void
+  let closed = 0
+  const { gateway } = gatewayWith(() => ({
+    async send() {
+      throw new Error('must not send')
+    },
+    close() {},
+  }))
+  gateway.createAgent = () =>
+    new Promise<CursorAgent>((resolve) => {
+      resolveAgent = resolve
+    })
+  const adapter = adapterOf(gateway)
+  const chunks: Chunk[] = []
+  const stream = (async () => {
+    for await (const chunk of adapter.stream(
+      request([{ role: 'user', content: [{ type: 'text', text: 'hi' }] }]),
+    )) {
+      chunks.push(chunk as unknown as Chunk)
+    }
+  })()
+  await delay(20)
+  adapter.dispose()
+  await stream
+  assert.equal(
+    (chunks.find((c) => c.type === 'finish')?.reason as { kind?: string })
+      ?.kind,
+    'aborted',
+    'unload must finish before the create resolves',
+  )
+  resolveAgent({
+    async send() {
+      throw new Error('must not send')
+    },
+    close() {
+      closed += 1
+    },
+  })
+  await delay(20)
+  assert.equal(closed, 1)
+})
+
+test('an unload during a blocked send finishes aborted and cancels the late run', async () => {
+  let resolveSend!: (run: CursorRun) => void
+  let cancelled = 0
+  const { gateway } = gatewayWith(() => ({
+    async send() {
+      return await new Promise<CursorRun>((resolve) => {
+        resolveSend = resolve
+      })
+    },
+    close() {},
+  }))
+  const adapter = adapterOf(gateway)
+  const chunks: Chunk[] = []
+  const stream = (async () => {
+    for await (const chunk of adapter.stream(
+      request([{ role: 'user', content: [{ type: 'text', text: 'hi' }] }]),
+    )) {
+      chunks.push(chunk as unknown as Chunk)
+    }
+  })()
+  await delay(20)
+  adapter.dispose()
+  await stream
+  assert.equal(
+    (chunks.find((c) => c.type === 'finish')?.reason as { kind?: string })
+      ?.kind,
+    'aborted',
+    'unload must finish before the send resolves',
+  )
+  resolveSend({
+    async *stream() {},
+    async wait() {
+      return { status: 'finished' }
+    },
+    async cancel() {
+      cancelled += 1
+    },
+  })
+  await delay(20)
+  assert.equal(cancelled, 1)
+})
+
+test('an older turn whose credentials resolve late cannot take over', async () => {
+  let releaseKey!: (value: string) => void
+  let keyCalls = 0
+  let bSends = 0
+  const bAgent: CursorAgent = {
+    async send() {
+      bSends += 1
+      return {
+        async *stream() {
+          yield {
+            type: 'assistant',
+            message: { content: [{ type: 'text', text: 'B' }] },
+          }
+        },
+        async wait() {
+          return { status: 'finished' }
+        },
+        async cancel() {},
+      }
+    },
+    close() {},
+  }
+  const { gateway } = gatewayWith(() => bAgent)
+  const adapter = new CursorAdapter({
+    gateway,
+    apiKey: async () => {
+      keyCalls += 1
+      if (keyCalls === 1) return 'key-one'
+      if (keyCalls === 2) {
+        return await new Promise<string>((resolve) => {
+          releaseKey = resolve
+        })
+      }
+      return 'key-two'
+    },
+    cwd: () => '/tmp',
+    keyRef: 'CURSOR_API_KEY',
+    prewarm: false,
+  })
+  // Warm the catalog with the immediate key so only turn credentials gate.
+  await adapter.listModels('cursor')
+  const first = collect(
+    adapter,
+    request([{ role: 'user', content: [{ type: 'text', text: 'A' }] }], {
+      sessionId: 'creds' as never,
+    }),
+  )
+  const second = collect(
+    adapter,
+    request([{ role: 'user', content: [{ type: 'text', text: 'B' }] }], {
+      sessionId: 'creds' as never,
+    }),
+  )
+  await delay(20)
+  await second
+  releaseKey('key-one')
+  const firstChunks = await first
+  assert.equal(
+    (firstChunks.find((c) => c.type === 'finish')?.reason as { kind?: string })
+      ?.kind,
+    'aborted',
+  )
+  assert.equal(bSends, 1)
+  await collect(
+    adapter,
+    request(
+      [
+        {
+          role: 'user' as const,
+          content: [{ type: 'text' as const, text: 'B' }],
+        },
+        {
+          role: 'assistant' as const,
+          content: [{ type: 'text' as const, text: 'B' }],
+        },
+        {
+          role: 'user' as const,
+          content: [{ type: 'text' as const, text: 'C' }],
+        },
+      ],
+      { sessionId: 'creds' as never },
+    ),
+  )
+  assert.equal(bSends, 2)
 })
