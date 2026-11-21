@@ -1538,8 +1538,13 @@ function barProbe() {
     const bar = pill.querySelector('[role="img"]')
     const rowEl = pill.closest('[${row}]')
     const dockEl = pill.closest('[data-composer-dock]')
-    const layout = rowEl !== null ? 'row' : dockEl?.querySelector('[${dock}]') !== null ? 'dock' : 'none'
-    const siblings = rowEl === null ? [] : [...rowEl.querySelectorAll('button')].filter(
+    const dockPlaced =
+      dockEl !== null && dockEl.querySelector('[${dock}]') !== null
+    const layout = rowEl !== null ? 'row' : dockPlaced ? 'dock' : 'none'
+    // Order against a labelled context gauge in whichever layout holds the
+    // pill; a host that labels no gauge leaves the order unproven.
+    const scope = rowEl ?? dockEl
+    const siblings = scope === null ? [] : [...scope.querySelectorAll('button')].filter(
       (button) => button !== pill && /context/i.test(
         (button.getAttribute('aria-label') || '') + ' ' + (button.textContent || ''),
       ),

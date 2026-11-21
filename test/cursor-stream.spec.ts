@@ -17,6 +17,8 @@ const CATALOG = [
     id: 'claude-sonnet-5-5',
     displayName: 'Claude Sonnet 5.5',
     parameters: [
+      { id: 'thinking', values: [{ value: 'false' }, { value: 'true' }] },
+      { id: 'effort', values: [{ value: 'low' }, { value: 'high' }] },
       { id: 'context', values: [{ value: '200k' }, { value: '1m' }] },
     ],
   },
@@ -884,4 +886,389 @@ test('a model switch does not reuse the previous model agent', async () => {
   )
   assert.deepEqual(created, ['claude-sonnet-5-5', 'gpt-5.6-sol'])
   assert.deepEqual(sends, ['claude-sonnet-5-5', 'gpt-5.6-sol'])
+})
+
+test('a rotated credential opens a new agent', async () => {
+  const created: string[] = []
+  let key = 'key-one'
+  const agent = (): CursorAgent => ({
+    async send() {
+      return {
+        async *stream() {
+          yield {
+            type: 'assistant',
+            message: { content: [{ type: 'text', text: 'ok' }] },
+          }
+        },
+        async wait() {
+          return { status: 'finished' }
+        },
+        async cancel() {},
+      }
+    },
+    close() {},
+  })
+  const { gateway } = gatewayWith(() => {
+    created.push(key)
+    return agent()
+  })
+  const adapter = new CursorAdapter({
+    gateway,
+    apiKey: async () => key,
+    cwd: () => '/tmp',
+    keyRef: 'CURSOR_API_KEY',
+    prewarm: false,
+  })
+  const base = [
+    {
+      role: 'user' as const,
+      content: [{ type: 'text' as const, text: 'one' }],
+    },
+  ]
+  await collect(adapter, request(base, { sessionId: 'rotate' as never }))
+  key = 'key-two'
+  await collect(
+    adapter,
+    request(
+      [
+        ...base,
+        {
+          role: 'assistant' as const,
+          content: [{ type: 'text' as const, text: 'ok' }],
+        },
+        {
+          role: 'user' as const,
+          content: [{ type: 'text' as const, text: 'two' }],
+        },
+      ],
+      { sessionId: 'rotate' as never },
+    ),
+  )
+  assert.deepEqual(created, ['key-one', 'key-two'])
+})
+
+test('a reasoning change opens a new agent', async () => {
+  let creates = 0
+  const agent = (): CursorAgent => ({
+    async send() {
+      return {
+        async *stream() {
+          yield {
+            type: 'assistant',
+            message: { content: [{ type: 'text', text: 'ok' }] },
+          }
+        },
+        async wait() {
+          return { status: 'finished' }
+        },
+        async cancel() {},
+      }
+    },
+    close() {},
+  })
+  const { gateway } = gatewayWith(() => {
+    creates += 1
+    return agent()
+  })
+  const adapter = adapterOf(gateway)
+  const base = [
+    {
+      role: 'user' as const,
+      content: [{ type: 'text' as const, text: 'one' }],
+    },
+  ]
+  await collect(
+    adapter,
+    request(base, {
+      sessionId: 'effort' as never,
+      reasoningEffort: 'off' as never,
+    }),
+  )
+  await collect(
+    adapter,
+    request(
+      [
+        ...base,
+        {
+          role: 'assistant' as const,
+          content: [{ type: 'text' as const, text: 'ok' }],
+        },
+        {
+          role: 'user' as const,
+          content: [{ type: 'text' as const, text: 'two' }],
+        },
+      ],
+      { sessionId: 'effort' as never, reasoningEffort: 'high' as never },
+    ),
+  )
+  assert.equal(creates, 2)
+})
+
+test('a fallback learned during a handoff applies to the next conversation', async () => {
+  const contexts: (string | undefined)[] = []
+  const agentFor = (): CursorAgent => ({
+    async send(message: unknown) {
+      void message
+      return {
+        async *stream() {
+          yield {
+            type: 'assistant',
+            message: { content: [{ type: 'text', text: 'ok' }] },
+          }
+          yield {
+            type: 'assistant',
+            message: {
+              content: [
+                { type: 'text', text: 'continued' },
+                { type: 'toolCall', id: 'c1', name: 'tool', arguments: {} },
+              ],
+            },
+          }
+        },
+        async wait() {
+          return { status: 'finished' }
+        },
+        async cancel() {},
+      }
+    },
+    close() {},
+  })
+  const { gateway } = gatewayWith((options) => {
+    contexts.push(
+      (
+        options?.model as
+          { params?: { id: string; value: string }[] } | undefined
+      )?.params?.find((param) => param.id === 'context')?.value,
+    )
+    const context = contexts[contexts.length - 1]
+    if (context === '1m') {
+      return {
+        async send() {
+          return {
+            async *stream() {},
+            async wait() {
+              return {
+                status: 'error',
+                error: {
+                  message: 'invalid parameters for registry model claude',
+                },
+              }
+            },
+            async cancel() {},
+          }
+        },
+        close() {},
+      }
+    }
+    return agentFor()
+  })
+  const adapter = adapterOf(gateway)
+  await collect(
+    adapter,
+    request([{ role: 'user', content: [{ type: 'text', text: 'one' }] }], {
+      sessionId: 'learn' as never,
+    }),
+  )
+  await collect(
+    adapter,
+    request([{ role: 'user', content: [{ type: 'text', text: 'two' }] }], {
+      sessionId: 'learn-two' as never,
+    }),
+  )
+  assert.deepEqual(contexts, ['1m', '200k', '200k'])
+})
+
+test('cancelling a tool-change continuation sends no new prompt', async () => {
+  let sends = 0
+  let releaseWait!: () => void
+  let createOptions: CursorAgentOptions | undefined
+  const agent: CursorAgent = {
+    async send(_message) {
+      sends += 1
+      const tools = (
+        createOptions as
+          | {
+              local?: {
+                customTools?: Record<
+                  string,
+                  { execute: (args: unknown, ctx: unknown) => Promise<unknown> }
+                >
+              }
+            }
+          | undefined
+      )?.local?.customTools
+      for (const tool of Object.values(tools ?? {})) {
+        void tool.execute({}, { toolCallId: 'c1' })
+      }
+      return {
+        async *stream() {
+          yield {
+            type: 'assistant',
+            message: { content: [{ type: 'text', text: 'calling' }] },
+          }
+          await new Promise<void>((resolve) => {
+            releaseWait = resolve
+          })
+        },
+        async wait() {
+          return { status: 'finished' }
+        },
+        async cancel() {},
+      }
+    },
+    close() {},
+  }
+  const { gateway } = gatewayWith((options) => {
+    createOptions = options
+    return agent
+  })
+  const adapter = adapterOf(gateway)
+  const tools = [
+    {
+      name: 'tool',
+      description: 'A tool',
+      parameters: { type: 'object', properties: {} },
+    },
+  ]
+  const base = [
+    {
+      role: 'user' as const,
+      content: [{ type: 'text' as const, text: 'use it' }],
+    },
+  ]
+  await collect(adapter, request(base, { sessionId: 'cont' as never, tools }))
+  assert.equal(sends, 1)
+
+  const addedTools = [
+    ...tools,
+    {
+      name: 'tool2',
+      description: 'Another',
+      parameters: { type: 'object', properties: {} },
+    },
+  ]
+  const controller = new AbortController()
+  const chunks: Chunk[] = []
+  const stream = (async () => {
+    for await (const chunk of adapter.stream(
+      request(
+        [
+          ...base,
+          {
+            role: 'assistant' as const,
+            content: [
+              { type: 'text' as const, text: 'calling' },
+              {
+                type: 'tool-call' as const,
+                id: 'c1',
+                name: 'tool',
+                arguments: {},
+              },
+            ],
+          },
+          {
+            role: 'tool' as const,
+            toolCallId: 'c1',
+            content: [{ type: 'text' as const, text: 'r' }],
+          },
+        ],
+        {
+          sessionId: 'cont' as never,
+          tools: addedTools,
+          signal: controller.signal,
+        },
+      ),
+    )) {
+      chunks.push(chunk as unknown as Chunk)
+    }
+  })()
+  await delay(20)
+  controller.abort()
+  releaseWait()
+  await stream
+  assert.equal(sends, 1, 'the cancelled continuation must not resend')
+  assert.equal(
+    (chunks.find((c) => c.type === 'finish')?.reason as { kind?: string })
+      ?.kind,
+    'aborted',
+  )
+})
+
+test('a cancelled create never closes the agent that replaced it', async () => {
+  let created = 0
+  const pending: ((agent: CursorAgent) => void)[] = []
+  const closed: string[] = []
+  const makeAgent = (name: string): CursorAgent => ({
+    async send() {
+      return {
+        async *stream() {
+          yield {
+            type: 'assistant',
+            message: { content: [{ type: 'text', text: name }] },
+          }
+        },
+        async wait() {
+          return { status: 'finished' }
+        },
+        async cancel() {},
+      }
+    },
+    close() {
+      closed.push(name)
+    },
+  })
+  const { gateway } = gatewayWith(() => makeAgent('unused'))
+  gateway.createAgent = () => {
+    created += 1
+    const index = created
+    return new Promise<CursorAgent>((resolve) => {
+      pending.push((agent) => resolve(agent))
+      void index
+    })
+  }
+  const adapter = adapterOf(gateway)
+  const controller = new AbortController()
+  const first = collect(
+    adapter,
+    request([{ role: 'user', content: [{ type: 'text', text: 'A' }] }], {
+      sessionId: 'race' as never,
+      signal: controller.signal,
+    }),
+  )
+  const second = collect(
+    adapter,
+    request([{ role: 'user', content: [{ type: 'text', text: 'B' }] }], {
+      sessionId: 'race' as never,
+    }),
+  )
+  await delay(20)
+  assert.equal(created, 2)
+  pending[1]!(makeAgent('B'))
+  await second
+  controller.abort()
+  pending[0]!(makeAgent('A'))
+  await first
+  assert.deepEqual(closed, ['A'])
+  // B stays open and serves the next turn.
+  await collect(
+    adapter,
+    request(
+      [
+        {
+          role: 'user' as const,
+          content: [{ type: 'text' as const, text: 'B' }],
+        },
+        {
+          role: 'assistant' as const,
+          content: [{ type: 'text' as const, text: 'B' }],
+        },
+        {
+          role: 'user' as const,
+          content: [{ type: 'text' as const, text: 'C' }],
+        },
+      ],
+      { sessionId: 'race' as never },
+    ),
+  )
+  assert.deepEqual(closed, ['A'])
 })

@@ -154,17 +154,27 @@ export class CursorSession {
   readonly params: CursorParam[] | undefined
   /** The model this agent runs, independent of the parameters it negotiated. */
   readonly modelId: string
+  /** Which credential opened this agent; a rotated key gets a new one. */
+  readonly credentialId: string
+  /** The exact request (model, requested parameters, credential) it serves. */
+  readonly requestKey: string
+  /** This agent runs a fallback tier, so a finished run may teach it. */
+  fellBack = false
 
   constructor(
     key: string,
     signature: string,
     params: CursorParam[] | undefined,
     modelId = '',
+    credentialId = '',
+    requestKey = '',
   ) {
     this.key = key
     this.signature = signature
     this.params = params
     this.modelId = modelId
+    this.credentialId = credentialId
+    this.requestKey = requestKey
   }
 
   wake(): void {
@@ -440,11 +450,12 @@ export class CursorRuntime {
     }
     const modelId = resolveModelId(options.model.id)
 
-    let params = modelParams(
+    const requestedParams = modelParams(
       options.model,
       options.reasoning,
       this.options.contextPreference(),
     )
+    let params = requestedParams
     // A learned tier belongs to this credential and configured preference,
     // and is usable only while the catalog still offers it.
     const tierKey = [
@@ -461,7 +472,7 @@ export class CursorRuntime {
     } else if (known !== undefined) {
       this.workingContext.delete(tierKey)
     }
-    const signature = signatureOf(modelId, params)
+    const credentialId = hash(apiKey)
     const sessionKey = sessionKeyFor(
       options.sessionId,
       transcript,
@@ -498,6 +509,7 @@ export class CursorRuntime {
       images: Image[] | undefined,
       sendOptions: unknown,
     ): Promise<CursorRun> => {
+      if (signal?.aborted) throw new TurnAborted()
       const pending = send(target, text, images, sendOptions)
       const first = await Promise.race([
         pending.then((run) => ({ run })),
@@ -536,17 +548,20 @@ export class CursorRuntime {
     const candidates = (this.sessions.get(sessionKey) ?? []).filter(
       (entry) => !entry.closed && !entry.busy,
     )
-    let session = candidates.find((entry) => entry.signature === signature)
+    const requestKey = requestKeyOf(modelId, requestedParams, credentialId)
+    let session = candidates.find((entry) => entry.requestKey === requestKey)
     let plan = planIncrement(session, messages)
     if (session === undefined) {
-      // A tier fallback gives the live agent parameters the next request did
-      // not ask for. Its transcript still matches, so a pending handoff (or a
-      // continuation) belongs to that agent, not a fresh one.
+      // Only a verified pending handoff may reuse an agent whose parameters
+      // differ, and only when the context tier is the sole difference, from
+      // the same model and credential.
       for (const candidate of candidates) {
-        // A model switch must never inherit the previous model's agent.
         if (candidate.modelId !== modelId) continue
+        if (candidate.credentialId !== credentialId) continue
+        if (!onlyContextDiffers(requestedParams, candidate.params)) continue
+        if (!candidate.pending.some((call) => call.handed)) continue
         const candidatePlan = planIncrement(candidate, messages)
-        if (candidatePlan.kind !== 'fresh') {
+        if (candidatePlan.kind === 'results') {
           session = candidate
           plan = candidatePlan
           break
@@ -581,15 +596,21 @@ export class CursorRuntime {
     }
     signal?.addEventListener?.('abort', onAbort, { once: true })
     try {
-      const openFresh = async (tier: CursorParam[] | undefined) => {
+      const openFresh = async (
+        effective: CursorParam[] | undefined,
+        fellBack = false,
+      ) => {
         const created = await this.open(
           sessionKey,
           modelId,
-          tier,
+          requestedParams,
+          effective,
           transcript,
           apiKey,
           options.sessionId,
+          signal,
         )
+        created.fellBack = fellBack
         // Creation is async: a cancel that landed meanwhile must close the
         // agent instead of sending into it.
         if (signal?.aborted) {
@@ -622,7 +643,7 @@ export class CursorRuntime {
           const lower = smallerContext(options.model, params)
           if (!lower || tierRetried) throw error
           tierRetried = true
-          session = await openFresh(lower)
+          session = await openFresh(lower, true)
         }
         freshRun = true
       } else if (plan.kind === 'send') {
@@ -650,7 +671,9 @@ export class CursorRuntime {
           plan.results,
           transcript.tools,
           note,
-          send,
+          sendGuarded,
+          aborted,
+          () => signal?.aborted === true,
         )
         if (signal?.aborted) throw new TurnAborted()
         if (continued) {
@@ -737,7 +760,8 @@ export class CursorRuntime {
           // Only a fallback that proved necessary is learned: a concurrent run
           // on the configured tier must not undo it.
           const tier = session.params?.find((param) => param.id === 'context')
-          if (tier && tierRetried) this.workingContext.set(tierKey, tier.value)
+          if (tier && session.fellBack)
+            this.workingContext.set(tierKey, tier.value)
           reply.usage = runUsage(
             result?.usage,
             session.modelCalls,
@@ -771,7 +795,7 @@ export class CursorRuntime {
         if (lower) {
           tierRetried = true
           this.drop(session)
-          session = await openFresh(lower)
+          session = await openFresh(lower, true)
           session.seen = transcript.messages.map((message) =>
             fingerprint(message as never),
           )
@@ -891,17 +915,22 @@ export class CursorRuntime {
   private async open(
     key: string,
     modelId: string,
+    requested: CursorParam[] | undefined,
     params: CursorParam[] | undefined,
     transcript: CursorTranscript,
     apiKey: string,
     sessionId: string | undefined,
+    signal?: AbortSignal,
   ): Promise<CursorSession> {
     if (this.disposed) throw new Error('Cursor runtime is disposed')
+    const credentialId = hash(apiKey)
     const session = new CursorSession(
       key,
       signatureOf(modelId, params),
       params,
       modelId,
+      credentialId,
+      requestKeyOf(modelId, requested, credentialId),
     )
     session.onIdle = (idle) => this.drop(idle)
     session.systemPrompt = transcript.systemPrompt
@@ -919,9 +948,15 @@ export class CursorRuntime {
           : { customTools: local.customTools }),
       },
     })
+    // A cancelled or disposed turn must not publish a late agent into the
+    // registry: it would close the session that replaced it.
     if (this.disposed) {
       settle(() => agent.close?.())
       throw new Error('Cursor runtime is disposed')
+    }
+    if (signal?.aborted) {
+      settle(() => agent.close?.())
+      throw new TurnAborted()
     }
     session.agent = agent
     this.store(session)
@@ -963,6 +998,28 @@ function signatureOf(
   params: CursorParam[] | undefined,
 ): string {
   return hash(JSON.stringify([modelId, params ?? []]))
+}
+
+/** The exact request identity a session serves, credential included. */
+function requestKeyOf(
+  modelId: string,
+  requested: CursorParam[] | undefined,
+  credentialId: string,
+): string {
+  return hash(JSON.stringify([modelId, requested ?? [], credentialId]))
+}
+
+/** True when two parameter sets differ only in the context tier value. */
+function onlyContextDiffers(
+  requested: CursorParam[] | undefined,
+  effective: CursorParam[] | undefined,
+): boolean {
+  const withoutContext = (params: CursorParam[] | undefined) =>
+    JSON.stringify((params ?? []).filter((param) => param.id !== 'context'))
+  if (withoutContext(requested) !== withoutContext(effective)) return false
+  const contextOf = (params: CursorParam[] | undefined) =>
+    params?.find((param) => param.id === 'context')?.value
+  return contextOf(requested) !== contextOf(effective)
 }
 
 /** Auxiliary calls (titles, compaction) carry the session id but must not touch its agent. */
@@ -1060,11 +1117,18 @@ async function continueWithNewTools(
     images: Image[] | undefined,
     options: unknown,
   ) => Promise<CursorRun>,
+  aborted: Promise<'aborted'>,
+  cancelled: () => boolean,
 ): Promise<boolean> {
+  if (cancelled()) throw new TurnAborted()
   settle(() => void Promise.resolve(session.run?.cancel?.()).catch(() => {}))
   const deadline = Date.now() + CANCEL_WAIT_MS
   while (!session.runDone && Date.now() < deadline) {
-    await session.waitForChange(deadline - Date.now())
+    const stopped = await Promise.race([
+      session.waitForChange(deadline - Date.now()),
+      aborted,
+    ])
+    if (stopped === 'aborted') throw new TurnAborted()
   }
   if (!session.runDone) return false
   for (const call of session.pending) {
@@ -1089,6 +1153,7 @@ async function continueWithNewTools(
   const added = addedToolsNote(session, tools)
   if (added) parts.push(added)
   parts.push('Continue the task.')
+  if (cancelled()) throw new TurnAborted()
   const run = await send(
     session,
     parts.join('\n\n'),
