@@ -69,7 +69,6 @@ export class CursorAdapter extends LlmAdapter {
   private catalog:
     { models: CursorCatalogModel[]; live: boolean; at: number } | undefined
   private loading: Promise<CursorCatalogModel[]> | undefined
-  private loadSignal: AbortSignal | undefined
   private loadToken: object | undefined
   private readonly images = new Map<string, Image>()
 
@@ -145,7 +144,11 @@ export class CursorAdapter extends LlmAdapter {
     // Reserve the turn's order at call time, before the generator is first
     // iterated: a later call owns the conversation even if an earlier one
     // starts its setup first.
-    const turnSeq = this.runtime.beginTurn()
+    const turnSeq = this.runtime.reserveTurn(
+      options.purpose === undefined && typeof options.sessionId === 'string'
+        ? options.sessionId
+        : undefined,
+    )
     const controller = new AbortController()
     const iterator = this.streamTurn(options, turnSeq, controller)
     // A generator's return() queues behind a pending next(), so abort before
@@ -203,10 +206,7 @@ export class CursorAdapter extends LlmAdapter {
         })
       }
     })
-    const setup = Promise.all([
-      this.models(signal),
-      this.loadImages(options, signal),
-    ])
+    const setup = Promise.all([this.models(), this.loadImages(options, signal)])
     const first = await Promise.race([setup, cancelled])
     if (first === 'aborted') {
       const queue = new ChunkQueue()
@@ -303,7 +303,7 @@ export class CursorAdapter extends LlmAdapter {
     return out
   }
 
-  private async models(signal?: AbortSignal): Promise<CursorCatalogModel[]> {
+  private async models(): Promise<CursorCatalogModel[]> {
     const cached = this.catalog
     if (
       cached &&
@@ -311,36 +311,27 @@ export class CursorAdapter extends LlmAdapter {
     ) {
       return cached.models
     }
-    // An in-flight load whose own requester went away no longer serves anyone:
-    // start a fresh one instead of handing the newer caller the orphan's data.
-    const inFlight = this.loading
-    if (inFlight !== undefined && this.loadSignal?.aborted !== true) {
-      return inFlight
-    }
+    // Discovery belongs to the adapter, not to whichever caller happened to
+    // start it: one caller's cancellation must not fail another's wait.
+    return this.loading ?? this.startLoad()
+  }
+
+  private startLoad(): Promise<CursorCatalogModel[]> {
     const token = {}
     this.loadToken = token
-    this.loadSignal = signal
-    const loading = this.load(signal, token).finally(() => {
-      if (this.loading === loading) {
-        this.loading = undefined
-        this.loadSignal = undefined
-      }
+    const loading = this.load(token).finally(() => {
+      if (this.loading === loading) this.loading = undefined
     })
     this.loading = loading
     return loading
   }
 
-  private async load(
-    signal?: AbortSignal,
-    token?: object,
-  ): Promise<CursorCatalogModel[]> {
+  private async load(token?: object): Promise<CursorCatalogModel[]> {
     let models: CursorCatalogModel[] = []
     let apiKey: string | undefined
     try {
       apiKey = await this.options.apiKey()
-      // The credential read is an await too: a cancel that landed while it
-      // resolved must not dispatch the catalog RPC.
-      if (signal?.aborted) {
+      if (this.lifetime.signal.aborted) {
         return this.catalog?.models ?? []
       }
       if (apiKey) {
@@ -356,8 +347,8 @@ export class CursorAdapter extends LlmAdapter {
       )
     }
     const live = models.length > 0
-    // A cancelled load, or one a newer load replaced, must not publish.
-    if (this.loadToken !== token || signal?.aborted === true) {
+    // A load a newer load replaced, or one after disposal, must not publish.
+    if (this.loadToken !== token || this.lifetime.signal.aborted) {
       return this.catalog?.models ?? []
     }
     // No key means logged out: advertise nothing so the picker hides the route.

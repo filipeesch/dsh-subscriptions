@@ -1831,32 +1831,24 @@ test('closing the iterator during setup aborts before discovery is released', as
   assert.equal(created, 0)
 })
 
-test('an aborted catalog load cannot overwrite a newer one', async () => {
-  let releaseFirst!: (models: unknown) => void
+test('a caller that joined discovery still receives it after the initiator aborts', async () => {
+  let releaseModels!: (models: unknown) => void
   let calls = 0
-  const { gateway } = gatewayWith(() => ({
-    async send() {
-      return {
-        async *stream() {},
-        async wait() {
-          return { status: 'finished' }
-        },
-        async cancel() {},
-      }
-    },
-    close() {},
-  }))
+  let created = 0
+  const { gateway } = gatewayWith(() => {
+    created += 1
+    return {
+      async send() {
+        throw new Error('must not send')
+      },
+      close() {},
+    }
+  })
   gateway.listModels = async () => {
     calls += 1
-    if (calls === 1) {
-      return await new Promise((resolve) => {
-        releaseFirst = resolve as never
-      })
-    }
-    return [
-      { id: 'b', displayName: 'B' },
-      { id: 'c', displayName: 'C' },
-    ]
+    return await new Promise((resolve) => {
+      releaseModels = resolve as never
+    })
   }
   const adapter = adapterOf(gateway)
   const controller = new AbortController()
@@ -1871,22 +1863,90 @@ test('an aborted catalog load cannot overwrite a newer one', async () => {
     }
   })()
   await delay(20)
+  // The picker joins the in-flight discovery before the stream aborts.
+  const picker = adapter.listModels('cursor')
   controller.abort()
   await stream
-  // A newer read starts its own load instead of joining the abandoned one.
-  const newer = await adapter.listModels('cursor')
+  releaseModels([{ id: 'a', displayName: 'A' }])
+  const models = await picker
   assert.deepEqual(
-    newer.map((model) => model.id),
-    ['b', 'c'],
+    models.map((model) => model.id),
+    ['a'],
+    "a live joiner must not receive the aborted initiator's empty catalog",
   )
-  releaseFirst([{ id: 'a', displayName: 'A' }])
-  await delay(20)
-  const after = await adapter.listModels('cursor')
-  assert.deepEqual(
-    after.map((model) => model.id),
-    ['b', 'c'],
-    'the abandoned load must not publish over the newer catalog',
+  assert.equal(calls, 1)
+  assert.equal(created, 0)
+})
+
+test('an older reserved stream cannot run after a newer one finished', async () => {
+  let created = 0
+  const sends: string[] = []
+  const { gateway } = gatewayWith(() => {
+    created += 1
+    const name = `agent-${created}`
+    return {
+      async send() {
+        sends.push(name)
+        return {
+          async *stream() {
+            yield {
+              type: 'assistant',
+              message: { content: [{ type: 'text', text: 'ok' }] },
+            }
+          },
+          async wait() {
+            return { status: 'finished' }
+          },
+          async cancel() {},
+        }
+      },
+      close() {},
+    }
+  })
+  const adapter = adapterOf(gateway)
+  // Both streams are reserved in call order, then consumed out of order.
+  const first = adapter.stream(
+    request([{ role: 'user', content: [{ type: 'text', text: 'A' }] }], {
+      sessionId: 'reserved' as never,
+    }),
   )
+  const second = adapter.stream(
+    request([{ role: 'user', content: [{ type: 'text', text: 'B' }] }], {
+      sessionId: 'reserved' as never,
+    }),
+  )
+  const drain = async (iterable: AsyncIterable<Chunk>) => {
+    for await (const _chunk of iterable as AsyncIterable<Chunk>) {
+      // drain
+    }
+  }
+  await drain(second)
+  await drain(first)
+  assert.equal(created, 1, 'the older stream must not create an agent')
+  assert.equal(sends.length, 1)
+  await drain(
+    adapter.stream(
+      request(
+        [
+          {
+            role: 'user' as const,
+            content: [{ type: 'text' as const, text: 'B' }],
+          },
+          {
+            role: 'assistant' as const,
+            content: [{ type: 'text' as const, text: 'ok' }],
+          },
+          {
+            role: 'user' as const,
+            content: [{ type: 'text' as const, text: 'C' }],
+          },
+        ],
+        { sessionId: 'reserved' as never },
+      ),
+    ),
+  )
+  assert.equal(created, 1, 'the third turn reuses the newer agent')
+  assert.equal(sends.length, 2)
 })
 
 test('early exits release their cancellation state', async () => {

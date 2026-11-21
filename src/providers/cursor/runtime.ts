@@ -396,6 +396,8 @@ export class CursorRuntime {
   private readonly keyGeneration = new Map<string, number>()
   /** Cancels the work of a turn a newer one superseded. */
   private readonly keyAbort = new Map<string, AbortController>()
+  /** Reservations per session key, released when their turn finishes. */
+  private readonly keyPending = new Map<string, number>()
   private warming: Promise<void> | undefined
   private prewarmAgent: CursorAgent | undefined
   private prewarmRun: CursorRun | undefined
@@ -413,12 +415,26 @@ export class CursorRuntime {
     return this.turnSeq
   }
 
+  /**
+   * Reserve a turn for a known session before its setup starts. The count is
+   * released when the turn finishes, so a generation entry is retired only
+   * once no reserved stream for that conversation can still run.
+   */
+  reserveTurn(sessionId?: string): number {
+    const seq = this.beginTurn()
+    if (sessionId !== undefined && sessionId.length > 0) {
+      this.keyPending.set(sessionId, (this.keyPending.get(sessionId) ?? 0) + 1)
+    }
+    return seq
+  }
+
   /** Close every agent; called from the plugin's disposer. */
   dispose(): void {
     this.disposed = true
     this.lifetime.abort()
     this.keyAbort.clear()
     this.keyGeneration.clear()
+    this.keyPending.clear()
     // The warmup's one cleanup closes whatever handle exists; its finally
     // then finds the agent already closed and does not close it again.
     void this.prewarmCleanup?.()
@@ -459,8 +475,28 @@ export class CursorRuntime {
     // Ownership follows the adapter's call order, reserved before any await:
     // a later turn owns the conversation even if an earlier one sets up first.
     const generation = options.turnSeq ?? this.beginTurn()
+    const reservedKey =
+      options.purpose === undefined &&
+      typeof options.sessionId === 'string' &&
+      options.sessionId.length > 0
+        ? options.sessionId
+        : undefined
+    const releaseReservation = () => {
+      if (reservedKey === undefined) return
+      const left = (this.keyPending.get(reservedKey) ?? 1) - 1
+      if (left > 0) {
+        this.keyPending.set(reservedKey, left)
+        return
+      }
+      this.keyPending.delete(reservedKey)
+      // Every reserved stream for this conversation is done: nothing older
+      // can still arrive, so the generation entries can be retired.
+      this.keyGeneration.delete(reservedKey)
+      this.keyAbort.delete(reservedKey)
+    }
     const prior = this.keyGeneration.get(sessionKey) ?? 0
     if (generation < prior) {
+      releaseReservation()
       reply.finish('aborted')
       return
     }
@@ -500,14 +536,8 @@ export class CursorRuntime {
       signal.removeEventListener('abort', onAbort)
       if (this.keyAbort.get(sessionKey) === turnController) {
         this.keyAbort.delete(sessionKey)
-        // No newer turn has been reserved, so nothing older can still arrive.
-        if (
-          generation === this.turnSeq &&
-          this.keyGeneration.get(sessionKey) === generation
-        ) {
-          this.keyGeneration.delete(sessionKey)
-        }
       }
+      releaseReservation()
     }
     if (signal.aborted) {
       reply.finish('aborted')
