@@ -152,15 +152,19 @@ export class CursorSession {
   readonly key: string
   readonly signature: string
   readonly params: CursorParam[] | undefined
+  /** The model this agent runs, independent of the parameters it negotiated. */
+  readonly modelId: string
 
   constructor(
     key: string,
     signature: string,
     params: CursorParam[] | undefined,
+    modelId = '',
   ) {
     this.key = key
     this.signature = signature
     this.params = params
+    this.modelId = modelId
   }
 
   wake(): void {
@@ -539,6 +543,8 @@ export class CursorRuntime {
       // not ask for. Its transcript still matches, so a pending handoff (or a
       // continuation) belongs to that agent, not a fresh one.
       for (const candidate of candidates) {
+        // A model switch must never inherit the previous model's agent.
+        if (candidate.modelId !== modelId) continue
         const candidatePlan = planIncrement(candidate, messages)
         if (candidatePlan.kind !== 'fresh') {
           session = candidate
@@ -891,7 +897,12 @@ export class CursorRuntime {
     sessionId: string | undefined,
   ): Promise<CursorSession> {
     if (this.disposed) throw new Error('Cursor runtime is disposed')
-    const session = new CursorSession(key, signatureOf(modelId, params), params)
+    const session = new CursorSession(
+      key,
+      signatureOf(modelId, params),
+      params,
+      modelId,
+    )
     session.onIdle = (idle) => this.drop(idle)
     session.systemPrompt = transcript.systemPrompt
     const { local } = syncTools(session, transcript.tools)

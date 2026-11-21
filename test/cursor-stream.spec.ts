@@ -836,3 +836,52 @@ test('an abort during a pending send finishes without waiting and cancels the la
   await delay(20)
   assert.equal(cancelled, 1, 'a run that arrives after the abort is cancelled')
 })
+
+test('a model switch does not reuse the previous model agent', async () => {
+  const created: string[] = []
+  const sends: string[] = []
+  const agentFor = (model: string): CursorAgent => ({
+    async send() {
+      sends.push(model)
+      return {
+        async *stream() {
+          yield {
+            type: 'assistant',
+            message: { content: [{ type: 'text', text: 'ok' }] },
+          }
+        },
+        async wait() {
+          return { status: 'finished' }
+        },
+        async cancel() {},
+      }
+    },
+    close() {},
+  })
+  const { gateway } = gatewayWith((options) => {
+    const model = (options?.model as { id?: string } | undefined)?.id ?? '?'
+    created.push(model)
+    return agentFor(model)
+  })
+  const adapter = adapterOf(gateway)
+  await collect(
+    adapter,
+    request([{ role: 'user', content: [{ type: 'text', text: 'one' }] }], {
+      model: 'claude-sonnet-5-5',
+      sessionId: 'switch' as never,
+    }),
+  )
+  await collect(
+    adapter,
+    request(
+      [
+        { role: 'user', content: [{ type: 'text', text: 'one' }] },
+        { role: 'assistant', content: [{ type: 'text', text: 'ok' }] },
+        { role: 'user', content: [{ type: 'text', text: 'two' }] },
+      ],
+      { model: 'gpt-5.6-sol', sessionId: 'switch' as never },
+    ),
+  )
+  assert.deepEqual(created, ['claude-sonnet-5-5', 'gpt-5.6-sol'])
+  assert.deepEqual(sends, ['claude-sonnet-5-5', 'gpt-5.6-sol'])
+})
