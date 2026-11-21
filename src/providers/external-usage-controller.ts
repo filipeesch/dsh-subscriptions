@@ -174,7 +174,9 @@ export class ExternalUsageController {
     }
     // A forced read still joins one already in flight instead of racing it.
     const pending = this.inflight.get(key)
-    if (pending) return pending
+    if (pending) {
+      return signal === undefined ? pending : this.untilAborted(pending, signal)
+    }
     const generation = this.generations.get(key) ?? 0
     const timeout = new AbortController()
     const timer = setTimeout(() => timeout.abort(), READ_TIMEOUT_MS)
@@ -190,6 +192,9 @@ export class ExternalUsageController {
         return { ...usage, observedAt }
       },
       (error: unknown) => {
+        // A detached read's failure belongs to its caller, not to the
+        // replacement that already published a fresh snapshot.
+        if ((this.generations.get(key) ?? 0) !== generation) throw error
         // A failed refresh marks the shared reading stale, so every later
         // reader sees that too; the last good numbers survive.
         const cached = this.cache.get(key)

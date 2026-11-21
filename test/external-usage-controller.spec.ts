@@ -377,3 +377,77 @@ test('an invalidated read is neither joined nor republished', async () => {
   assert.equal(old.windows?.[0]?.usedAmount, 1_000)
   assert.equal(typeof old.observedAt, 'number')
 })
+
+test('a joined caller stops waiting without cancelling the shared read', async () => {
+  let release!: () => void
+  const http = (async (url: string | URL | Request) => {
+    const target = String(url)
+    if (target.includes('exchange_user_api_key')) {
+      return Response.json({ accessToken: 'access-token' })
+    }
+    if (target.includes('GetCurrentPeriodUsage')) {
+      await new Promise<void>((resolve) => {
+        release = resolve
+      })
+      return Response.json({
+        billingCycleStart: '1',
+        billingCycleEnd: '2',
+        spendLimitUsage: { overallLimit: 10_000, overallUsed: 1_000 },
+      })
+    }
+    return Response.json({ planInfo: { planName: 'Enterprise' } })
+  }) as typeof fetch
+  const controller = new ExternalUsageController(
+    async () => ({ value: 'cursor-secret' }),
+    http,
+  )
+  const first = controller.usage('cursor')
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  const caller = new AbortController()
+  const joined = controller.usage('cursor', caller.signal)
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  caller.abort()
+  await assert.rejects(joined, /cancelled/)
+  release()
+  const resolved = await first
+  assert.equal(resolved.windows?.[0]?.usedAmount, 1_000)
+})
+
+test('a detached failure does not mark its replacement stale', async () => {
+  let rejectFirst!: (error: Error) => void
+  let periods = 0
+  const http = (async (url: string | URL | Request) => {
+    const target = String(url)
+    if (target.includes('exchange_user_api_key')) {
+      return Response.json({ accessToken: 'access-token' })
+    }
+    if (target.includes('GetCurrentPeriodUsage')) {
+      periods += 1
+      if (periods === 1) {
+        return await new Promise((_, reject) => {
+          rejectFirst = reject
+        })
+      }
+      return Response.json({
+        billingCycleStart: '1',
+        billingCycleEnd: '2',
+        spendLimitUsage: { overallLimit: 10_000, overallUsed: 2_000 },
+      })
+    }
+    return Response.json({ planInfo: { planName: 'Enterprise' } })
+  }) as typeof fetch
+  const controller = new ExternalUsageController(
+    async () => ({ value: 'cursor-secret' }),
+    http,
+  )
+  const old = controller.usage('cursor', undefined, true)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  controller.invalidate('cursor')
+  const fresh = await controller.usage('cursor')
+  assert.equal(fresh.windows?.[0]?.usedAmount, 2_000)
+  rejectFirst(new Error('boom'))
+  await assert.rejects(old, /boom/)
+  const later = await controller.usage('cursor')
+  assert.notEqual(later.stale, true)
+  assert.equal(later.observedAt, fresh.observedAt)
+})

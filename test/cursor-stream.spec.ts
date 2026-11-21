@@ -654,3 +654,185 @@ test('disposal during a pending prewarm send closes its agent once', async () =>
   await delay(50)
   assert.equal(closed, 1)
 })
+
+test('a fallback agent survives the tool handoff and delivers the result', async () => {
+  let createOptions: CursorAgentOptions | undefined
+  const releases: (() => void)[] = []
+  let sends = 0
+  const executions: Promise<unknown>[] = []
+  const firstAgent: CursorAgent = {
+    async send() {
+      sends += 1
+      return {
+        async *stream() {},
+        async wait() {
+          return {
+            status: 'error',
+            error: { message: 'invalid parameters for registry model claude' },
+          }
+        },
+        async cancel() {},
+      }
+    },
+    close() {},
+  }
+  const secondAgent: CursorAgent = {
+    async send() {
+      sends += 1
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      releases.push(release)
+      const tools = (
+        createOptions as
+          | {
+              local?: {
+                customTools?: Record<
+                  string,
+                  { execute: (args: unknown, ctx: unknown) => Promise<unknown> }
+                >
+              }
+            }
+          | undefined
+      )?.local?.customTools
+      for (const tool of Object.values(tools ?? {})) {
+        const execution = tool.execute({ q: 'tool' }, { toolCallId: 'c1' })
+        executions.push(execution)
+        // The run continues only after the host delivers the result.
+        void execution.then(() => release())
+      }
+      return {
+        async *stream() {
+          yield {
+            type: 'assistant',
+            message: { content: [{ type: 'text', text: 'calling' }] },
+          }
+          await gate
+          yield {
+            type: 'assistant',
+            message: { content: [{ type: 'text', text: 'done' }] },
+          }
+        },
+        async wait() {
+          await gate
+          return { status: 'finished' }
+        },
+        async cancel() {
+          release()
+        },
+      }
+    },
+    close() {},
+  }
+  const { gateway } = gatewayWith((options) => {
+    const context = (
+      options?.model as { params?: { id: string; value: string }[] } | undefined
+    )?.params?.find((param) => param.id === 'context')?.value
+    if (context === '1m') return firstAgent
+    createOptions = options
+    return secondAgent
+  })
+  const adapter = adapterOf(gateway)
+  const tools = [
+    {
+      name: 'tool',
+      description: 'A tool',
+      parameters: { type: 'object', properties: {} },
+    },
+  ]
+  const first = [
+    {
+      role: 'user' as const,
+      content: [{ type: 'text' as const, text: 'use the tool' }],
+    },
+  ]
+  const firstChunks = await collect(
+    adapter,
+    request(first, { sessionId: 'fallback-tool' as never, tools }),
+  )
+  assert.deepEqual(firstChunks.find((c) => c.type === 'finish')?.reason, {
+    kind: 'tool-calls',
+  })
+  assert.equal(executions.length, 1)
+
+  const second = [
+    ...first,
+    {
+      role: 'assistant' as const,
+      content: [
+        { type: 'text' as const, text: 'calling' },
+        {
+          type: 'tool-call' as const,
+          id: 'c1',
+          name: 'tool',
+          arguments: { q: 'tool' },
+        },
+      ],
+    },
+    {
+      role: 'tool' as const,
+      toolCallId: 'c1',
+      content: [{ type: 'text' as const, text: 'the result' }],
+    },
+  ]
+  const secondChunks = await collect(
+    adapter,
+    request(second, { sessionId: 'fallback-tool' as never, tools }),
+  )
+  assert.equal(sends, 2, 'one rejected first send and one fallback send')
+  assert.deepEqual(await executions[0], {
+    content: [{ type: 'text', text: 'the result' }],
+    isError: false,
+  })
+  assert.equal(
+    (secondChunks.find((c) => c.type === 'finish')?.reason as { kind?: string })
+      ?.kind,
+    'stop',
+  )
+})
+
+test('an abort during a pending send finishes without waiting and cancels the late run', async () => {
+  let resolveSend!: (run: CursorRun) => void
+  let cancelled = 0
+  const agent: CursorAgent = {
+    async send() {
+      return await new Promise<CursorRun>((resolve) => {
+        resolveSend = resolve
+      })
+    },
+    close() {},
+  }
+  const { gateway } = gatewayWith(() => agent)
+  const adapter = adapterOf(gateway)
+  const controller = new AbortController()
+  const chunks: Chunk[] = []
+  const stream = (async () => {
+    for await (const chunk of adapter.stream(
+      request([{ role: 'user', content: [{ type: 'text', text: 'hi' }] }], {
+        signal: controller.signal,
+      }),
+    )) {
+      chunks.push(chunk as unknown as Chunk)
+    }
+  })()
+  await delay(20)
+  controller.abort()
+  await stream
+  assert.equal(
+    (chunks.find((c) => c.type === 'finish')?.reason as { kind?: string })
+      ?.kind,
+    'aborted',
+  )
+  resolveSend({
+    async *stream() {},
+    async wait() {
+      return { status: 'finished' }
+    },
+    async cancel() {
+      cancelled += 1
+    },
+  })
+  await delay(20)
+  assert.equal(cancelled, 1, 'a run that arrives after the abort is cancelled')
+})

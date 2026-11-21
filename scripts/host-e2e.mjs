@@ -634,14 +634,24 @@ async function drive(cdp, page, evidence) {
     throw new ProductFailure(
       'the collapsed pill renders no quota bar for the selected model',
     )
-  if (!bar.followsHost)
+  if (bar.layout !== 'row' && bar.layout !== 'dock')
     throw new ProductFailure(
-      'the quota bar does not follow the host context gauge in the stats row',
+      `the quota pill is not in a recognized composer layout (${bar.layout})`,
     )
-  if (bar.text.includes('%'))
-    throw new ProductFailure('the collapsed pill still prints its numbers')
+  if (bar.followsGauge === false)
+    throw new ProductFailure(
+      'the quota bar precedes the host context gauge in the stats row',
+    )
+  // The collapsed pill states the provider, not a number.
+  if (!/^\s*Codex\s*$/.test(bar.text))
+    throw new ProductFailure(
+      `the collapsed pill still prints a number beside the bar: ${JSON.stringify(bar.text)}`,
+    )
   console.log(
-    'ok: the collapsed pill shows a number-free bar after the context gauge',
+    `ok: the collapsed pill shows a provider-only bar in the ${bar.layout} layout` +
+      (bar.followsGauge === null
+        ? ' (no labelled context gauge to order against)'
+        : ' after the context gauge'),
   )
 
   // Product: the dialog lists every source with its own percentage.
@@ -1512,24 +1522,36 @@ function pillProbe() {
   })()`
 }
 
-/** The collapsed pill's quota bar: present, number-free, and after the host stats. */
+/**
+ * The collapsed pill's quota bar. Both host layouts are recognized the same
+ * way pillProbe() recognizes them: a stats-row ancestor on the older hosts, a
+ * dock marker on the newer one. The context gauge is identified by its own
+ * label where the host exposes one; otherwise the order check is skipped
+ * rather than guessed from an unrelated stat.
+ */
 function barProbe() {
-  const { row } = HOST_CONTRACT.markers.composerStats
+  const { row, dock } = HOST_CONTRACT.markers.composerStats
   return `(() => {
     const pill = [...document.querySelectorAll('button.dsh-subscription-usage-pill')]
       .find(button => (button.getAttribute('aria-label') || '').includes(${JSON.stringify(CODEX_PILL)}))
     if (pill === undefined) return { found: false }
     const bar = pill.querySelector('[role="img"]')
     const rowEl = pill.closest('[${row}]')
-    const stats = rowEl === null ? [] : [...rowEl.querySelectorAll('[data-composer-stat]')]
+    const dockEl = pill.closest('[data-composer-dock]')
+    const layout = rowEl !== null ? 'row' : dockEl?.querySelector('[${dock}]') !== null ? 'dock' : 'none'
+    const siblings = rowEl === null ? [] : [...rowEl.querySelectorAll('button')].filter(
+      (button) => button !== pill && /context/i.test(
+        (button.getAttribute('aria-label') || '') + ' ' + (button.textContent || ''),
+      ),
+    )
+    const gauge = siblings.length === 0 ? null : siblings[siblings.length - 1]
     return {
       found: true,
       bar: bar !== null,
-      followsHost: stats.some(
-        (stat) =>
-          (stat.compareDocumentPosition(pill) & Node.DOCUMENT_POSITION_FOLLOWING) !==
-          0,
-      ),
+      layout,
+      followsGauge: gauge === null
+        ? null
+        : (gauge.compareDocumentPosition(pill) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0,
       text: pill.textContent || '',
     }
   })()`

@@ -285,6 +285,11 @@ export class CursorAdapter extends LlmAdapter {
     let apiKey: string | undefined
     try {
       apiKey = await this.options.apiKey()
+      // The credential read is an await too: a cancel that landed while it
+      // resolved must not dispatch the catalog RPC.
+      if (signal?.aborted) {
+        return this.catalog?.models ?? []
+      }
       if (apiKey) {
         const discovered = await withTimeout(
           () => this.options.gateway.listModels({ apiKey: apiKey! }),

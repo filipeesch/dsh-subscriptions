@@ -486,6 +486,30 @@ export class CursorRuntime {
         sendOptions,
       )
     }
+    // A cancelled turn must not wait for a send in flight; a run that arrives
+    // after the cancellation is cancelled instead of consumed.
+    const sendGuarded = async (
+      target: CursorSession,
+      text: string,
+      images: Image[] | undefined,
+      sendOptions: unknown,
+    ): Promise<CursorRun> => {
+      const pending = send(target, text, images, sendOptions)
+      const first = await Promise.race([
+        pending.then((run) => ({ run })),
+        aborted,
+      ])
+      if (first === 'aborted') {
+        void pending.then((run) => run?.cancel?.()).catch(() => {})
+        throw new TurnAborted()
+      }
+      const run = first.run
+      if (signal?.aborted) {
+        void Promise.resolve(run?.cancel?.()).catch(() => {})
+        throw new TurnAborted()
+      }
+      return run
+    }
     const sendFirst = async (session: CursorSession) => {
       session.sentFirst = true
       const text = [
@@ -495,7 +519,7 @@ export class CursorRuntime {
         .filter(Boolean)
         .join('\n\n')
       session.startRun(
-        await send(
+        await sendGuarded(
           session,
           text,
           currentTurnImages(transcript.messages as never),
@@ -504,13 +528,25 @@ export class CursorRuntime {
       )
     }
 
-    let session = (this.sessions.get(sessionKey) ?? []).find(
-      (entry) => entry.signature === signature && !entry.closed && !entry.busy,
+    const messages = transcript.messages as unknown as Record<string, unknown>[]
+    const candidates = (this.sessions.get(sessionKey) ?? []).filter(
+      (entry) => !entry.closed && !entry.busy,
     )
-    let plan = planIncrement(
-      session,
-      transcript.messages as unknown as Record<string, unknown>[],
-    )
+    let session = candidates.find((entry) => entry.signature === signature)
+    let plan = planIncrement(session, messages)
+    if (session === undefined) {
+      // A tier fallback gives the live agent parameters the next request did
+      // not ask for. Its transcript still matches, so a pending handoff (or a
+      // continuation) belongs to that agent, not a fresh one.
+      for (const candidate of candidates) {
+        const candidatePlan = planIncrement(candidate, messages)
+        if (candidatePlan.kind !== 'fresh') {
+          session = candidate
+          plan = candidatePlan
+          break
+        }
+      }
+    }
     let note = ''
     if (session && plan.kind !== 'fresh') {
       const addition = systemPromptAddition(
@@ -528,7 +564,15 @@ export class CursorRuntime {
     let freshRun = false
     let emitted = false
     let tierRetried = false
-    const onAbort = () => session?.wake()
+    let resolveAbort!: () => void
+    const aborted = new Promise<'aborted'>((resolve) => {
+      resolveAbort = () => resolve('aborted')
+    })
+    if (signal?.aborted) resolveAbort()
+    const onAbort = () => {
+      resolveAbort?.()
+      session?.wake()
+    }
     signal?.addEventListener?.('abort', onAbort, { once: true })
     try {
       const openFresh = async (tier: CursorParam[] | undefined) => {
@@ -585,7 +629,7 @@ export class CursorRuntime {
           .filter(Boolean)
           .join('\n\n')
         session.startRun(
-          await send(
+          await sendGuarded(
             session,
             text,
             plan.images,
@@ -595,15 +639,15 @@ export class CursorRuntime {
         session.systemPrompt = transcript.systemPrompt
       } else if (note || session.toolsKey !== toolsKeyOf(transcript.tools)) {
         session.busy = true
-        if (
-          await continueWithNewTools(
-            session,
-            plan.results,
-            transcript.tools,
-            note,
-            send,
-          )
-        ) {
+        const continued = await continueWithNewTools(
+          session,
+          plan.results,
+          transcript.tools,
+          note,
+          send,
+        )
+        if (signal?.aborted) throw new TurnAborted()
+        if (continued) {
           session.systemPrompt = transcript.systemPrompt
         } else {
           this.drop(session)
