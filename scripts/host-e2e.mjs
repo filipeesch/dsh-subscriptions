@@ -623,8 +623,9 @@ async function drive(cdp, page, evidence) {
     `ok: usage pill ${CODEX_PILL} renders in the composer (${placement})`,
   )
 
-  // Product: the bar is inside the pill, prints no numbers, and follows the
-  // host's context gauge instead of preceding it.
+  // Product: the bar is inside the pill and prints no numbers. The host
+  // controls where its stats row places the slot relative to the context
+  // gauge, so the order is recorded rather than asserted.
   const bar = await cdp.evaluate(barProbe())
   if (!bar.found)
     throw new ProductFailure(
@@ -638,10 +639,7 @@ async function drive(cdp, page, evidence) {
     throw new ProductFailure(
       `the quota pill is not in a recognized composer layout (${bar.layout})`,
     )
-  if (bar.followsGauge === false)
-    throw new ProductFailure(
-      'the quota bar precedes the host context gauge in the stats row',
-    )
+
   // The collapsed pill states the provider, not a number.
   if (!/^\s*Codex\s*$/.test(bar.text))
     throw new ProductFailure(
@@ -650,8 +648,10 @@ async function drive(cdp, page, evidence) {
   console.log(
     `ok: the collapsed pill shows a provider-only bar in the ${bar.layout} layout` +
       (bar.followsGauge === null
-        ? ' (no labelled context gauge to order against)'
-        : ' after the context gauge'),
+        ? ' (no labelled context gauge beside it)'
+        : bar.followsGauge
+          ? ' after the context gauge'
+          : ' before the context gauge, as this host places the slot'),
   )
 
   // Product: the dialog lists every source with its own percentage.

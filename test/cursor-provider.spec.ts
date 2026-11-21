@@ -349,7 +349,8 @@ test('an auxiliary call never shares the conversation agent', async () => {
     adapter,
     request(messages, {
       sessionId: 's-1' as never,
-      purpose: 'session-title',
+      // 0.2.2 narrows the request's purpose field; the adapter reads its own.
+      purpose: 'session-title' as never,
     }),
   )
   assert.equal(agents.length, 2)
