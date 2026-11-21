@@ -2229,3 +2229,35 @@ test('concurrent catalog callers share one discovery', async () => {
     )
   }
 })
+
+test('repeated refreshes leave no catalog wait attached to the lifetime', async () => {
+  const { gateway } = gatewayWith(() => ({
+    async send() {
+      throw new Error('must not send')
+    },
+    close() {},
+  }))
+  gateway.listModels = async () => [{ id: 'a', displayName: 'A' }]
+  const adapter = new CursorAdapter({
+    gateway,
+    apiKey: async () => 'crsr_test',
+    cwd: () => '/tmp',
+    keyRef: 'CURSOR_API_KEY',
+    prewarm: false,
+    catalogTtlMs: 0,
+  })
+  for (let index = 0; index < 5; index++) {
+    const models = await adapter.listModels('cursor')
+    assert.deepEqual(
+      models.map((model) => model.id),
+      ['a'],
+    )
+    assert.equal(
+      adapter.pendingCatalogWaits(),
+      0,
+      `refresh ${index} left a lifetime wait attached`,
+    )
+  }
+  adapter.dispose()
+  assert.equal(adapter.pendingCatalogWaits(), 0)
+})

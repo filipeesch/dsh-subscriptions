@@ -64,6 +64,8 @@ export interface CursorAdapterOptions {
   prewarm?: boolean
   /** How long a reserved stream may wait before admission (tests shorten it). */
   reservationTtlMs?: number
+  /** Catalog cache lifetime for tests; defaults to the live/retry windows. */
+  catalogTtlMs?: number
 }
 
 export class CursorAdapter extends LlmAdapter {
@@ -72,8 +74,8 @@ export class CursorAdapter extends LlmAdapter {
     { models: CursorCatalogModel[]; live: boolean; at: number } | undefined
   private loading: Promise<CursorCatalogModel[]> | undefined
   private loadToken: object | undefined
-  /** One disposal promise for every catalog waiter; it never accumulates. */
-  private disposalWaitPromise: Promise<void> | undefined
+  /** Catalog loads waiting on the adapter lifetime; never accumulates. */
+  private disposalListeners = 0
   private readonly images = new Map<string, Image>()
 
   constructor(private readonly options: CursorAdapterOptions) {
@@ -337,38 +339,54 @@ export class CursorAdapter extends LlmAdapter {
     // A disposed adapter must not wait on discovery or read a credential.
     if (this.lifetime.signal.aborted) return this.catalog?.models ?? []
     const cached = this.catalog
+    const ttl = this.options.catalogTtlMs
     if (
       cached &&
-      Date.now() - cached.at < (cached.live ? CATALOG_TTL_MS : CATALOG_RETRY_MS)
+      Date.now() - cached.at <
+        (ttl ?? (cached.live ? CATALOG_TTL_MS : CATALOG_RETRY_MS))
     ) {
       return cached.models
     }
     // Discovery belongs to the adapter, not to whichever caller happened to
-    // start it: one caller's cancellation must not fail another's wait. A
-    // standalone read still stops waiting when the adapter is disposed.
-    const load = this.loading ?? this.startLoad()
-    return Promise.race([
-      load,
-      this.disposalWait().then(() => this.catalog?.models ?? []),
-    ])
+    // start it: one caller's cancellation must not fail another's wait. The
+    // disposal race lives on the shared load, so completed reads leave no
+    // pending handlers behind.
+    return this.loading ?? this.startLoad()
   }
 
-  private disposalWait(): Promise<void> {
-    this.disposalWaitPromise ??= new Promise<void>((resolve) => {
-      if (this.lifetime.signal.aborted) resolve()
-      else {
-        this.lifetime.signal.addEventListener('abort', () => resolve(), {
-          once: true,
-        })
-      }
-    })
-    return this.disposalWaitPromise
+  /** Catalog waits still attached to the adapter lifetime; a test hook. */
+  pendingCatalogWaits(): number {
+    return this.disposalListeners
   }
 
   private startLoad(): Promise<CursorCatalogModel[]> {
     const token = {}
     this.loadToken = token
-    const loading = this.load(token).finally(() => {
+    const listener = new AbortController()
+    let fired = false
+    const loading = Promise.race([
+      this.load(token),
+      new Promise<CursorCatalogModel[]>((resolve) => {
+        if (this.lifetime.signal.aborted) {
+          fired = true
+          resolve(this.catalog?.models ?? [])
+          return
+        }
+        this.disposalListeners += 1
+        this.lifetime.signal.addEventListener(
+          'abort',
+          () => {
+            fired = true
+            this.disposalListeners -= 1
+            resolve(this.catalog?.models ?? [])
+          },
+          { once: true, signal: listener.signal },
+        )
+      }),
+    ]).finally(() => {
+      // Drop the listener as soon as the load settles, whichever side won.
+      listener.abort()
+      if (!fired) this.disposalListeners -= 1
       if (this.loading === loading) this.loading = undefined
     })
     this.loading = loading
