@@ -2119,3 +2119,113 @@ test('an abandoned reservation expires and cannot take ownership', async () => {
   )
   assert.equal(runtime.turnState().reservations, 0)
 })
+
+test("expiry never takes an admitted turn's ownership", async () => {
+  let releaseSlow!: () => void
+  let created = 0
+  const { gateway } = gatewayWith(() => {
+    created += 1
+    if (created === 1) {
+      return {
+        async send() {
+          return {
+            async *stream() {
+              yield {
+                type: 'assistant',
+                message: { content: [{ type: 'text', text: 'slow' }] },
+              }
+              await new Promise<void>((resolve) => {
+                releaseSlow = resolve
+              })
+              yield {
+                type: 'assistant',
+                message: { content: [{ type: 'text', text: 'done' }] },
+              }
+            },
+            async wait() {
+              return { status: 'finished' }
+            },
+            async cancel() {},
+          }
+        },
+        close() {},
+      }
+    }
+    return {
+      async send() {
+        return {
+          async *stream() {
+            yield {
+              type: 'assistant',
+              message: { content: [{ type: 'text', text: 'fast' }] },
+            }
+          },
+          async wait() {
+            return { status: 'finished' }
+          },
+          async cancel() {},
+        }
+      },
+      close() {},
+    }
+  })
+  const adapter = new CursorAdapter({
+    gateway,
+    apiKey: async () => 'crsr_test',
+    cwd: () => '/tmp',
+    keyRef: 'CURSOR_API_KEY',
+    prewarm: false,
+    reservationTtlMs: 10,
+  })
+  const slow = collect(
+    adapter,
+    request([{ role: 'user', content: [{ type: 'text', text: 'slow' }] }], {
+      sessionId: 'slow-session' as never,
+    }),
+  )
+  await delay(30)
+  // A turn in another session triggers the expiry sweep while slow is running.
+  await collect(
+    adapter,
+    request([{ role: 'user', content: [{ type: 'text', text: 'fast' }] }], {
+      sessionId: 'other-session' as never,
+    }),
+  )
+  releaseSlow()
+  const slowChunks = await slow
+  assert.equal(
+    (slowChunks.find((c) => c.type === 'finish')?.reason as { kind?: string })
+      ?.kind,
+    'stop',
+    'an admitted turn keeps its ownership past the reservation TTL',
+  )
+})
+
+test('concurrent catalog callers share one discovery', async () => {
+  let releaseModels!: (models: unknown) => void
+  let calls = 0
+  const { gateway } = gatewayWith(() => ({
+    async send() {
+      throw new Error('must not send')
+    },
+    close() {},
+  }))
+  gateway.listModels = async () => {
+    calls += 1
+    return await new Promise((resolve) => {
+      releaseModels = resolve as never
+    })
+  }
+  const adapter = adapterOf(gateway)
+  const waiters = Array.from({ length: 4 }, () => adapter.listModels('cursor'))
+  await delay(20)
+  releaseModels([{ id: 'a', displayName: 'A' }])
+  const results = await Promise.all(waiters)
+  assert.equal(calls, 1)
+  for (const models of results) {
+    assert.deepEqual(
+      models.map((model) => model.id),
+      ['a'],
+    )
+  }
+})

@@ -397,6 +397,8 @@ export interface TurnReservation {
   readonly seq: number
   readonly at: number
   released: boolean
+  /** Admitted turns own their session until their own cleanup releases it. */
+  admitted: boolean
   release(): void
 }
 
@@ -440,6 +442,7 @@ export class CursorRuntime {
       seq,
       at: Date.now(),
       released: false,
+      admitted: false,
       release: () => this.releaseReservation(key, reservation),
     }
     if (key !== undefined) {
@@ -478,6 +481,9 @@ export class CursorRuntime {
     const now = Date.now()
     for (const [key, list] of [...this.reservations]) {
       for (const reservation of [...list]) {
+        // An admitted turn owns its conversation until its own cleanup; only
+        // a stream that never reached the runtime may expire.
+        if (reservation.admitted) continue
         if (now - reservation.at > ttl) reservation.release()
       }
       void key
@@ -547,6 +553,9 @@ export class CursorRuntime {
         return
       }
     }
+    // Admitted before the first await: the expiry sweep must never take an
+    // active conversation's ownership away.
+    if (reservation !== undefined) reservation.admitted = true
     const release = () => {
       reservation?.release()
       this.expireReservations()

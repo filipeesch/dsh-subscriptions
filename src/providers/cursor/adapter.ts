@@ -72,6 +72,8 @@ export class CursorAdapter extends LlmAdapter {
     { models: CursorCatalogModel[]; live: boolean; at: number } | undefined
   private loading: Promise<CursorCatalogModel[]> | undefined
   private loadToken: object | undefined
+  /** One disposal promise for every catalog waiter; it never accumulates. */
+  private disposalWaitPromise: Promise<void> | undefined
   private readonly images = new Map<string, Image>()
 
   constructor(private readonly options: CursorAdapterOptions) {
@@ -345,14 +347,22 @@ export class CursorAdapter extends LlmAdapter {
     // start it: one caller's cancellation must not fail another's wait. A
     // standalone read still stops waiting when the adapter is disposed.
     const load = this.loading ?? this.startLoad()
-    const disposed = new Promise<CursorCatalogModel[]>((resolve) => {
-      this.lifetime.signal.addEventListener(
-        'abort',
-        () => resolve(this.catalog?.models ?? []),
-        { once: true },
-      )
+    return Promise.race([
+      load,
+      this.disposalWait().then(() => this.catalog?.models ?? []),
+    ])
+  }
+
+  private disposalWait(): Promise<void> {
+    this.disposalWaitPromise ??= new Promise<void>((resolve) => {
+      if (this.lifetime.signal.aborted) resolve()
+      else {
+        this.lifetime.signal.addEventListener('abort', () => resolve(), {
+          once: true,
+        })
+      }
     })
-    return Promise.race([load, disposed])
+    return this.disposalWaitPromise
   }
 
   private startLoad(): Promise<CursorCatalogModel[]> {
