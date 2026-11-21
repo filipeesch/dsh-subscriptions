@@ -23,7 +23,11 @@ export const USAGE_PERCENT = {
   'opencode-go': { name: 'OpenCode Go', percent: 66 },
   'kimi-coding': { name: 'Kimi Code', percent: 77 },
   'ollama-cloud': { name: 'Ollama Cloud', percent: 88 },
+  cursor: { name: 'Cursor', percent: 55 },
 }
+
+/** Cursor's period window reports money; the percent is derived from these amounts. */
+export const CURSOR_SPEND = { usedCents: 55_000, limitCents: 100_000 }
 
 /** The collapsed pill for the selected Codex model: the default account's 5-hour window. */
 export const CODEX_PILL = 'Codex '
@@ -210,6 +214,35 @@ export const FIXTURE_REQUESTS = {
     },
     required: true,
   },
+  'POST https://api2.cursor.sh/auth/exchange_user_api_key': {
+    credential: ['authorization', 'Bearer fake-cursor-key'],
+    body: {
+      accessToken: 'fake-cursor-token',
+      refreshToken: 'fake-cursor-refresh',
+    },
+    required: true,
+  },
+  'POST https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage':
+    {
+      credential: ['authorization', 'Bearer fake-cursor-token'],
+      body: {
+        billingCycleStart: String(fixtureNow - 10 * 24 * 60 * 60_000),
+        billingCycleEnd: String(fixtureNow + 20 * 24 * 60 * 60_000),
+        spendLimitUsage: {
+          limitType: 'team',
+          overallLimit: CURSOR_SPEND.limitCents,
+          overallUsed: CURSOR_SPEND.usedCents,
+          overallRemaining: CURSOR_SPEND.limitCents - CURSOR_SPEND.usedCents,
+        },
+        displayThreshold: 100,
+      },
+      required: true,
+    },
+  'POST https://api2.cursor.sh/aiserver.v1.DashboardService/GetPlanInfo': {
+    credential: ['authorization', 'Bearer fake-cursor-token'],
+    body: { planInfo: { planName: 'Enterprise' } },
+    required: true,
+  },
   'GET https://ollama.com/api/balance': {
     credential: ['authorization', 'Bearer fake-ollama-key'],
     body: {
@@ -286,4 +319,10 @@ export const EXPECTED_REFUSALS = [
   // tests, and the driver makes no picker assertions for this route.
   'https://ollama.com/api/tags',
   'https://ollama.com/api/show',
+  // The Cursor SDK's model catalog is not part of the fixture: the plugin
+  // falls back to its built-in list, and the quota RPCs above stay exact.
+  // Both refusals are exact strings: the client's catalog URL and the
+  // socket-level connection the SDK opens for it.
+  'https://api.cursor.com/v1/models',
+  'api2.cursor.sh:443',
 ]

@@ -183,8 +183,8 @@ test('antigravity: quota fractions become used-percent windows', async (t) => {
   const kinds = windows.map((w) => `${w.kind}:${w.scope}`)
   assert.deepEqual(kinds, ['other:gemini-3-pro', 'weekly:gemini-3-pro'])
   // remainingFraction 0.6 → 40% used; weekly 0.8 → 20% used.
-  assert.equal(windows[0].usedPercent, 40)
-  assert.ok(Math.abs(windows[1].usedPercent - 20) < 1e-9)
+  assert.equal(windows[0].usedPercent!, 40)
+  assert.ok(Math.abs((windows[1].usedPercent ?? -1) - 20) < 1e-9)
   assert.ok((windows[0].resetsAt ?? 0) > Date.now())
 })
 

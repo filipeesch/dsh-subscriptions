@@ -87,6 +87,7 @@ test('usage-only RPC reports key presence and rejects unknown sources without ex
       minimax: { configured: false },
       'minimax-cn': { configured: false },
       'ollama-cloud': { configured: false },
+      cursor: { configured: false },
     },
   })
   assert.ok(!JSON.stringify(status).includes('go-secret'))
@@ -116,7 +117,6 @@ test('removed Cursor and proxy RPC endpoints have no routes', async () => {
     'cursorLogout',
     'cursorUsage',
     'cursorModels',
-    'cursorSettings',
     'cursorSetSettings',
     'proxyGet',
     'proxySet',
@@ -353,5 +353,47 @@ test('status endpoint: one corrupt provider entry degrades alone, others still r
     providers.claude.accounts.length,
     0,
     'the corrupt claude entry is skipped',
+  )
+})
+
+test('the Cursor card reads settings and validates the ceiling payload', async () => {
+  const handler = await mount()
+  const signal = new AbortController().signal
+  const initial = await handler('cursorSettings', {}, signal)
+  assert.equal(initial.ok, true)
+  if (initial.ok) {
+    const value = initial.value as { keyRef: string; context: string }
+    assert.equal(value.keyRef, 'CURSOR_API_KEY')
+    assert.equal(value.context, 'max')
+  }
+  // A malformed payload is refused instead of clearing the stored value.
+  for (const payload of [
+    null,
+    {},
+    { ceilingUSD: 0 },
+    { ceilingUSD: -5 },
+    { ceilingUSD: 10_000_000 },
+    { ceilingUSD: '2500' },
+  ]) {
+    const result = await handler('cursorSetCeiling', payload, signal)
+    assert.equal(result.ok, false, JSON.stringify(payload))
+    if (!result.ok) assert.equal(result.error.code, 'bad-request')
+  }
+  const saved = await handler('cursorSetCeiling', { ceilingUSD: 2500 }, signal)
+  assert.equal(saved.ok, true)
+  const stored = await handler('cursorSettings', {}, signal)
+  assert.equal(
+    stored.ok && (stored.value as { ceilingUSD?: number }).ceilingUSD,
+    2500,
+  )
+  // An explicit null is the only way to clear it.
+  assert.equal(
+    (await handler('cursorSetCeiling', { ceilingUSD: null }, signal)).ok,
+    true,
+  )
+  const cleared = await handler('cursorSettings', {}, signal)
+  assert.equal(
+    cleared.ok && (cleared.value as { ceilingUSD?: number }).ceilingUSD,
+    undefined,
   )
 })

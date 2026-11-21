@@ -14,14 +14,10 @@ import type {
   AdapterRegistrationHandle,
   GenerateOptions,
   LlmModelInfo,
-  LlmResolvedModelInfo,
 } from '@deepseek-ai/dsh-llm'
 // Type-only: activates the optional live agent registry used for subagent speed.
-import type {} from '@deepseek-ai/dsh-agent'
 // Type-only: activates the `ctx.tools` Context merge for the inject block.
-import type {} from '@deepseek-ai/dsh-tools'
 // Type-only: activates the `ctx.web` Context merge for optional registration.
-import type {} from '@deepseek-ai/dsh-web'
 import type {
   AttachmentStore,
   ImageAttachmentRef,
@@ -30,52 +26,27 @@ import { OAuthFlowManager, type OAuthAttempt } from './auth/oauth-flow.js'
 import { DeviceFlowManager, type DeviceAttempt } from './auth/device-flow.js'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import {
-  readClaudeCodeCredentials,
-  refreshClaudeSynced,
-} from './auth/claude-code-creds.js'
+import { readClaudeCodeCredentials } from './auth/claude-code-creds.js'
 import { ResetRedemption } from './providers/reset-redemption.js'
-import { BadRequest, registerAuthRpc } from './auth/rpc.js'
-import { credentialRef } from '@deepseek-ai/dsh-credentials'
-import { ExternalUsageController } from './providers/external-usage-controller.js'
+import { BadRequest } from './auth/rpc.js'
 import {
-  OllamaAdapter,
   DEFAULT_OLLAMA_API_KEY_REF,
   DEFAULT_OLLAMA_BASE_URL,
-  fetchOllamaModels,
-  OLLAMA_CLOUD_ROUTE,
-  OLLAMA_PULL_TIMEOUT_MS,
 } from './providers/ollama.js'
-import type { OllamaDiscoveredModel } from './providers/ollama.js'
-import {
-  OllamaWebFetchProvider,
-  OllamaWebSearchProvider,
-} from './providers/ollama-web.js'
-import {
-  OllamaSettingsStore,
-  validateOllamaSettings,
-} from './providers/ollama-settings.js'
+import {} from './providers/ollama-web.js'
+import { OllamaSettingsStore } from './providers/ollama-settings.js'
 import type { OllamaModelSetting } from './providers/ollama-settings.js'
 import type {
   AuthController,
   ImageBytesResult,
   LoginMethod,
-  ModelDefaultsCatalog,
-  ModelDefaultsController,
-  ModelDefaultView,
   ProviderStatus,
-  SpeedController,
   SpeedTier,
   VideoBytesResult,
 } from './auth/rpc.js'
-import {
-  defaultEffortOf,
-  loadModelDefaults,
-  setDefaultEffort,
-} from './model-defaults.js'
+import { loadModelDefaults } from './model-defaults.js'
 import {
   accountKeyOf,
-  resolveAccountKey,
   deleteAccountSession,
   listAccounts,
   saveAccountSession,
@@ -93,7 +64,6 @@ import type {
 } from './auth/store.js'
 import {
   DISCOVERY_TIMEOUT_MS,
-  effortDisplayName,
   validateModels,
   withTimeout,
 } from './providers/common.js'
@@ -107,26 +77,40 @@ import {
 import type { RateLimitConfig } from './providers/rate-limit.js'
 import { DEFAULT_PROMPT_CACHE_TTL } from './translate/anthropic.js'
 import type { PromptCacheTtl } from './translate/anthropic.js'
-import { accountCatalogStore, catalogStore } from './providers/catalog-store.js'
 import { ClaudeCliVersionCache } from './providers/claude-cli-version.js'
-import type {
-  CliVersion,
-  NpmCliVersionCache,
-} from './providers/npm-cli-version.js'
+import type { CliVersion } from './providers/npm-cli-version.js'
 import { CodexClientVersionCache } from './providers/codex-client-version.js'
 import { CodexWebSearchProvider } from './providers/codex-search.js'
 import { PoolAdapter } from './providers/pool.js'
 import {
   AccountPreferencesAdapter,
   accountAllowsPool,
-  accountModelId,
   parseAccountModelId,
 } from './providers/account-preferences.js'
 export type {
   AccountPreferences,
   ProviderPreferences,
 } from './provider-settings.js'
+import {
+  PROVIDER_BUILDERS,
+  type ProviderBuildDeps,
+} from './providers/registration.js'
 import { ImageAccountPool } from './providers/image-pool.js'
+import { assembleRpc } from './rpc/registration.js'
+import {
+  createCredentialResolver,
+  registerKeyRoute,
+} from './providers/key-route.js'
+import { CursorAdapter, CURSOR_ROUTE } from './providers/cursor/adapter.js'
+import {
+  DEFAULT_CURSOR_API_KEY_REF,
+  DEFAULT_CURSOR_CONTEXT,
+} from './providers/cursor/models.js'
+import { createCursorGateway } from './providers/cursor/sdk.js'
+import type { CursorImageRef } from './providers/cursor/transcript.js'
+import type { Image } from './providers/cursor/prompt.js'
+import { CursorSettingsStore } from './providers/cursor-settings.js'
+import type { UsageFetchers } from './rpc/registration.js'
 import { registerWithAlias } from './tools/registration.js'
 import { buildAccountPools, poolKey } from './providers/pool-family.js'
 import type { PoolDefinition, PoolMemberRef } from './providers/pool-family.js'
@@ -135,49 +119,21 @@ import { PoolUsageTracker } from './providers/pool-usage.js'
 import {
   CodexAdapter,
   codexFlow,
-  CODEX_PREEMPT_MS,
   codexProfileClaims,
   exchangeCodexCode,
-  fetchCodexUsage,
-  fetchCodexResetCredits,
-  consumeCodexResetCredit,
-  isCodexPermanentRefreshError,
-  refreshCodex,
 } from './providers/codex.js'
 import {
   ClaudeAdapter,
   claudeFlow,
-  CLAUDE_PREEMPT_MS,
   exchangeClaudeCode,
   fetchClaudeUsage,
-  isClaudePermanentRefreshError,
-  refreshClaude,
 } from './providers/claude.js'
+import { grokFlow, exchangeGrokCode, fetchGrokUsage } from './providers/grok.js'
+import { completeCopilotLogin, copilotDeviceFlow } from './providers/copilot.js'
 import {
-  GrokAdapter,
-  grokFlow,
-  GROK_PREEMPT_MS,
-  exchangeGrokCode,
-  fetchGrokUsage,
-  isGrokPermanentRefreshError,
-  refreshGrok,
-} from './providers/grok.js'
-import {
-  CopilotAdapter,
-  COPILOT_PREEMPT_MS,
-  completeCopilotLogin,
-  copilotDeviceFlow,
-  isCopilotPermanentRefreshError,
-  refreshCopilot,
-} from './providers/copilot.js'
-import {
-  AntigravityAdapter,
   antigravityFlow,
-  ANTIGRAVITY_PREEMPT_MS,
   exchangeAntigravityCode,
   fetchAntigravityUsage,
-  isAntigravityPermanentRefreshError,
-  refreshAntigravity,
   resolveAntigravityOAuthConfig,
 } from './providers/antigravity.js'
 import type { AntigravityRuntimeConfig } from './providers/antigravity.js'
@@ -192,11 +148,7 @@ import {
   hostFetch,
   restoreConnectAttemptTimeout,
 } from './http.js'
-import {
-  ProviderSettingsStore,
-  PROVIDER_TOOLS,
-  validatePreferences,
-} from './provider-settings.js'
+import { ProviderSettingsStore } from './provider-settings.js'
 import { ModelSpeeds } from './model-speeds.js'
 
 export type {
@@ -300,6 +252,18 @@ export interface Config {
     /** Extra picker entries with heterogeneous fallbacks, listed under the first member's provider. */
     tiers?: Record<string, PoolMemberRef[]>
   }
+  /**
+   * Cursor key-based route (no OAuth session): models and subscription quota
+   * through the account's own API key.
+   */
+  cursor?: {
+    /** Credential reference naming the Cursor API key (default CURSOR_API_KEY). */
+    apiKeyRef?: string
+    /** Context tier preference: `max` (default) or an offered tier such as `300k`. */
+    context?: string
+    /** Working directory for Cursor agents; default is the session's directory. */
+    cwd?: string
+  }
 }
 
 const providerIdSchema = z.union([
@@ -351,6 +315,11 @@ export const Config: z<Config> = z.object({
     baseURL: z.string(),
     userAgent: z.string(),
     onboard: z.boolean().default(true),
+  }),
+  cursor: z.object({
+    apiKeyRef: z.string().default(DEFAULT_CURSOR_API_KEY_REF),
+    context: z.string().default(DEFAULT_CURSOR_CONTEXT),
+    cwd: z.string(),
   }),
   ollama: z.object({
     apiKeyRef: z.string().default(DEFAULT_OLLAMA_API_KEY_REF),
@@ -540,14 +509,6 @@ function planOf(
       return undefined
   }
 }
-
-/** Per-provider per-account usage lookup; providers without a usage endpoint are absent. */
-type UsageFetchers = Partial<
-  Record<
-    ProviderId,
-    (account: string, signal: AbortSignal) => Promise<ProviderUsage>
-  >
->
 
 /**
  * Auth operations behind the `/subscriptions-auth` RPC channel: start/complete
@@ -985,34 +946,60 @@ export class SubscriptionsAuthController implements AuthController {
   }
 }
 
-/** How long the Settings status waits on a CLI version refresh before showing the last one. */
-const STATUS_VERSION_WAIT_MS = 1000
+export { presentedVersion } from './rpc/registration.js'
+export type { UsageFetchers } from './rpc/registration.js'
 
 /**
- * Read the CLI version a route presents for the Settings page. The first
- * lookup is awaited (bounded by its own 5s deadline) so a slow registry is
- * not misreported as a fallback; a later refresh is waited on only briefly,
- * because the whole page waits on `status`, and the last result shows.
+ * Resolve the working directory for one Cursor session: the configured
+ * override, then the session's own directory when the host exposes it, then
+ * the process directory. Both host services are optional on minimal
+ * compositions.
  */
-export function presentedVersion(
-  cache: Pick<NpmCliVersionCache, 'resolve' | 'current'>,
-  waitMs = STATUS_VERSION_WAIT_MS,
-): () => Promise<CliVersion | undefined> {
-  return async () => {
-    if (cache.current() === undefined) {
-      await cache.resolve()
-      return cache.current()
+function cursorWorkingDirectory(
+  ctx: Context,
+  sessionId: string | undefined,
+  override: string | undefined,
+): string {
+  const configured = override?.trim()
+  if (configured) return configured
+  try {
+    const services = ctx as unknown as { get(name: string): unknown }
+    const sessions = services.get('sessions') as
+      { get?(id: string): unknown } | undefined
+    const session =
+      sessionId === undefined ? undefined : sessions?.get?.(sessionId)
+    if (session !== undefined) {
+      const directories = services.get('workingDirectory') as
+        { get?(session: unknown): unknown } | undefined
+      const directory = directories?.get?.(session)
+      if (typeof directory === 'string' && directory) return directory
     }
-    let timer: ReturnType<typeof setTimeout> | undefined
-    await Promise.race([
-      cache.resolve(),
-      new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, waitMs)
-      }),
-    ]).finally(() => {
-      clearTimeout(timer)
-    })
-    return cache.current()
+  } catch {
+    /* the working directory service is optional */
+  }
+  return process.cwd()
+}
+
+/**
+ * Read one image attachment for Cursor. An unreadable image returns nothing and
+ * the transcript carries a text note in its place, so one bad attachment never
+ * fails the whole message.
+ */
+function cursorImageReader(
+  ctx: Context,
+): (ref: CursorImageRef, signal?: AbortSignal) => Promise<Image | undefined> {
+  return async (ref, signal) => {
+    const attachments = ctx.get('attachments') as AttachmentStore | undefined
+    if (!attachments) return undefined
+    try {
+      const stored = await attachments.readImage(ref, signal)
+      return {
+        data: Buffer.from(stored.data).toString('base64'),
+        mimeType: stored.ref.mediaType,
+      }
+    } catch {
+      return undefined
+    }
   }
 }
 
@@ -1138,7 +1125,7 @@ export function apply(ctx: Context, config: Config): void {
     // Login, logout, and credential death all pass through here; a copilot
     // auth transition also drops the adapter's captured reasoning replay
     // state (isolation is already account-scoped — this is memory hygiene).
-    if (provider === 'copilot') copilotAdapter?.clearReplayState()
+    if (provider === 'copilot') clearCopilotReplay?.()
     adapters.get(provider)?.clearAccountCatalog(account)
     poolHealth?.clear(provider, account)
     poolUsage?.invalidate(provider, account)
@@ -1188,7 +1175,7 @@ export function apply(ctx: Context, config: Config): void {
   let claudeAdapter: ClaudeAdapter | undefined
   // Dropped on every copilot auth transition so replay state (captured
   // reasoning) never survives an account switch in memory.
-  let copilotAdapter: CopilotAdapter | undefined
+  let clearCopilotReplay: (() => void) | undefined
   const memberAdapters = new Map<ProviderId, AccountAwareAdapter>()
   const register = (
     provider: ProviderId,
@@ -1210,253 +1197,40 @@ export function apply(ctx: Context, config: Config): void {
     memberAdapters.set(provider, route.poolMember())
     return ctx.llm.registerAdapter([provider], route)
   }
-  for (const provider of providers) {
-    switch (provider) {
-      case 'codex': {
-        const tokens = new AccountTokenManager<CodexSession>({
-          provider: 'codex',
-          displayName: 'ChatGPT (Codex)',
-          makeOptions: () => ({
-            preemptMs: CODEX_PREEMPT_MS,
-            refresh: refreshCodex,
-            isPermanent: isCodexPermanentRefreshError,
-          }),
-          onAccountRemoved: (account) => {
-            authChanged('codex', account)
-          },
-        })
-        codexTokens = tokens
-        accountTokens.set('codex', tokens as AccountTokenManager<StoredSession>)
-        usageFetchers.codex = async (account, signal) => {
-          const session = await tokens.session(account)
-          const usage = await fetchCodexUsage(session, hostFetch, signal)
-          try {
-            const resetCredits = await fetchCodexResetCredits(
-              session,
-              hostFetch,
-              signal,
-            )
-            return { ...usage, resetCredits }
-          } catch {
-            // Reset credits are an optional private endpoint, so a failure here
-            // must not cost the caller its ordinary usage. The provider's own
-            // message is not carried into the result: this string is rendered
-            // in Settings, and a private endpoint echoing a token would put it
-            // on screen. The consume path takes the same posture.
-            return {
-              ...usage,
-              resetCreditsError: 'the usage-limit reset lookup did not answer',
-            }
-          }
-        }
-        const adapter = new CodexAdapter({
-          ...(config.codexClientVersion === undefined
-            ? {}
-            : { clientVersion: config.codexClientVersion }),
-          resolveClientVersion: () => codexVersion.resolve(),
-          models: catalog.codex,
-          streamIdleTimeoutMs,
-          rateLimit,
-          tokens,
-          discovery: !overridden.has('codex'),
-          onWarn,
-          resolveAttachments,
-          // Durable catalog: capability metadata (reasoning efforts) survives
-          // restarts, so a resumed session's selected effort keeps resolving.
-          catalogStore: catalogStore('codex'),
-          accountCatalogStore: (account) =>
-            accountCatalogStore('codex', account),
-          defaultEffortOf: (model: string) => defaultEffortOf('codex', model),
-          contextWindowOf: (model) => preferences.contextWindow(model),
-          pool: () => poolAdapter,
-          speedFor: (
-            sessionId: string | undefined,
-            model: string,
-          ): boolean | Promise<boolean> =>
-            sessionId !== undefined &&
-            selectedSpeed(sessionId, model) === 'fast' &&
-            adapter.supportsFastTier(model),
-        })
-        codexAdapter = adapter
-        adapters.set('codex', adapter)
-        handles.set('codex', register('codex', adapter))
-        break
-      }
-      case 'claude': {
-        const tokens = new AccountTokenManager<ClaudeSession>({
-          provider: 'claude',
-          displayName: 'Claude (Subscription)',
-          makeOptions: () => ({
-            preemptMs: CLAUDE_PREEMPT_MS,
-            // Only keychain-imported accounts sync with Claude Code's own
-            // credential store; OAuth accounts refresh standalone so several
-            // accounts never fight over the Keychain entry.
-            refresh: (session) =>
-              session.keychainBound === true
-                ? refreshClaudeSynced(session, refreshClaude)
-                : refreshClaude(session),
-            isPermanent: isClaudePermanentRefreshError,
-          }),
-          onAccountRemoved: (account) => {
-            authChanged('claude', account)
-          },
-        })
-        claudeTokens = tokens
-        accountTokens.set(
-          'claude',
-          tokens as AccountTokenManager<StoredSession>,
-        )
-        usageFetchers.claude = async (account, signal) =>
-          fetchClaudeUsage(
-            await tokens.session(account),
-            hostFetch,
-            signal,
-            () => claudeVersion.resolve(),
-          )
-        const adapter = new ClaudeAdapter({
-          models: catalog.claude,
-          streamIdleTimeoutMs,
-          rateLimit,
-          tokens,
-          discovery: !overridden.has('claude'),
-          onWarn,
-          resolveAttachments,
-          catalogStore: catalogStore('claude'),
-          defaultEffortOf: (model: string) => defaultEffortOf('claude', model),
-          contextWindowOf: (model) =>
-            preferences.contextWindow(model, 'claude'),
-          resolveCliVersion: () => claudeVersion.resolve(),
-          promptCacheTtl: claudePromptCacheTtl,
-          // The Manage dialog's per-route override, re-read from the settings
-          // store on every request so a save applies from the next turn.
-          promptCacheTtlOverride: () => preferences.promptCacheTtl(),
-          pool: () => poolAdapter,
-        })
-        claudeAdapter = adapter
-        adapters.set('claude', adapter)
-        handles.set('claude', register('claude', adapter))
-        break
-      }
-      case 'grok': {
-        const tokens = new AccountTokenManager<GrokSession>({
-          provider: 'grok',
-          displayName: 'Grok (Subscription)',
-          makeOptions: () => ({
-            preemptMs: GROK_PREEMPT_MS,
-            refresh: refreshGrok,
-            isPermanent: isGrokPermanentRefreshError,
-          }),
-          onAccountRemoved: (account) => {
-            authChanged('grok', account)
-          },
-        })
-        grokTokens = tokens
-        accountTokens.set('grok', tokens as AccountTokenManager<StoredSession>)
-        usageFetchers.grok = async (account, signal) =>
-          fetchGrokUsage(await tokens.session(account), hostFetch, signal)
-        const adapter = new GrokAdapter({
-          models: catalog.grok,
-          streamIdleTimeoutMs,
-          rateLimit,
-          tokens,
-          discovery: !overridden.has('grok'),
-          onWarn,
-          resolveAttachments,
-          // Durable catalog: capability metadata (reasoning efforts) survives
-          // restarts, so a resumed session's selected effort keeps resolving.
-          catalogStore: catalogStore('grok'),
-          defaultEffortOf: (model: string) => defaultEffortOf('grok', model),
-          pool: () => poolAdapter,
-        })
-        adapters.set('grok', adapter)
-        handles.set('grok', register('grok', adapter))
-        break
-      }
-      case 'copilot': {
-        const tokens = new AccountTokenManager<CopilotSession>({
-          provider: 'copilot',
-          displayName: 'GitHub Copilot',
-          makeOptions: () => ({
-            preemptMs: COPILOT_PREEMPT_MS,
-            refresh: refreshCopilot,
-            isPermanent: isCopilotPermanentRefreshError,
-          }),
-          onAccountRemoved: (account) => {
-            authChanged('copilot', account)
-          },
-        })
-        accountTokens.set(
-          'copilot',
-          tokens as AccountTokenManager<StoredSession>,
-        )
-        copilotAdapter = new CopilotAdapter({
-          models: catalog.copilot,
-          streamIdleTimeoutMs,
-          rateLimit,
-          tokens,
-          discovery: !overridden.has('copilot'),
-          onWarn,
-          resolveAttachments,
-          // Durable catalog: capability metadata (per-model vision support,
-          // context windows) survives restarts and network failures.
-          catalogStore: catalogStore('copilot'),
-          defaultEffortOf: (model: string) => defaultEffortOf('copilot', model),
-          pool: () => poolAdapter,
-        })
-        adapters.set('copilot', copilotAdapter)
-        handles.set('copilot', register('copilot', copilotAdapter))
-        break
-      }
-      case 'antigravity': {
-        const tokens = new AccountTokenManager<AntigravitySession>({
-          provider: 'antigravity',
-          displayName: 'Google Antigravity',
-          makeOptions: () => ({
-            preemptMs: ANTIGRAVITY_PREEMPT_MS,
-            refresh: (session) =>
-              refreshAntigravity(
-                session,
-                resolveAntigravityOAuthConfig(config.antigravity),
-              ),
-            isPermanent: isAntigravityPermanentRefreshError,
-          }),
-          onAccountRemoved: (account) => {
-            authChanged('antigravity', account)
-          },
-        })
-        accountTokens.set(
-          'antigravity',
-          tokens as AccountTokenManager<StoredSession>,
-        )
-        usageFetchers.antigravity = async (account, signal) =>
-          fetchAntigravityUsage(
-            await tokens.session(account),
-            config.antigravity,
-            hostFetch,
-            signal,
-          )
-        const adapter = new AntigravityAdapter({
-          models: catalog.antigravity,
-          streamIdleTimeoutMs,
-          rateLimit,
-          tokens,
-          discovery: !overridden.has('antigravity'),
-          ...(config.antigravity === undefined
-            ? {}
-            : { runtime: config.antigravity }),
-          onWarn,
-          resolveAttachments,
-          catalogStore: catalogStore('antigravity'),
-          defaultEffortOf: (model) => defaultEffortOf('antigravity', model),
-          pool: () => poolAdapter,
-        })
-        adapters.set('antigravity', adapter)
-        handles.set('antigravity', register('antigravity', adapter))
-        break
-      }
-    }
+  const buildDeps: ProviderBuildDeps = {
+    config,
+    preferences,
+    codexVersion,
+    claudeVersion,
+    streamIdleTimeoutMs,
+    rateLimit,
+    claudePromptCacheTtl,
+    catalog,
+    overridden,
+    onWarn,
+    resolveAttachments,
+    pool: () => poolAdapter,
+    selectedSpeed,
   }
-
+  for (const provider of providers) {
+    const built = PROVIDER_BUILDERS[provider](buildDeps)
+    if (built.tokens !== undefined) accountTokens.set(provider, built.tokens)
+    if (built.usage !== undefined) usageFetchers[provider] = built.usage
+    if (built.clearReplayState !== undefined)
+      clearCopilotReplay = built.clearReplayState
+    adapters.set(provider, built.adapter)
+    handles.set(provider, register(provider, built.adapter))
+    if (provider === 'codex') {
+      codexAdapter = built.adapter as CodexAdapter
+      codexTokens = built.tokens as AccountTokenManager<CodexSession>
+    }
+    if (provider === 'claude') {
+      claudeAdapter = built.adapter as ClaudeAdapter
+      claudeTokens = built.tokens as AccountTokenManager<ClaudeSession>
+    }
+    if (provider === 'grok')
+      grokTokens = built.tokens as AccountTokenManager<GrokSession>
+  }
   // Same-subscription account pools: a catalog model with ≥2 accounts of
   // that provider is served through the pool (same id, same picker group).
   // Configured tiers are extra picker rows. Built whenever enabled; a
@@ -1615,490 +1389,88 @@ export function apply(ctx: Context, config: Config): void {
       )
   }
 
-  const speed: SpeedController = {
-    async speed(sessionId, model) {
-      const fastModels = (await codexAdapter?.fastCapableModels()) ?? []
-      const accountPreferences = preferences.get('codex').accounts
-      for (const { key } of (await codexTokens?.list()) ?? []) {
-        if (
-          !accountPreferences ||
-          !Object.hasOwn(accountPreferences, key) ||
-          accountPreferences[key].independentEntry !== true
-        )
-          continue
-        for (const model of [...fastModels]) {
-          if (parseAccountModelId(model)) continue
-          if (await codexAdapter?.supportsFastTier(model, key))
-            fastModels.push(accountModelId(key, model))
-        }
-      }
-      return {
-        tier:
-          model !== undefined && !fastModels.includes(model)
-            ? 'standard'
-            : selectedSpeed(sessionId, model),
-        fastModels,
-      }
-    },
-    async setSpeed(sessionId, tier, model) {
-      if (model === undefined) {
-        // Legacy callers keep an explicit session-only Standard/Fast override.
-        speedBySession.set(sessionId, tier)
-        return
-      }
-      model = parseAccountModelId(model)?.model ?? model
-      await modelSpeeds.set(model, tier)
-      const choices =
-        speedBySessionModel.get(sessionId) ?? new Map<string, SpeedTier>()
-      choices.set(model, tier)
-      speedBySessionModel.set(sessionId, choices)
-    },
-  }
-  // Per-model default effort overrides (the Settings page's model pickers).
-  // The catalog re-reads the live model info per model — same source as the
-  // session model picker, so the offered effort levels match the picker
-  // exactly, and the configured default merges in through the adapters.
-  const modelDefaults: ModelDefaultsController = {
-    async catalog(force = false): Promise<ModelDefaultsCatalog[]> {
-      if (force) {
-        codexVersion.invalidate()
-        claudeVersion.invalidate()
-        // This is not an auth transition: retain health, usage and Copilot
-        // reasoning replay, but bypass every account's discovery cache.
-        for (const adapter of adapters.values()) adapter.clearAccountCatalog()
-        poolAdapter?.invalidate()
-        for (const [route, handle] of handles) handle.replace([route])
-      }
-      const visible = new Set(
-        (await ctx.llm.listProviders()).map((provider) => provider.id),
-      )
-      const catalog: ModelDefaultsCatalog[] = []
-      for (const provider of PROVIDER_IDS) {
-        if (!visible.has(provider)) continue
-        let models: readonly { id: string; name: string }[]
-        try {
-          models = await ctx.llm.listModels(provider)
-        } catch {
-          continue // provider unregistered or catalog unavailable; leave it out
-        }
-        // Configured tier rows resolve through the pool, which intersects its
-        // members' own capabilities and never consults defaultEffortOf for the
-        // tier id — an override on one would save cleanly and do nothing. Leave
-        // them out rather than offer a control that cannot take effect.
-        let tierIds: ReadonlySet<string> = new Set()
-        try {
-          const tiers = await poolAdapter?.modelsForProvider(provider)
-          if (tiers !== undefined)
-            tierIds = new Set(tiers.map((tier) => tier.id))
-        } catch {
-          // A pool that cannot enumerate leaves every row listed; the worst
-          // case is the pre-existing behaviour, not a missing card.
-        }
-        const views: ModelDefaultView[] = []
-        for (const model of models) {
-          if (tierIds.has(model.id) || parseAccountModelId(model.id)) continue
-          let info: LlmResolvedModelInfo | undefined
-          try {
-            info = await ctx.llm.resolveModelInfo(provider, model.id)
-          } catch {
-            continue // one broken entry must not hide the rest
-          }
-          if (info === undefined) continue
-          // `defaultEffortOf` rather than a bare index: model ids are catalog
-          // data, and an id like `toString` would otherwise inherit a function.
-          const override = defaultEffortOf(provider, model.id)
-          views.push({
-            id: model.id,
-            name: model.name,
-            efforts:
-              info.reasoning?.efforts.map((effort) => ({
-                id: effort.id,
-                name: effort.name,
-              })) ?? [],
-            ...(override === undefined ? {} : { configured: override }),
-          })
-        }
-        catalog.push({ provider, models: views })
-      }
-      return catalog
-    },
-    async set(provider, model, effort) {
-      // Garbage in, garbage out: accept only levels the model's own catalog
-      // actually advertises (clearing with `undefined` always passes). A value
-      // from elsewhere — a hand-edited store file — would otherwise ride on
-      // every request and 400. An unknown effort fails the save instead of
-      // silently saving something unusable.
-      if (effort !== undefined) {
-        let info: LlmResolvedModelInfo | undefined
-        try {
-          info = await ctx.llm.resolveModelInfo(provider, model)
-        } catch {
-          // Fall through when the catalog is unavailable: rejecting the save
-          // here would make every write fail during an outage.
-        }
-        const offered = info?.reasoning?.efforts ?? []
-        if (
-          offered.length > 0 &&
-          !offered.some((entry) => entry.id === effort)
-        ) {
-          throw new BadRequest(
-            `model ${model} does not advertise a "${effort}" reasoning effort`,
-          )
-        }
-      }
-      await setDefaultEffort(provider, model, effort)
-      // Re-announce the route so the model picker re-queries `listModels` and
-      // reflects the new default immediately (same path as auth changes).
-      handles.get(provider)?.replace([provider])
-    },
-  }
-  let resolveExternalCredential:
-    ((name: string) => Promise<{ value: string } | undefined>) | undefined
-  let ollamaAdapter: OllamaAdapter | undefined
-  let ollamaHandle: AdapterRegistrationHandle | undefined
-  ctx.inject(['credentials'], (credentialsCtx) => {
-    resolveExternalCredential = (name) =>
-      credentialsCtx.credentials.resolve(credentialRef(name))
-    // Ollama Cloud is a key-based route with no OAuth session. Every setting
-    // is read through the live getters above, so a Settings save reaches the
-    // next request without a restart; the stored catalog is the only source
-    // of models.
-    ollamaAdapter = new OllamaAdapter({
-      apiKey: async () =>
-        (await resolveExternalCredential?.(ollamaApiKeyRef()))?.value,
-      baseURL: ollamaBaseURL,
-      catalog: ollamaCatalog,
-      resolveAttachments,
-      streamIdleTimeoutMs,
-      onWarn,
-    })
-    ollamaHandle = credentialsCtx.llm.registerAdapter(
-      [OLLAMA_CLOUD_ROUTE],
-      ollamaAdapter,
-    )
+  // Cursor is a key-based route: it authenticates with a DSH credential and
+  // stays outside the OAuth account machinery, like the Ollama Cloud route.
+  const cursorSettings = new CursorSettingsStore(undefined, (message) => {
+    ctx.logger.warn(`${name}: ${message}`)
   })
-  // The web providers gate on the live effective switch, so a Settings save
-  // enables or disables them without re-registering: registration alone does
-  // not make a provider available, and an unavailable one stays out of the
-  // host's selection. The default stays off.
-  let ollamaWebRegistered = false
-  const syncOllamaWeb = (): void => {
-    if (ollamaWebRegistered || !ollamaWebEnabled()) return
-    ollamaWebRegistered = true
-    const ollamaApiKey = async (): Promise<string | undefined> =>
-      (await resolveExternalCredential?.(ollamaApiKeyRef()))?.value
-    ctx.inject(['web'], (webCtx) => {
-      webCtx.web.registerSearchProvider(
-        new OllamaWebSearchProvider({
-          apiKey: ollamaApiKey,
-          baseURL: ollamaBaseURL,
-          enabled: ollamaWebEnabled,
-        }),
-      )
-      webCtx.web.registerFetchProvider(
-        new OllamaWebFetchProvider({
-          apiKey: ollamaApiKey,
-          baseURL: ollamaBaseURL,
-          enabled: ollamaWebEnabled,
-        }),
-      )
+  const cursorApiKeyRef = (): string =>
+    config.cursor?.apiKeyRef ?? DEFAULT_CURSOR_API_KEY_REF
+  const cursorContext = (): string =>
+    config.cursor?.context ?? DEFAULT_CURSOR_CONTEXT
+  let cursorAdapter: CursorAdapter | undefined
+  ctx.inject(['credentials'], (credentialsCtx) => {
+    const resolveCredential = createCredentialResolver(credentialsCtx)
+    const adapter = new CursorAdapter({
+      gateway: createCursorGateway(),
+      apiKey: async () => (await resolveCredential(cursorApiKeyRef()))?.value,
+      cwd: (sessionId) =>
+        cursorWorkingDirectory(ctx, sessionId, config.cursor?.cwd),
+      contextPreference: cursorContext,
+      keyRef: cursorApiKeyRef(),
+      readImage: cursorImageReader(ctx),
+      onWarn: (message) => ctx.logger.warn(`${name}: ${message}`),
     })
-  }
-  syncOllamaWeb()
-  const externalUsage = new ExternalUsageController(
-    async (name) => resolveExternalCredential?.(name),
-    hostFetch,
-    // A custom ollama ref must reach usage status too, or chat and the
-    // quota card would read different credentials. Both values are live so a
-    // Settings save moves chat and usage to the same target.
-    { 'ollama-cloud': ollamaApiKeyRef },
-    ollamaBaseURL,
-  )
-  const resetRedemption = new ResetRedemption(
-    async (account, signal) => {
-      if (!usageFetchers.codex) throw new BadRequest('Codex unavailable')
-      return usageFetchers.codex(account, signal)
+    cursorAdapter = adapter
+    registerKeyRoute(credentialsCtx, CURSOR_ROUTE, adapter)
+  })
+  ctx.effect(
+    () => () => {
+      cursorAdapter?.dispose()
     },
-    async (account, creditId, requestId, signal) => {
-      if (!codexTokens) throw new BadRequest('Codex unavailable')
-      await consumeCodexResetCredit(
-        await codexTokens.session(account),
-        creditId,
-        requestId,
-        hostFetch,
-        signal,
-      )
-    },
-    (account) => poolUsage?.invalidate('codex', account),
-    // The browser may name the account by canonical id, legacy key, email, or
-    // workspace id. The guards must key on the stored account's key — the same
-    // one the usage cache uses — so an alias cannot slip past a parked
-    // outcome, and an invalidation actually clears that account's cache.
-    async (account) => resolveAccountKey('codex', account),
+    'dsh-subscriptions: cursor sessions',
   )
-  registerAuthRpc(
+
+  assembleRpc({
     ctx,
-    new SubscriptionsAuthController(
-      flows,
-      deviceFlows,
-      authChanged,
-      resolveAttachments,
-      usageFetchers,
-      undefined,
-      poolUsage,
-      config.antigravity,
-      {
-        ...(providers.includes('codex')
-          ? {
-              codex:
-                config.codexClientVersion === undefined
-                  ? presentedVersion(codexVersion)
-                  : async () => ({
-                      version: config.codexClientVersion!,
-                      source: 'config' as const,
-                    }),
-            }
-          : {}),
-        ...(providers.includes('claude')
-          ? { claude: presentedVersion(claudeVersion) }
-          : {}),
-      },
-      resetRedemption,
-      (provider, account) => poolHealth?.clear(provider, account),
-    ),
-    speed,
-    modelDefaults,
-    {
-      visibleModels: (provider) => preferences.get(provider).visibleModels,
-      async get(provider, force) {
-        await loadModelDefaults()
-        const adapter = adapters.get(provider)
-        if (!adapter)
-          throw new BadRequest(`provider ${provider} is not configured`)
-        if (force) {
-          if (provider === 'codex') codexVersion.invalidate()
-          if (provider === 'claude') claudeVersion.invalidate()
-          adapter.clearAccountCatalog()
-          poolAdapter?.invalidate()
-          handles.get(provider)?.replace([provider])
-        }
-        const models = await fullCatalogs.get(provider)!(provider)
-        // Enumerate each account once, with the same bounds used by pool discovery.
-        const accounts = (await accountTokens.get(provider)?.list()) ?? []
-        const accountCatalogs = await Promise.all(
-          accounts.map(async (account) => ({
-            account: account.key,
-            models: await withTimeout(
-              (signal) => adapter.listOwnModels(provider, account.key, signal),
-              DISCOVERY_TIMEOUT_MS,
-            ).catch(() => undefined),
-          })),
-        )
-        const tierIds = new Set(
-          (
-            (await poolAdapter?.modelsForProvider(provider).catch(() => [])) ??
-            []
-          ).map((model) => model.id),
-        )
-        const fastModels = new Set(
-          provider === 'codex'
-            ? ((await codexAdapter?.fastCapableModels()) ?? [])
-            : [],
-        )
-        const rows = await Promise.all(
-          models.map(async (model) => {
-            const contexts: { default: number; max: number }[] = []
-            if (provider === 'codex' && codexAdapter) {
-              for (const account of accountCatalogs) {
-                if (account.models?.some((entry) => entry.id === model.id)) {
-                  const limits = await codexAdapter
-                    .contextLimits(model.id, account.account)
-                    .catch(() => undefined)
-                  if (limits) contexts.push(limits)
-                }
-              }
-            }
-            if (provider === 'claude' && claudeAdapter) {
-              for (const account of accountCatalogs) {
-                if (account.models?.some((entry) => entry.id === model.id)) {
-                  const limits = await claudeAdapter
-                    .contextLimits(model.id, account.account)
-                    .catch(() => undefined)
-                  if (limits) contexts.push(limits)
-                }
-              }
-            }
-            // A model with unavailable capabilities can still be hidden or restored.
-            const info = await withTimeout(
-              () => adapter.resolveModel(provider, model.id),
-              DISCOVERY_TIMEOUT_MS,
-            ).catch(() => undefined)
-            return {
-              id: model.id,
-              name: model.name,
-              contextWindow: info?.context?.contextWindow,
-              efforts: tierIds.has(model.id)
-                ? []
-                : (info?.reasoning?.efforts.map(({ id, name }) => ({
-                    id,
-                    name,
-                  })) ?? []),
-              configured: defaultEffortOf(provider, model.id),
-              ...(provider === 'codex'
-                ? {
-                    fastTier:
-                      !tierIds.has(model.id) && fastModels.has(model.id),
-                  }
-                : {}),
-              ...(contexts.length
-                ? {
-                    defaultContextWindow: Math.min(
-                      ...contexts.map((entry) => entry.default),
-                    ),
-                    maxContextWindow: Math.min(
-                      ...contexts.map((entry) => entry.max),
-                    ),
-                  }
-                : {}),
-            }
-          }),
-        )
-        return {
-          provider,
-          settings: preferences.get(provider),
-          models: rows,
-          tools: PROVIDER_TOOLS[provider],
-          accounts: accounts.map(({ key, session }) => {
-            const catalog = accountCatalogs.find(
-              (entry) => entry.account === key,
-            )?.models
-            return {
-              key,
-              label: accountOf(provider, session) ?? key,
-              models: (catalog ?? []).map(({ id, name }) => ({ id, name })),
-              ...(catalog === undefined ? { unavailable: true } : {}),
-            }
-          }),
-        }
-      },
-      async set(provider, settings) {
-        if (!adapters.has(provider))
-          throw new BadRequest(`provider ${provider} is not configured`)
-        let validated
-        try {
-          validated = validatePreferences(provider, settings)
-        } catch (error) {
-          throw new BadRequest(
-            error instanceof Error ? error.message : String(error),
-          )
-        }
-        await preferences.set(provider, validated)
-        poolAdapter?.invalidate()
-        for (const [route, handle] of handles) handle.replace([route])
-      },
+    config,
+    providers,
+    preferences,
+    adapters,
+    handles,
+    accountTokens,
+    fullCatalogs,
+    codexAdapter,
+    claudeAdapter,
+    codexTokens,
+    codexVersion,
+    claudeVersion,
+    poolAdapter,
+    poolHealth,
+    poolUsage,
+    flows,
+    deviceFlows,
+    authChanged,
+    accountOf,
+    SubscriptionsAuthController,
+    resolveAttachments,
+    usageFetchers,
+    selectedSpeed,
+    streamIdleTimeoutMs,
+    onWarn,
+    speedBySession,
+    speedBySessionModel,
+    modelSpeeds,
+    ollamaSettings,
+    ollamaBaseURL,
+    ollamaApiKeyRef,
+    ollamaWebEnabled,
+    ollamaModelsOverridden,
+    ollamaCatalog,
+    cursorSettings,
+    cursorApiKeyRef,
+    cursorContext,
+    // Opening the card must not reach the SDK; only its Refresh asks for a
+    // live discovery, and the picker keeps the cache current meanwhile.
+    cursorModelCount: async (refresh?: boolean) => {
+      if (refresh !== true) return cursorAdapter?.cachedModelCount()
+      try {
+        return (await ctx.llm.listModels(CURSOR_ROUTE)).length
+      } catch {
+        return undefined
+      }
     },
-    externalUsage,
-    {
-      settings: async () => ({
-        provider: 'ollama-cloud',
-        settings: ollamaSettings.get(),
-        effective: {
-          baseURL: ollamaBaseURL(),
-          apiKeyRef: ollamaApiKeyRef(),
-          web: ollamaWebEnabled(),
-        },
-        // The picker's catalog, so the dialog can show what it is editing even
-        // while a config override keeps the store out of the effective list.
-        models: ollamaCatalog().map((entry) => ({
-          id: entry.id,
-          name: entry.name ?? entry.id,
-          vision: entry.vision === true,
-          // A stored row may carry efforts without the flag (a hand-written
-          // row); either one means the model thinks.
-          thinking: entry.thinking === true || (entry.efforts?.length ?? 0) > 0,
-          ...(entry.contextWindow === undefined
-            ? {}
-            : { contextWindow: entry.contextWindow }),
-          // The effort set the resolver serves this row (vendor levels win
-          // over the stored list at resolve time, so the dialog pools the
-          // stored row and its enrichment here only).
-          ...(entry.efforts === undefined
-            ? {}
-            : {
-                efforts: entry.efforts.map((effort) => ({
-                  id: effort,
-                  name: effortDisplayName(effort),
-                })),
-              }),
-          ...(entry.defaultEffort === undefined
-            ? {}
-            : { defaultEffort: entry.defaultEffort }),
-        })),
-        configOverridesModels: ollamaModelsOverridden(),
-      }),
-      setSettings: async (input) => {
-        let validated
-        try {
-          validated = validateOllamaSettings(input)
-        } catch (error) {
-          throw new BadRequest(
-            error instanceof Error ? error.message : String(error),
-          )
-        }
-        await ollamaSettings.set(validated)
-        // The saved catalog and base URL replace what the adapter cached: drop
-        // the discovery snapshot, re-announce the route so the picker re-queries
-        // `listModels`, and let a web toggle take effect.
-        ollamaAdapter?.invalidateModels()
-        ollamaHandle?.replace([OLLAMA_CLOUD_ROUTE])
-        syncOllamaWeb()
-      },
-      models: async (input, signal) => {
-        const baseURL = input.baseURL ?? ollamaBaseURL()
-        // A typed key rides this listing only: it is never written to the store
-        // and never echoed back in the reply.
-        const apiKey =
-          input.apiKey ??
-          (await resolveExternalCredential?.(ollamaApiKeyRef()))?.value
-        const timeout = AbortSignal.timeout(OLLAMA_PULL_TIMEOUT_MS)
-        const combined = AbortSignal.any([signal, timeout])
-        let discovered: OllamaDiscoveredModel[]
-        try {
-          discovered = await fetchOllamaModels({
-            baseURL,
-            apiKey,
-            signal: combined,
-          })
-        } catch (error) {
-          if (timeout.aborted) {
-            // The host renders error.cause. This timeout replaces the abort.
-            // eslint-disable-next-line preserve-caught-error -- the replacement is the message the host shows
-            throw new Error(
-              `Ollama model listing timed out after ${OLLAMA_PULL_TIMEOUT_MS}ms`,
-            )
-          }
-          throw error
-        }
-        return {
-          models: discovered.map((row) => ({
-            id: row.id,
-            rawId: row.rawId,
-            name: row.rawId,
-            vision: row.inputModalities?.includes('image') === true,
-            thinking: row.thinking,
-            ...(row.contextWindow === undefined
-              ? {}
-              : { contextWindow: row.contextWindow }),
-            efforts:
-              row.reasoning?.efforts.map((effort) => String(effort.id)) ?? [],
-            ...(row.reasoning?.defaultEffort === undefined
-              ? {}
-              : { defaultEffort: String(row.reasoning.defaultEffort) }),
-          })),
-        }
-      },
-    },
-  )
+  })
 
   // Proactively keep keychain-bound Claude accounts synced with Claude Code's
   // own store (Keychain/file) every 5 minutes, so a session left idle between

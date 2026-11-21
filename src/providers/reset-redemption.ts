@@ -56,10 +56,12 @@ export class ResetRedemption {
     const weekly = usage.windows?.find(
       (w) => w.kind === 'weekly' && w.scope === undefined,
     )
+    const used = weekly?.usedPercent
     if (
-      !weekly ||
-      !Number.isFinite(weekly.usedPercent) ||
-      weekly.usedPercent < 80 ||
+      weekly === undefined ||
+      used === undefined ||
+      !Number.isFinite(used) ||
+      used < 80 ||
       weekly.resetsAt === undefined ||
       weekly.resetsAt <= Date.now()
     ) {
@@ -67,7 +69,7 @@ export class ResetRedemption {
     }
     if (usage.resetCreditsError)
       throw new Error('Reset credits could not be verified.')
-    return weekly.usedPercent
+    return used
   }
 
   async prepare(

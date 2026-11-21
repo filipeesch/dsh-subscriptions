@@ -254,7 +254,7 @@ test('model discovery and quota display map fetchAvailableModels data', async ()
     usage.windows?.map((window) => [
       window.kind,
       window.scope,
-      Math.round(window.usedPercent),
+      Math.round(window.usedPercent ?? -1),
     ]),
     [
       ['other', 'gemini-3-flash', 30],

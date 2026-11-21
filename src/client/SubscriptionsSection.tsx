@@ -21,6 +21,7 @@ import { ProviderAccountManager } from './ProviderAccountManager.js'
 import { providerSettingsCss } from './provider-settings-styles.js'
 import { ExternalUsageCards } from './ExternalUsageCards.js'
 import { OllamaCard } from './OllamaCard.js'
+import { CursorCard } from './CursorCard.js'
 import { UsageMeter } from './UsageMeter.js'
 import { quotaText, useQuotaClock } from './quota-display.js'
 import {
@@ -34,6 +35,7 @@ import {
   useQuotaDisplayMode,
 } from './usage-badge-preferences.js'
 import { subscriptionCardStyles as cardStyles } from './subscription-card-styles.js'
+import type { ProviderId } from '../providers/ids.js'
 import type { SubscriptionsKey } from './locales.js'
 
 import {
@@ -45,9 +47,8 @@ export { callSubscriptionsAuth } from './subscriptions-rpc.js'
 /** Poll cadence while a provider login attempt is busy. */
 const POLL_INTERVAL_MS = 2000
 
-/** Subscription provider ids, fixed by the node half's OAuth adapters. */
-export type SubscriptionProvider =
-  'codex' | 'claude' | 'grok' | 'copilot' | 'antigravity'
+/** Subscription provider ids, from the node half's single tuple. */
+export type SubscriptionProvider = ProviderId
 
 /** One logged-in account as answered by the `status` endpoint. */
 export interface AccountStatus {
@@ -88,13 +89,23 @@ interface StatusResponse {
 export interface UsageWindow {
   kind: 'session' | 'weekly' | 'other'
   scope?: string
-  usedPercent: number
+  usedPercent?: number
   resetsAt?: number
   startsAt?: number
   windowDurationMs?: number
   fixedWindow?: boolean
   /** Display-only assumed start; the marker rides it, never pace. */
   displayStartsAt?: number
+  /** Amount used in the currency's minor unit, when the provider reports money. */
+  usedAmount?: number
+  /** Ceiling for this window in the same minor unit. */
+  limitAmount?: number
+  /** Whether the ceiling came from the provider or the configured fallback. */
+  limitSource?: 'provider' | 'configured'
+  /** Amount still available, when the provider reports it. */
+  remainingAmount?: number
+  /** ISO 4217 currency of the amounts. */
+  currency?: string
 }
 
 /** `usage` endpoint value: the node half owns this shape. */
@@ -1170,6 +1181,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
           </div>
         )
       })}
+      <CursorCard rpc={rpc} t={t} />
       <OllamaCard rpc={rpc} t={t} />
       <ExternalUsageCards rpc={rpc} t={t} />
       {managedProvider && (

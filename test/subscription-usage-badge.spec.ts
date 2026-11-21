@@ -36,6 +36,8 @@ const {
   usageBadgeIcon,
   groupUsageDisplays,
   loadBadgeRoster,
+  footerBar,
+  pillAccountFor,
   usageOf,
 } = await import('../src/client/SubscriptionUsageBadge.js')
 css.deregister()
@@ -656,4 +658,154 @@ test('a named Kimi limit is labelled the same on the settings card and in the di
     }),
   )
   for (const label of cardLabels) assert.ok(html.includes(`>${label}<`), label)
+})
+
+test('a scoped account without a reading gets no account, not the default one', () => {
+  const display = {
+    provider: 'claude' as const,
+    name: 'Claude',
+    accounts: [
+      {
+        key: 'default',
+        isDefault: true,
+        windows: [{ kind: 'session' as const, usedPercent: 10 }],
+      },
+      {
+        key: 'second',
+        isDefault: false,
+        windows: [{ kind: 'session' as const, usedPercent: 20 }],
+      },
+    ],
+  }
+  assert.equal(
+    pillAccountFor(display, '~account:second:claude-sonnet-5')?.key,
+    'second',
+  )
+  assert.equal(
+    pillAccountFor(display, '~account:missing:claude-sonnet-5'),
+    undefined,
+  )
+  assert.equal(pillAccountFor(display, 'claude-sonnet-5')?.key, 'default')
+})
+
+test('the footer bar follows the live selection, its account, and no substitute', () => {
+  const claude = {
+    provider: 'claude' as const,
+    name: 'Claude',
+    accounts: [
+      {
+        key: 'default',
+        isDefault: true,
+        windows: [{ kind: 'session' as const, usedPercent: 10 }],
+      },
+      {
+        key: 'second',
+        isDefault: false,
+        windows: [{ kind: 'session' as const, usedPercent: 20 }],
+      },
+    ],
+  }
+  const selected = footerBar([claude], {
+    provider: 'claude',
+    model: '~account:second:claude-sonnet-5',
+  })
+  assert.equal(selected.account?.key, 'second')
+  assert.equal(selected.window?.usedPercent, 20)
+
+  const missing = footerBar([claude], {
+    provider: 'claude',
+    model: '~account:missing:claude-sonnet-5',
+  })
+  assert.equal(missing.window, undefined)
+  assert.equal(missing.name, 'Claude')
+
+  // An ordinary id reads the default; without one, no account is borrowed.
+  const noDefault = {
+    ...claude,
+    accounts: [
+      claude.accounts[1]!,
+      {
+        key: 'third',
+        isDefault: false,
+        windows: [{ kind: 'session' as const, usedPercent: 30 }],
+      },
+    ],
+  }
+  assert.equal(
+    footerBar([claude], { provider: 'claude', model: 'claude-sonnet-5' }).window
+      ?.usedPercent,
+    10,
+  )
+  assert.equal(
+    footerBar([noDefault], { provider: 'claude', model: 'claude-sonnet-5' })
+      .window,
+    undefined,
+  )
+
+  // A provider without a stated subscription keeps the old pill behavior.
+  assert.deepEqual(
+    footerBar([claude], { provider: 'grok', model: 'grok-4' }),
+    {},
+  )
+  assert.equal(
+    footerBar([], { provider: 'cursor', model: 'claude-sonnet-5-5' }).name,
+    'Cursor',
+  )
+})
+
+test('an ordinary model does not borrow a non-default account that survived grouping', () => {
+  const roster = [
+    {
+      provider: 'claude' as const,
+      account: { key: 'default', isDefault: true },
+    },
+    {
+      provider: 'claude' as const,
+      account: { key: 'second', isDefault: false },
+    },
+  ]
+  const windowsOf = new Map([
+    ['claude:second', [{ kind: 'session' as const, usedPercent: 20 }]],
+  ])
+  const displays = groupUsageDisplays(roster, windowsOf, new Map())
+  assert.equal(displays.length, 1)
+  assert.equal(displays[0]?.accounts.length, 1)
+  const bar = footerBar(displays, {
+    provider: 'claude',
+    model: 'claude-sonnet-5',
+  })
+  assert.equal(bar.window, undefined)
+  assert.equal(bar.name, 'Claude')
+  // The same account is reachable only through its own scoped id.
+  const scoped = footerBar(displays, {
+    provider: 'claude',
+    model: '~account:second:claude-sonnet-5',
+  })
+  assert.equal(scoped.window?.usedPercent, 20)
+
+  // A synthetic key source's account is the default, so it still shows.
+  const cursorRoster = [
+    {
+      provider: 'cursor' as const,
+      account: { key: 'cursor', isDefault: true },
+    },
+  ]
+  const cursorWindows = new Map([
+    [
+      'cursor:cursor',
+      [{ kind: 'other' as const, usedAmount: 100, currency: 'USD' }],
+    ],
+  ])
+  const cursorDisplays = groupUsageDisplays(
+    cursorRoster,
+    cursorWindows,
+    new Map(),
+  )
+  assert.equal(
+    footerBar(cursorDisplays, {
+      provider: 'cursor',
+      model: 'claude-sonnet-5-5',
+    }).window?.usedAmount,
+    100,
+  )
 })

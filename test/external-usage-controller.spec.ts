@@ -14,6 +14,7 @@ test('usage-only status reports configured refs without returning their values',
     minimax: { configured: false },
     'minimax-cn': { configured: false },
     'ollama-cloud': { configured: false },
+    cursor: { configured: false },
   })
   assert.ok(!JSON.stringify(await controller.status()).includes('go-secret'))
   await assert.rejects(() => controller.usage('kimi-code'), /not configured/)
@@ -197,6 +198,7 @@ test('Ollama Cloud honors a custom credential ref override', async () => {
     minimax: { configured: false },
     'minimax-cn': { configured: false },
     'ollama-cloud': { configured: true },
+    cursor: { configured: false },
   })
   assert.ok(seen.includes('CUSTOM_OLLAMA_REF'))
 })
@@ -245,4 +247,207 @@ test('usage snapshots ref and host before the first await', async () => {
     seen.find((call) => call.url === 'http://host-b/api/balance'),
     { url: 'http://host-b/api/balance', auth: 'Bearer fast-key' },
   )
+})
+
+function cursorRouter(): {
+  http: typeof fetch
+  periods: () => number
+  fail: (value: boolean) => void
+} {
+  let periods = 0
+  let failing = false
+  const http = (async (url: string | URL | Request) => {
+    const target = String(url)
+    if (target.includes('exchange_user_api_key')) {
+      return Response.json({ accessToken: 'access-token' })
+    }
+    if (target.includes('GetCurrentPeriodUsage')) {
+      periods += 1
+      if (failing) throw new Error('boom')
+      return Response.json({
+        billingCycleStart: '1',
+        billingCycleEnd: '2',
+        spendLimitUsage: {
+          overallLimit: 10_000,
+          overallUsed: 1_000,
+          overallRemaining: 9_000,
+        },
+      })
+    }
+    return Response.json({ planInfo: { planName: 'Enterprise' } })
+  }) as typeof fetch
+  return {
+    http,
+    periods: () => periods,
+    fail: (value: boolean) => {
+      failing = value
+    },
+  }
+}
+
+test('one Cursor reading serves every caller until forced or invalidated', async () => {
+  const router = cursorRouter()
+  const controller = new ExternalUsageController(
+    async () => ({ value: 'cursor-secret' }),
+    router.http,
+  )
+  const first = await controller.usage('cursor')
+  const second = await controller.usage('cursor')
+  assert.equal(router.periods(), 1)
+  assert.deepEqual(second.windows, first.windows)
+  await controller.usage('cursor', undefined, true)
+  assert.equal(router.periods(), 2)
+  controller.invalidate('cursor')
+  await controller.usage('cursor')
+  assert.equal(router.periods(), 3)
+})
+
+test('a failed refresh marks the shared reading stale for later readers', async () => {
+  const router = cursorRouter()
+  const controller = new ExternalUsageController(
+    async () => ({ value: 'cursor-secret' }),
+    router.http,
+  )
+  const good = await controller.usage('cursor')
+  router.fail(true)
+  const failed = await controller.usage('cursor', undefined, true)
+  assert.deepEqual(failed.windows, good.windows)
+  assert.equal(failed.stale, true)
+  assert.equal(typeof failed.observedAt, 'number')
+  // The next ordinary read inside the window must not look fresh again.
+  const later = await controller.usage('cursor')
+  assert.equal(later.stale, true)
+  assert.equal(later.observedAt, failed.observedAt)
+})
+
+test('a changed credential reads again instead of serving the old account', async () => {
+  const router = cursorRouter()
+  let value = 'cursor-one'
+  const controller = new ExternalUsageController(
+    async () => ({ value }),
+    router.http,
+  )
+  await controller.usage('cursor')
+  value = 'cursor-two'
+  await controller.usage('cursor')
+  assert.equal(router.periods(), 2)
+})
+
+test('an invalidated read is neither joined nor republished', async () => {
+  let releaseFirst!: () => void
+  let periods = 0
+  const http = (async (url: string | URL | Request) => {
+    const target = String(url)
+    if (target.includes('exchange_user_api_key')) {
+      return Response.json({ accessToken: 'access-token' })
+    }
+    if (target.includes('GetCurrentPeriodUsage')) {
+      periods += 1
+      if (periods === 1) {
+        await new Promise<void>((resolve) => {
+          releaseFirst = resolve
+        })
+        return Response.json({
+          billingCycleStart: '1',
+          billingCycleEnd: '2',
+          spendLimitUsage: { overallLimit: 10_000, overallUsed: 1_000 },
+        })
+      }
+      return Response.json({
+        billingCycleStart: '1',
+        billingCycleEnd: '2',
+        spendLimitUsage: { overallLimit: 10_000, overallUsed: 2_000 },
+      })
+    }
+    return Response.json({ planInfo: { planName: 'Enterprise' } })
+  }) as typeof fetch
+  const controller = new ExternalUsageController(
+    async () => ({ value: 'cursor-secret' }),
+    http,
+  )
+  const pending = controller.usage('cursor', undefined, true)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  controller.invalidate('cursor')
+  const fresh = await controller.usage('cursor')
+  assert.equal(periods, 2, 'the new caller must not join the detached read')
+  assert.equal(fresh.windows?.[0]?.usedAmount, 2_000)
+  assert.equal(typeof fresh.observedAt, 'number')
+  releaseFirst()
+  const old = await pending
+  assert.equal(old.windows?.[0]?.usedAmount, 1_000)
+  assert.equal(typeof old.observedAt, 'number')
+})
+
+test('a joined caller stops waiting without cancelling the shared read', async () => {
+  let release!: () => void
+  const http = (async (url: string | URL | Request) => {
+    const target = String(url)
+    if (target.includes('exchange_user_api_key')) {
+      return Response.json({ accessToken: 'access-token' })
+    }
+    if (target.includes('GetCurrentPeriodUsage')) {
+      await new Promise<void>((resolve) => {
+        release = resolve
+      })
+      return Response.json({
+        billingCycleStart: '1',
+        billingCycleEnd: '2',
+        spendLimitUsage: { overallLimit: 10_000, overallUsed: 1_000 },
+      })
+    }
+    return Response.json({ planInfo: { planName: 'Enterprise' } })
+  }) as typeof fetch
+  const controller = new ExternalUsageController(
+    async () => ({ value: 'cursor-secret' }),
+    http,
+  )
+  const first = controller.usage('cursor')
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  const caller = new AbortController()
+  const joined = controller.usage('cursor', caller.signal)
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  caller.abort()
+  await assert.rejects(joined, /cancelled/)
+  release()
+  const resolved = await first
+  assert.equal(resolved.windows?.[0]?.usedAmount, 1_000)
+})
+
+test('a detached failure does not mark its replacement stale', async () => {
+  let rejectFirst!: (error: Error) => void
+  let periods = 0
+  const http = (async (url: string | URL | Request) => {
+    const target = String(url)
+    if (target.includes('exchange_user_api_key')) {
+      return Response.json({ accessToken: 'access-token' })
+    }
+    if (target.includes('GetCurrentPeriodUsage')) {
+      periods += 1
+      if (periods === 1) {
+        return await new Promise((_, reject) => {
+          rejectFirst = reject
+        })
+      }
+      return Response.json({
+        billingCycleStart: '1',
+        billingCycleEnd: '2',
+        spendLimitUsage: { overallLimit: 10_000, overallUsed: 2_000 },
+      })
+    }
+    return Response.json({ planInfo: { planName: 'Enterprise' } })
+  }) as typeof fetch
+  const controller = new ExternalUsageController(
+    async () => ({ value: 'cursor-secret' }),
+    http,
+  )
+  const old = controller.usage('cursor', undefined, true)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  controller.invalidate('cursor')
+  const fresh = await controller.usage('cursor')
+  assert.equal(fresh.windows?.[0]?.usedAmount, 2_000)
+  rejectFirst(new Error('boom'))
+  await assert.rejects(old, /boom/)
+  const later = await controller.usage('cursor')
+  assert.notEqual(later.stale, true)
+  assert.equal(later.observedAt, fresh.observedAt)
 })

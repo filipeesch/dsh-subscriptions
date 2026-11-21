@@ -136,7 +136,8 @@ let CODEX_MODEL,
   EXPECTED_REFUSALS,
   FIXTURE_REQUESTS,
   USAGE_PERCENT,
-  MINIMAX_WINDOWS
+  MINIMAX_WINDOWS,
+  CURSOR_SPEND
 let HOST_CONTRACT, HOST_CONTRACT_MISS, SECTION_EN
 
 try {
@@ -148,6 +149,7 @@ try {
     FIXTURE_REQUESTS,
     USAGE_PERCENT,
     MINIMAX_WINDOWS,
+    CURSOR_SPEND,
   } = await import('./host-e2e-fixture.mjs'))
   // Node strips the types from these dependency-free modules; see their headers.
   ;({ HOST_CONTRACT, HOST_CONTRACT_MISS } = await import(
@@ -621,6 +623,37 @@ async function drive(cdp, page, evidence) {
     `ok: usage pill ${CODEX_PILL} renders in the composer (${placement})`,
   )
 
+  // Product: the bar is inside the pill and prints no numbers. The host
+  // controls where its stats row places the slot relative to the context
+  // gauge, so the order is recorded rather than asserted.
+  const bar = await cdp.evaluate(barProbe())
+  if (!bar.found)
+    throw new ProductFailure(
+      'the collapsed pill disappeared before the bar check',
+    )
+  if (!bar.bar)
+    throw new ProductFailure(
+      'the collapsed pill renders no quota bar for the selected model',
+    )
+  if (bar.layout !== 'row' && bar.layout !== 'dock')
+    throw new ProductFailure(
+      `the quota pill is not in a recognized composer layout (${bar.layout})`,
+    )
+
+  // The collapsed pill states the provider, not a number.
+  if (!/^\s*Codex\s*$/.test(bar.text))
+    throw new ProductFailure(
+      `the collapsed pill still prints a number beside the bar: ${JSON.stringify(bar.text)}`,
+    )
+  console.log(
+    `ok: the collapsed pill shows a provider-only bar in the ${bar.layout} layout` +
+      (bar.followsGauge === null
+        ? ' (no labelled context gauge beside it)'
+        : bar.followsGauge
+          ? ' after the context gauge'
+          : ' before the context gauge, as this host places the slot'),
+  )
+
   // Product: the dialog lists every source with its own percentage.
   const colorPreset = await cdp.evaluate(
     `localStorage.getItem('dsh.subscriptions.usageColorPreset')`,
@@ -1016,7 +1049,8 @@ function dialogSections(cdp) {
   return cdp.evaluate(`[...document.querySelectorAll('[role="dialog"] section')].map(section => ({
     name: [...(section.querySelector('span')?.childNodes ?? [])]
       .filter(node => node.nodeType === Node.TEXT_NODE).map(node => node.textContent).join('').trim(),
-    percents: [...section.querySelectorAll('dd')].map(dd => /^\\s*(\\d+)%/.exec(dd.textContent ?? '')?.[1] ?? dd.textContent),
+    percents: [...section.querySelectorAll('dd')].map(dd => /(\\d+)%/.exec(dd.textContent ?? '')?.[1] ?? dd.textContent),
+    texts: [...section.querySelectorAll('dd')].map(dd => dd.textContent ?? ''),
   }))`)
 }
 
@@ -1107,6 +1141,19 @@ function dialogMismatches(sections) {
         `${name}: shows ${JSON.stringify(matches[0].percents)}, fixture serves ${percent}%`,
       )
     }
+  }
+  // The Cursor row states money, not only its share.
+  const cursorTexts = (
+    sections.find((section) => section.name === 'Cursor')?.texts ?? []
+  ).join(' ')
+  const cursorDigits = cursorTexts.replace(/\D+/g, '')
+  if (
+    !cursorDigits.includes(String(CURSOR_SPEND.usedCents)) ||
+    !cursorDigits.includes(String(CURSOR_SPEND.limitCents))
+  ) {
+    wrong.push(
+      `Cursor: shows ${JSON.stringify(cursorTexts)}, expected the fixture spend and ceiling`,
+    )
   }
   // Copilot is signed in, but the plugin has no Copilot usage endpoint.
   const minimax = sections.filter((section) => section.name === 'MiniMax')
@@ -1471,6 +1518,46 @@ function pillProbe() {
     return {
       placement,
       pillBackground: placed === null ? null : getComputedStyle(placed).backgroundColor,
+    }
+  })()`
+}
+
+/**
+ * The collapsed pill's quota bar. Both host layouts are recognized the same
+ * way pillProbe() recognizes them: a stats-row ancestor on the older hosts, a
+ * dock marker on the newer one. The context gauge is identified by its own
+ * label where the host exposes one; otherwise the order check is skipped
+ * rather than guessed from an unrelated stat.
+ */
+function barProbe() {
+  const { row, dock } = HOST_CONTRACT.markers.composerStats
+  return `(() => {
+    const pill = [...document.querySelectorAll('button.dsh-subscription-usage-pill')]
+      .find(button => (button.getAttribute('aria-label') || '').includes(${JSON.stringify(CODEX_PILL)}))
+    if (pill === undefined) return { found: false }
+    const bar = pill.querySelector('[role="img"]')
+    const rowEl = pill.closest('[${row}]')
+    const dockEl = pill.closest('[data-composer-dock]')
+    const dockPlaced =
+      dockEl !== null && dockEl.querySelector('[${dock}]') !== null
+    const layout = rowEl !== null ? 'row' : dockPlaced ? 'dock' : 'none'
+    // Order against a labelled context gauge in whichever layout holds the
+    // pill; a host that labels no gauge leaves the order unproven.
+    const scope = rowEl ?? dockEl
+    const siblings = scope === null ? [] : [...scope.querySelectorAll('button')].filter(
+      (button) => button !== pill && /context/i.test(
+        (button.getAttribute('aria-label') || '') + ' ' + (button.textContent || ''),
+      ),
+    )
+    const gauge = siblings.length === 0 ? null : siblings[siblings.length - 1]
+    return {
+      found: true,
+      bar: bar !== null,
+      layout,
+      followsGauge: gauge === null
+        ? null
+        : (gauge.compareDocumentPosition(pill) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0,
+      text: pill.textContent || '',
     }
   })()`
 }

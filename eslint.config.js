@@ -14,6 +14,7 @@ const unused = {
 export default tseslint.config(
   {
     ignores: [
+      '.cache/**',
       'lib/**',
       'lib-test/**',
       'vendor/**',

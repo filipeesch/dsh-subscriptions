@@ -36,6 +36,9 @@ import { useDismissOnOutsidePointer } from '@deepseek-ai/dsh-client-ui-primitive
 import { useSubscriptionAnchoredPosition } from './useSubscriptionAnchoredPosition.js'
 import { callSubscriptionsAuth } from './SubscriptionsSection.js'
 import { UsageMeter } from './UsageMeter.js'
+import { UsageBar, hasMoney, windowTooltip } from './UsageBar.js'
+import { formatMoney } from './money-format.js'
+import { readAccountModelId } from '../providers/account-model.js'
 import { quotaPercent, quotaText, useQuotaClock } from './quota-display.js'
 import type { QuotaDisplayMode } from './usage-badge-preferences.js'
 import type {
@@ -124,6 +127,65 @@ export function pillAccountOf(d: ProviderUsageDisplay): AccountUsageDisplay {
   return d.accounts.find((a) => a.isDefault) ?? d.accounts[0]!
 }
 
+/**
+ * The account the selected model belongs to: an account-scoped model id names
+ * one, and an ordinary id follows the default account.
+ */
+export function pillAccountFor(
+  display: ProviderUsageDisplay,
+  model: string | undefined,
+): AccountUsageDisplay | undefined {
+  const account =
+    model === undefined ? undefined : readAccountModelId(model)?.account
+  // A scoped account with no reading must hide the bar, never borrow the
+  // default account's quota.
+  if (account !== undefined) {
+    return display.accounts.find((entry) => entry.key === account)
+  }
+  // An ordinary model id follows the default account only. Grouping drops
+  // accounts without readings, so "one reporting account" is not "one
+  // configured account": a non-default survivor must not speak for the model.
+  return display.accounts.find((entry) => entry.isDefault)
+}
+
+/** The footer bar a live selection owns; empty when it may not show one. */
+export interface FooterBar {
+  display?: ProviderUsageDisplay
+  account?: AccountUsageDisplay
+  window?: UsageWindow
+  /** Provider name to show when there is no eligible reading. */
+  name?: string
+}
+
+/**
+ * Decide the footer bar for a live model selection. Only Claude, Codex, and
+ * Cursor have a stated subscription; the bar follows the selected provider's
+ * exact account (or its default), and an eligible provider with no reading
+ * shows its name without borrowing another account's numbers.
+ * @param displays - providers that reported usage.
+ * @param selection - the model the next request would use.
+ * @returns the parts the pill renders.
+ */
+export function footerBar(
+  displays: readonly ProviderUsageDisplay[],
+  selection: { provider: string; model: string } | undefined,
+): FooterBar {
+  const provider = selection?.provider
+  const model = selection?.model
+  if (provider === undefined || model === undefined) return {}
+  if (!BAR_PROVIDERS.has(provider)) return {}
+  const display = displays.find((entry) => entry.provider === provider)
+  if (display === undefined) {
+    return { name: (PROVIDER_NAMES as Record<string, string>)[provider] }
+  }
+  const account = pillAccountFor(display, model)
+  const window = account?.windows[0]
+  if (account === undefined || window === undefined) {
+    return { display, name: display.name }
+  }
+  return { display, account, window, name: display.name }
+}
+
 /** Brand display names (short form for the compact badge). */
 export type BadgeProvider =
   | SubscriptionProvider
@@ -132,6 +194,14 @@ export type BadgeProvider =
   | 'minimax'
   | 'minimax-cn'
   | 'ollama-cloud'
+  | 'cursor'
+
+/** Providers whose subscription the footer bar states. */
+const BAR_PROVIDERS: ReadonlySet<string> = new Set([
+  'claude',
+  'codex',
+  'cursor',
+])
 
 const PROVIDER_NAMES: Record<BadgeProvider, string> = {
   codex: 'Codex',
@@ -144,6 +214,7 @@ const PROVIDER_NAMES: Record<BadgeProvider, string> = {
   minimax: 'MiniMax',
   'minimax-cn': 'MiniMax CN',
   'ollama-cloud': 'Ollama Cloud',
+  cursor: 'Cursor',
 }
 
 export interface UsageRosterEntry {
@@ -208,7 +279,12 @@ export async function loadBadgeRoster(rpc: ConnectionHandle['rpc']): Promise<{
     }>(rpc, 'status', {}),
     callSubscriptionsAuth<
       Record<
-        'opencode-go' | 'kimi-code' | 'minimax' | 'minimax-cn' | 'ollama-cloud',
+        | 'opencode-go'
+        | 'kimi-code'
+        | 'minimax'
+        | 'minimax-cn'
+        | 'ollama-cloud'
+        | 'cursor',
         { configured: boolean }
       >
     >(rpc, 'externalStatus', {}),
@@ -238,6 +314,7 @@ export async function loadBadgeRoster(rpc: ConnectionHandle['rpc']): Promise<{
       ['minimax', 'minimax'],
       ['minimax-cn', 'minimax-cn'],
       ['ollama-cloud', 'ollama-cloud'],
+      ['cursor', 'cursor'],
     ] as const) {
       refreshed.add(provider)
       if (external.value[source]?.configured)
@@ -259,7 +336,8 @@ export async function usageOf(
     provider === 'kimi-coding' ||
     provider === 'minimax' ||
     provider === 'minimax-cn' ||
-    provider === 'ollama-cloud'
+    provider === 'ollama-cloud' ||
+    provider === 'cursor'
   ) {
     return callSubscriptionsAuth(rpc, 'externalUsage', {
       source: provider === 'kimi-coding' ? 'kimi-code' : provider,
@@ -834,6 +912,23 @@ export function SubscriptionUsageBadge({
       : badgeSelection?.model
   const expanded = expandedDisplays(displays, dialogProvider)
   const title = translate('usageBadgeTitle')
+  // The bar follows the live selection in both visible modes, never the
+  // retained or rotating pill: it describes the model the next request would
+  // use. footerBar() owns which providers and accounts may show one.
+  const bar = footerBar(displays, selection)
+  const barDisplay = bar.display
+  const barAccount = bar.account
+  const barWindow = bar.window
+  const barName = bar.name
+  const barText =
+    barDisplay === undefined || barWindow === undefined
+      ? undefined
+      : `${barDisplay.name} · ${windowTooltip(
+          barWindow,
+          translate,
+          quotaMode,
+          barAccount?.stale === true,
+        )}`
 
   const toggle = (): void => {
     const next = !open
@@ -851,8 +946,8 @@ export function SubscriptionUsageBadge({
         style={{ ...styles.pill, ...(hover || open ? styles.pillActive : {}) }}
         aria-haspopup="dialog"
         aria-expanded={open}
-        aria-label={`${title} · ${label}`}
-        title={title}
+        aria-label={`${title} · ${barText ?? barName ?? label}`}
+        title={barText ?? barName ?? title}
         onMouseEnter={() => {
           setHover(true)
         }}
@@ -862,7 +957,33 @@ export function SubscriptionUsageBadge({
         onClick={toggle}
       >
         <UsageBadgeIcon />
-        <span style={styles.label}>{label}</span>
+        <span
+          style={{
+            ...styles.label,
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 6,
+          }}
+        >
+          {barDisplay !== undefined &&
+          barWindow !== undefined &&
+          barAccount !== undefined ? (
+            <>
+              {barDisplay.name}
+              <UsageBar
+                window={barWindow}
+                t={translate}
+                observedAt={barAccount.observedAt}
+                stale={barAccount.stale === true}
+                stateKey={`${barDisplay.provider}:${barAccount.key}`}
+              />
+            </>
+          ) : barName !== undefined ? (
+            barName
+          ) : (
+            label
+          )}
+        </span>
       </button>
       {open &&
         createPortal(
@@ -982,7 +1103,9 @@ export function CodexExhaustionNotice({
         account.windows.length === 0 ||
         !account.windows.some(
           (window) =>
-            Number.isFinite(window.usedPercent) && window.usedPercent >= 100,
+            typeof window.usedPercent === 'number' &&
+            Number.isFinite(window.usedPercent) &&
+            window.usedPercent >= 100,
         ),
     )
   )
@@ -1089,11 +1212,21 @@ function WindowRow({
   stale?: boolean | undefined
 }) {
   const quotaMode = useQuotaDisplayMode()
+  const money = hasMoney(w)
+    ? `${formatMoney(w.usedAmount, w.currency)}${
+        w.limitAmount === undefined
+          ? ''
+          : ` / ${formatMoney(w.limitAmount, w.currency)}`
+      }`
+    : undefined
   return (
     <>
       <dt style={styles.dt}>{label}</dt>
       <dd style={styles.dd}>
-        {quotaText(w.usedPercent, quotaMode, t)}
+        {money ?? quotaText(w.usedPercent, quotaMode, t)}
+        {money !== undefined && w.usedPercent !== undefined && (
+          <span> · {quotaText(w.usedPercent, quotaMode, t)}</span>
+        )}
         {w.resetsAt !== undefined && Number.isFinite(w.resetsAt) && (
           <span style={styles.reset}>
             {' · '}

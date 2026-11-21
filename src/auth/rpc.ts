@@ -14,6 +14,7 @@ import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { PROVIDER_IDS, type ProviderId } from './store.js'
 import type { ProviderUsage } from '../providers/common.js'
+import { MAX_CURSOR_CEILING_USD } from '../providers/cursor-settings.js'
 import type { CliVersion } from '../providers/npm-cli-version.js'
 import { EXTERNAL_USAGE_SOURCES } from '../providers/external-usage-controller.js'
 import type {
@@ -48,6 +49,8 @@ export const SUBSCRIPTIONS_AUTH_ENDPOINTS = [
   'ollamaSettings',
   'ollamaSetSettings',
   'ollamaModels',
+  'cursorSettings',
+  'cursorSetCeiling',
   'image',
   'video',
   'prepareReset',
@@ -259,7 +262,10 @@ export interface ExternalUsageRpcController {
   usage(
     source: ExternalUsageSource,
     signal: AbortSignal,
+    force?: boolean,
   ): Promise<ProviderUsage>
+  /** Drop the cached reading of one source, or all of them. */
+  invalidate(source?: ExternalUsageSource): void
 }
 
 /** One model in the Ollama Cloud picker catalog, with its capability flags. */
@@ -322,6 +328,27 @@ export interface OllamaRpcController {
     input: { apiKey?: string; baseURL?: string },
     signal: AbortSignal,
   ): Promise<{ models: OllamaCloudCandidate[] }>
+}
+
+/** Cursor route settings the card reads and writes. */
+export interface CursorRpcController {
+  /** Stored settings plus the live state; refresh may read the catalog. */
+  settings(refresh?: boolean): Promise<CursorSettingsView>
+  /** Save the monthly ceiling; `undefined` clears it. */
+  setCeiling(ceilingUSD: number | undefined): Promise<void>
+}
+
+/** One Cursor card snapshot. */
+export interface CursorSettingsView {
+  provider: 'cursor'
+  /** Credential reference that holds the API key. */
+  keyRef: string
+  /** Context tier preference; `max` means the largest offered. */
+  context: string
+  /** Monthly ceiling in US dollars, when one is stored. */
+  ceilingUSD?: number
+  /** Models the route currently advertises; absent when the catalog failed. */
+  models?: number
 }
 
 /**
@@ -638,6 +665,7 @@ async function dispatch(
   providerSettings?: ProviderSettingsController,
   externalUsage?: ExternalUsageRpcController,
   ollama?: OllamaRpcController,
+  cursor?: CursorRpcController,
 ): Promise<RpcResult<unknown>> {
   switch (endpoint) {
     case 'providerSettings':
@@ -739,7 +767,11 @@ async function dispatch(
         )
       }
       return ok(
-        await externalUsage.usage(source as ExternalUsageSource, signal),
+        await externalUsage.usage(
+          source as ExternalUsageSource,
+          signal,
+          (payload as Record<string, unknown>).force === true,
+        ),
       )
     }
     case 'ollamaSettings':
@@ -776,6 +808,37 @@ async function dispatch(
           signal,
         ),
       )
+    }
+    case 'cursorSettings':
+      if (!cursor) throw new BadRequest('Cursor settings are unavailable')
+      return ok(await cursor.settings())
+    case 'cursorSetCeiling': {
+      if (!cursor) throw new BadRequest('Cursor settings are unavailable')
+      const body = payload as Record<string, unknown> | null
+      if (
+        body === null ||
+        typeof body !== 'object' ||
+        !('ceilingUSD' in body)
+      ) {
+        throw new BadRequest(
+          'cursorSetCeiling needs an explicit ceilingUSD, null to clear',
+        )
+      }
+      const raw = body.ceilingUSD
+      if (raw !== null) {
+        if (
+          typeof raw !== 'number' ||
+          !Number.isFinite(raw) ||
+          raw <= 0 ||
+          raw > MAX_CURSOR_CEILING_USD
+        ) {
+          throw new BadRequest(
+            `ceilingUSD must be a positive number up to ${MAX_CURSOR_CEILING_USD}, or null`,
+          )
+        }
+      }
+      await cursor.setCeiling(raw === null ? undefined : raw)
+      return ok({ ok: true })
     }
     case 'prepareReset':
       if (!controller.prepareReset)
@@ -850,6 +913,7 @@ export function registerAuthRpc(
   providerSettings: ProviderSettingsController | undefined = undefined,
   externalUsage: ExternalUsageRpcController | undefined = undefined,
   ollama: OllamaRpcController | undefined = undefined,
+  cursor: CursorRpcController | undefined = undefined,
 ): void {
   // `connection` is not in this plugin's inject list (headless compositions
   // lack it), so its startup order is unconstrained: defer registration until
@@ -877,6 +941,7 @@ export function registerAuthRpc(
           providerSettings,
           externalUsage,
           ollama,
+          cursor,
         )
       } catch (error) {
         return failure(error)

@@ -11,6 +11,7 @@ import {
   resetCountdownParts,
   usageBarColor,
   usageColorState,
+  usageStateColor,
   validUsage,
 } from './usage-pace.js'
 import type { CountdownPart, UsageObservation } from './usage-pace.js'
@@ -49,9 +50,10 @@ export function UsageMeter({
   }, [])
   // Use render time for new readings, without trusting a future observation timestamp.
   const current = Math.max(now, Date.now())
-  const valid = validUsage(quota.usedPercent)
-  const displayed = quotaPercent(quota.usedPercent, quotaMode)
-  const used = valid ? quota.usedPercent : 0
+  const reported = quota.usedPercent
+  const valid = validUsage(reported)
+  const displayed = quotaPercent(reported, quotaMode)
+  const used = valid ? (reported as number) : 0
   const fresh = isUsageFresh(quota, { observedAt, stale }, current)
   // The cursor is where the window stands in time: a provider-verified start
   // through elapsedPercent, else the display-only assumption.
@@ -61,12 +63,19 @@ export function UsageMeter({
   // is current AND the start is verified: a display-estimated start must not
   // color the bar — elapsed already excludes it, so pace below is safe.
   const pace = fresh ? elapsed : undefined
-  const state = usageColorState(quota.usedPercent, pace, preset, fresh)
+  // An invalid reading is unavailable, not a healthy zero.
+  const state = valid ? usageColorState(used, pace, preset, fresh) : 'neutral'
   const lead = pace === undefined ? 0 : Math.round(used - pace)
+  // A money window without a ceiling is readable: only its share is unknown.
+  const moneyOnly = !valid && quota.usedAmount !== undefined
   const label = [
-    valid ? quotaText(quota.usedPercent, quotaMode, t) : t('usageMeterInvalid'),
+    valid
+      ? quotaText(quota.usedPercent, quotaMode, t)
+      : moneyOnly
+        ? t('usageMeterShareUnavailable')
+        : t('usageMeterInvalid'),
     // An invalid reading already states unavailability; the stale line would repeat it.
-    !valid
+    !valid && !moneyOnly
       ? ''
       : !fresh
         ? t('usageMeterStale')
@@ -124,7 +133,9 @@ export function UsageMeter({
           height: '100%',
           borderRadius: 'inherit',
           width: `${displayed ?? 0}%`,
-          background: usageBarColor(quota.usedPercent, pace, preset, fresh),
+          background: valid
+            ? usageBarColor(used, pace, preset, fresh)
+            : usageStateColor('neutral'),
         }}
       />
       {marker !== undefined && (

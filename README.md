@@ -13,6 +13,10 @@ reported quota in **Settings → Subscriptions**.
 - **Five subscription model sources:** Connect ChatGPT/Codex, Claude, Grok,
   GitHub Copilot, or Google Antigravity and choose their models in DSH's picker.
   These routes use account sign-in, without provider API keys.
+- **Cursor key route:** Add the `cursor` route with a `CURSOR_API_KEY`
+  credential. Cursor's models join the picker, one agent runs per conversation,
+  and the card reports the subscription's money or percentage quota. The route
+  ships no stored catalog and no OAuth login. See [Cursor](docs/cursor.md).
 - **Ollama Cloud key route:** Add the `ollama-cloud` route with an
   `OLLAMA_API_KEY` credential. The route ships no model catalog: configure it on
   the Settings → Subscriptions card, which fetches the cloud list, ticks the
@@ -37,9 +41,10 @@ reported quota in **Settings → Subscriptions**.
 - **Quota while you work:** See reported usage windows and reset times on
   provider cards and in an optional session-footer pill. The same view reads
   OpenCode Go and Kimi Code usage through keys already configured in **Settings
-  → Models** (their model routes remain built into DSH), and Ollama Cloud usage
-  through its `OLLAMA_API_KEY` credential (its route ships in this plugin).
-  GitHub Copilot has no usage endpoint.
+  → Models** (their model routes remain built into DSH), Ollama Cloud usage
+  through its `OLLAMA_API_KEY` credential, and Cursor usage through its
+  `CURSOR_API_KEY` credential (money against the seat's ceiling on an enterprise
+  plan, percentages on a personal one). GitHub Copilot has no usage endpoint.
 - **Provider tools:** Use Codex web search, Grok X search, ChatGPT or Grok image
   generation and editing, and Grok video generation when the matching provider
   is enabled.
@@ -104,13 +109,15 @@ being silently discarded or charged as an account failure. See
 
 ### Quota while you work
 
-The composer's stats row gains a **provider usage** pill showing the used
-percentage and reset window for the provider of the session's current model. It
-shows at most one provider; switching to a non-subscription model keeps the most
-recent subscription selected in the mounted conversation view, or stays hidden
-if there is none. **Always show** instead rotates through the providers that
-report usage every 10 seconds while the current model has no quota source, so
-the pill never disappears.
+The composer's stats row gains a **provider usage** bar after the context window
+for Claude, Codex, and Cursor: only the colored bar is always visible, hovering
+states the used and remaining share (or the amount, ceiling, and remainder when
+the provider reports money), and clicking opens the dialog. It shows at most one
+provider; switching to a non-subscription model keeps the most recent
+subscription selected in the mounted conversation view, or stays hidden if there
+is none. **Always show** instead rotates through the providers that report usage
+every 10 seconds while the current model has no quota source, so the pill never
+disappears.
 
 ![Provider usage pill in the stats row](docs/images/usage-pill.png)
 

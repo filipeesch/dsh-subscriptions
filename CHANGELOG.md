@@ -1,3 +1,26 @@
+## v0.4.0 — 2026-11-21
+
+- **Cursor route.** The `cursor` route adds Cursor's models to the picker over
+  the official `@cursor/sdk` and the account's API key, with one agent per
+  conversation, DSH-owned tools, the largest offered context tier by default,
+  and a built-in fallback catalog. `@cursor/sdk` is the package's first runtime
+  dependency, pinned and loaded on demand.
+- **Cursor quota.** The Cursor card reports the plan's current period usage:
+  money spent against the seat's ceiling with the remaining amount on an
+  enterprise plan, percentages on a personal one. An optional monthly ceiling
+  covers accounts whose response carries spend without a limit, and spend with
+  neither ceiling is stated without inventing a share. Cursor's dashboard RPCs
+  are not documented; a shape change shows a usage error and leaves chat
+  working.
+- **Footer quota bar.** The composer's stats row shows a bar for Claude, Codex,
+  and Cursor instead of the pill's numbers: the bar is always visible, hover
+  states the values, and a click opens the existing dialog. It follows the
+  selected model's account, and usage windows can now carry amounts and a
+  currency.
+- **Bootstrap split.** Provider construction moved to one builder per route, the
+  RPC assembly to `src/rpc/registration.ts`, provider ids to a single source,
+  and both key-based routes share one credential/registration helper.
+
 # Changelog
 
 ## v0.3.9 — 2026-11-19
