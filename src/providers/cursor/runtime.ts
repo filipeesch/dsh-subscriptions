@@ -394,6 +394,8 @@ export class CursorRuntime {
   private readonly workingContext = new Map<string, string>()
   /** Newest turn per session key; an older create must not publish. */
   private readonly keyGeneration = new Map<string, number>()
+  /** Cancels the work of a turn a newer one superseded. */
+  private readonly keyAbort = new Map<string, AbortController>()
   private warming: Promise<void> | undefined
   private prewarmAgent: CursorAgent | undefined
   private prewarmRun: CursorRun | undefined
@@ -439,12 +441,6 @@ export class CursorRuntime {
   /** Run one DSH model call on a persistent Cursor session. */
   async runTurn(options: CursorTurnOptions): Promise<void> {
     const { reply, transcript } = options
-    // One signal per turn: the host's cancellation plus the runtime lifetime,
-    // so unloading interrupts credentials, creates, and sends alike.
-    const signal =
-      options.signal === undefined
-        ? this.lifetime.signal
-        : AbortSignal.any([options.signal, this.lifetime.signal])
     const sessionKey = sessionKeyFor(
       options.sessionId,
       transcript,
@@ -458,7 +454,23 @@ export class CursorRuntime {
       reply.finish('aborted')
       return
     }
-    if (generation > prior) this.keyGeneration.set(sessionKey, generation)
+    // A newer turn cancels the work the older one already dispatched; the
+    // older turn's signal then aborts its own races and late handles.
+    let turnController = this.keyAbort.get(sessionKey)
+    if (generation > prior) {
+      turnController?.abort()
+      turnController = new AbortController()
+      this.keyAbort.set(sessionKey, turnController)
+      this.keyGeneration.set(sessionKey, generation)
+    }
+    turnController ??= new AbortController()
+    // One signal per turn: the host's cancellation, the runtime lifetime, and
+    // supersession by a newer turn of the same conversation.
+    const signal = AbortSignal.any([
+      turnController.signal,
+      this.lifetime.signal,
+      ...(options.signal === undefined ? [] : [options.signal]),
+    ])
     const owns = () => (this.keyGeneration.get(sessionKey) ?? 0) === generation
     const abortedNow = () => signal.aborted
     let resolveAbort!: () => void
@@ -877,7 +889,10 @@ export class CursorRuntime {
         aborted ? undefined : safeError(error, 'run the model'),
       )
     } finally {
-      signal?.removeEventListener?.('abort', onAbort)
+      signal.removeEventListener('abort', onAbort)
+      if (this.keyAbort.get(sessionKey) === turnController) {
+        this.keyAbort.delete(sessionKey)
+      }
       if (session) {
         session.busy = false
         if (!session.closed) session.touch()

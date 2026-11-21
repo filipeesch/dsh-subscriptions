@@ -84,8 +84,12 @@ export class CursorAdapter extends LlmAdapter {
     })
   }
 
+  /** Aborts adapter setup too, not only the runtime's turns. */
+  private readonly lifetime = new AbortController()
+
   /** Close every live agent; the plugin calls this from its disposer. */
   dispose(): void {
+    this.lifetime.abort()
     this.runtime.dispose()
   }
 
@@ -153,22 +157,24 @@ export class CursorAdapter extends LlmAdapter {
         'UNSUPPORTED_OPTION',
       )
     }
-    // A request the host already cancelled must not touch the catalog, the
-    // attachment store, or the SDK.
-    if (options.signal?.aborted) {
+    // Installed before setup so a cancel, a disposed adapter, or an iterator
+    // teardown stops the wait instead of letting discovery finish and start
+    // work for a request nobody wants.
+    const controller = new AbortController()
+    const signal = AbortSignal.any([
+      controller.signal,
+      this.lifetime.signal,
+      ...(options.signal === undefined ? [] : [options.signal]),
+    ])
+    // A request the host already cancelled, or one arriving after disposal,
+    // must not touch the catalog, the attachment store, or the SDK.
+    if (signal.aborted) {
       const cancelled = new ChunkQueue()
       const reply = new Reply(cancelled)
       reply.finish('aborted')
       yield* cancelled
       return
     }
-    // Installed before setup so a cancel stops the wait instead of letting
-    // discovery finish and start a warmup for a request nobody wants.
-    const controller = new AbortController()
-    const signal =
-      options.signal === undefined
-        ? controller.signal
-        : AbortSignal.any([options.signal, controller.signal])
     const cancelled = new Promise<'aborted'>((resolve) => {
       if (signal.aborted) resolve('aborted')
       else {

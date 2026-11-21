@@ -1602,3 +1602,198 @@ test('an older turn whose credentials resolve late cannot take over', async () =
   )
   assert.equal(bSends, 2)
 })
+
+test('an unload during catalog setup finishes aborted and dispatches nothing', async () => {
+  let releaseKey!: (value: string) => void
+  let modelsCalls = 0
+  const { gateway } = gatewayWith(() => ({
+    async send() {
+      throw new Error('must not send')
+    },
+    close() {},
+  }))
+  gateway.listModels = async () => {
+    modelsCalls += 1
+    return CATALOG
+  }
+  const adapter = new CursorAdapter({
+    gateway,
+    apiKey: async () =>
+      await new Promise<string>((resolve) => {
+        releaseKey = resolve
+      }),
+    cwd: () => '/tmp',
+    keyRef: 'CURSOR_API_KEY',
+    prewarm: false,
+  })
+  const chunks: Chunk[] = []
+  const stream = (async () => {
+    for await (const chunk of adapter.stream(
+      request([{ role: 'user', content: [{ type: 'text', text: 'hi' }] }]),
+    )) {
+      chunks.push(chunk as unknown as Chunk)
+    }
+  })()
+  await delay(20)
+  adapter.dispose()
+  await stream
+  assert.equal(
+    (chunks.find((c) => c.type === 'finish')?.reason as { kind?: string })
+      ?.kind,
+    'aborted',
+  )
+  releaseKey('key-one')
+  await delay(20)
+  assert.equal(modelsCalls, 0, 'no catalog request after disposal')
+})
+
+test('a newer turn interrupts an older dispatched send', async () => {
+  let releaseSend!: (run: CursorRun) => void
+  let cancelled = 0
+  let streamed = 0
+  let sends = 0
+  const agent: CursorAgent = {
+    async send() {
+      sends += 1
+      if (sends === 1) {
+        return await new Promise<CursorRun>((resolve) => {
+          releaseSend = resolve
+        })
+      }
+      return {
+        async *stream() {
+          streamed += 1
+          yield {
+            type: 'assistant',
+            message: { content: [{ type: 'text', text: 'B' }] },
+          }
+        },
+        async wait() {
+          return { status: 'finished' }
+        },
+        async cancel() {},
+      }
+    },
+    close() {},
+  }
+  const { gateway } = gatewayWith(() => agent)
+  const adapter = adapterOf(gateway)
+  const first = collect(
+    adapter,
+    request([{ role: 'user', content: [{ type: 'text', text: 'A' }] }], {
+      sessionId: 'supersede-send' as never,
+    }),
+  )
+  await delay(20)
+  const second = collect(
+    adapter,
+    request([{ role: 'user', content: [{ type: 'text', text: 'B' }] }], {
+      sessionId: 'supersede-send' as never,
+    }),
+  )
+  const firstChunks = await first
+  await second
+  assert.equal(
+    (firstChunks.find((c) => c.type === 'finish')?.reason as { kind?: string })
+      ?.kind,
+    'aborted',
+    'the older turn finishes before its send resolves',
+  )
+  releaseSend({
+    async *stream() {
+      streamed += 1
+      yield {
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'late' }] },
+      }
+    },
+    async wait() {
+      return { status: 'finished' }
+    },
+    async cancel() {
+      cancelled += 1
+    },
+  })
+  await delay(20)
+  assert.equal(cancelled, 1, 'the late run is cancelled')
+  assert.equal(streamed, 1, 'only the newer run was consumed')
+})
+
+test('a newer turn interrupts an older blocked create', async () => {
+  let releaseCreate!: (agent: CursorAgent) => void
+  let closed = 0
+  let created = 0
+  const { gateway } = gatewayWith(() => ({
+    async send() {
+      return {
+        async *stream() {
+          yield {
+            type: 'assistant',
+            message: { content: [{ type: 'text', text: 'B' }] },
+          }
+        },
+        async wait() {
+          return { status: 'finished' }
+        },
+        async cancel() {},
+      }
+    },
+    close() {},
+  }))
+  gateway.createAgent = async () => {
+    created += 1
+    if (created === 1) {
+      return await new Promise<CursorAgent>((resolve) => {
+        releaseCreate = resolve
+      })
+    }
+    return {
+      async send() {
+        return {
+          async *stream() {
+            yield {
+              type: 'assistant',
+              message: { content: [{ type: 'text', text: 'B' }] },
+            }
+          },
+          async wait() {
+            return { status: 'finished' }
+          },
+          async cancel() {},
+        }
+      },
+      close() {},
+    }
+  }
+  const adapter = adapterOf(gateway)
+  const first = collect(
+    adapter,
+    request([{ role: 'user', content: [{ type: 'text', text: 'A' }] }], {
+      sessionId: 'supersede-create' as never,
+    }),
+  )
+  await delay(20)
+  const second = collect(
+    adapter,
+    request([{ role: 'user', content: [{ type: 'text', text: 'B' }] }], {
+      sessionId: 'supersede-create' as never,
+    }),
+  )
+  const firstChunks = await first
+  await second
+  assert.equal(
+    (firstChunks.find((c) => c.type === 'finish')?.reason as { kind?: string })
+      ?.kind,
+    'aborted',
+  )
+  releaseCreate({
+    async send() {
+      throw new Error('must not send')
+    },
+    close() {
+      closed += 1
+    },
+  })
+  await delay(20)
+  assert.equal(closed, 1)
+})
