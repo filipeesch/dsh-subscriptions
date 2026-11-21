@@ -8,9 +8,10 @@
 - **Cursor quota.** The Cursor card reports the plan's current period usage:
   money spent against the seat's ceiling with the remaining amount on an
   enterprise plan, percentages on a personal one. An optional monthly ceiling
-  covers accounts whose response carries spend without a limit. Cursor's
-  dashboard RPCs are not documented; a shape change shows a usage error and
-  leaves chat working.
+  covers accounts whose response carries spend without a limit, and spend with
+  neither ceiling is stated without inventing a share. Cursor's dashboard RPCs
+  are not documented; a shape change shows a usage error and leaves chat
+  working.
 - **Footer quota bar.** The composer's stats row shows a bar for Claude, Codex,
   and Cursor instead of the pill's numbers: the bar is always visible, hover
   states the values, and a click opens the existing dialog. It follows the

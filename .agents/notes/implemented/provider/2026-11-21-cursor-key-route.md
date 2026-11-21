@@ -43,7 +43,8 @@ reports `planUsage` percentages. `GetPlanInfo` supplies the plan name.
 `UsageWindow` gained optional money fields, and the percent is derived from
 amounts so every existing color and pace path keeps working. When the response
 carries spend but no limit, the card's optional monthly ceiling supplies one;
-without either, the reader reports no window rather than inventing a share.
+without either, the reader reports the spend and leaves the share unknown rather
+than inventing a percentage.
 
 The footer bar is the only surface added to the composer: the always-visible bar
 replaces the pill's numbers, the native tooltip carries the amounts or
