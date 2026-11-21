@@ -62,6 +62,8 @@ export interface CursorAdapterOptions {
   onWarn?: (message: string) => void
   /** Prewarm the SDK's per-process setup after a live catalog read. */
   prewarm?: boolean
+  /** How long a reserved stream may wait before admission (tests shorten it). */
+  reservationTtlMs?: number
 }
 
 export class CursorAdapter extends LlmAdapter {
@@ -81,6 +83,9 @@ export class CursorAdapter extends LlmAdapter {
       contextPreference: () =>
         options.contextPreference?.() ?? DEFAULT_CURSOR_CONTEXT,
       keyRef: options.keyRef ?? DEFAULT_CURSOR_API_KEY_REF,
+      ...(options.reservationTtlMs === undefined
+        ? {}
+        : { reservationTtlMs: options.reservationTtlMs }),
       ...(options.onWarn === undefined ? {} : { onWarn: options.onWarn }),
     })
   }
@@ -144,25 +149,46 @@ export class CursorAdapter extends LlmAdapter {
     // Reserve the turn's order at call time, before the generator is first
     // iterated: a later call owns the conversation even if an earlier one
     // starts its setup first.
-    const turnSeq = this.runtime.reserveTurn(
-      options.purpose === undefined && typeof options.sessionId === 'string'
-        ? options.sessionId
-        : undefined,
-    )
+    const reservation = this.lifetime.signal.aborted
+      ? undefined
+      : this.runtime.reserveTurn(
+          options.purpose === undefined && typeof options.sessionId === 'string'
+            ? options.sessionId
+            : undefined,
+        )
     const controller = new AbortController()
-    const iterator = this.streamTurn(options, turnSeq, controller)
+    const iterator = this.streamTurn(
+      options,
+      reservation?.seq ?? this.runtime.beginTurn(),
+      controller,
+      reservation,
+    )
     // A generator's return() queues behind a pending next(), so abort before
     // delegating: closing the stream must stop setup synchronously.
     return {
       [Symbol.asyncIterator]: () => ({
-        next: () => iterator.next(),
+        async next(): Promise<IteratorResult<StreamChunk>> {
+          try {
+            const result = await iterator.next()
+            // A stream that ends before reaching a turn (or without finishing
+            // one) releases its reservation here; the runtime's release is
+            // idempotent.
+            if (result.done) reservation?.release()
+            return result
+          } catch (error) {
+            reservation?.release()
+            throw error
+          }
+        },
         async return(): Promise<IteratorResult<StreamChunk>> {
           controller.abort()
+          reservation?.release()
           void iterator.return?.(undefined).catch(() => {})
           return { done: true, value: undefined }
         },
         async throw(error?: unknown): Promise<IteratorResult<StreamChunk>> {
           controller.abort()
+          reservation?.release()
           void iterator.throw?.(error).catch(() => {})
           throw error
         },
@@ -174,6 +200,7 @@ export class CursorAdapter extends LlmAdapter {
     options: GenerateOptions,
     turnSeq: number,
     controller: AbortController,
+    reservation: import('./runtime.js').TurnReservation | undefined,
   ): AsyncGenerator<StreamChunk> {
     if (options?.stop?.length) {
       throw new LlmError(
@@ -242,6 +269,7 @@ export class CursorAdapter extends LlmAdapter {
         : { sessionId: String(options.sessionId) }),
       ...(options.purpose === undefined ? {} : { purpose: options.purpose }),
       turnSeq,
+      ...(reservation === undefined ? {} : { reservation }),
       reply,
     })
     // The turn resolves the key itself so a missing credential finishes the
@@ -304,6 +332,8 @@ export class CursorAdapter extends LlmAdapter {
   }
 
   private async models(): Promise<CursorCatalogModel[]> {
+    // A disposed adapter must not wait on discovery or read a credential.
+    if (this.lifetime.signal.aborted) return this.catalog?.models ?? []
     const cached = this.catalog
     if (
       cached &&
@@ -312,8 +342,17 @@ export class CursorAdapter extends LlmAdapter {
       return cached.models
     }
     // Discovery belongs to the adapter, not to whichever caller happened to
-    // start it: one caller's cancellation must not fail another's wait.
-    return this.loading ?? this.startLoad()
+    // start it: one caller's cancellation must not fail another's wait. A
+    // standalone read still stops waiting when the adapter is disposed.
+    const load = this.loading ?? this.startLoad()
+    const disposed = new Promise<CursorCatalogModel[]>((resolve) => {
+      this.lifetime.signal.addEventListener(
+        'abort',
+        () => resolve(this.catalog?.models ?? []),
+        { once: true },
+      )
+    })
+    return Promise.race([load, disposed])
   }
 
   private startLoad(): Promise<CursorCatalogModel[]> {
@@ -330,6 +369,7 @@ export class CursorAdapter extends LlmAdapter {
     let models: CursorCatalogModel[] = []
     let apiKey: string | undefined
     try {
+      if (this.lifetime.signal.aborted) return this.catalog?.models ?? []
       apiKey = await this.options.apiKey()
       if (this.lifetime.signal.aborted) {
         return this.catalog?.models ?? []

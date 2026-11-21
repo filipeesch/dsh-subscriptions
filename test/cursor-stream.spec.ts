@@ -1981,3 +1981,141 @@ test('early exits release their cancellation state', async () => {
   adapter.dispose()
   assert.equal(runtime.turnState().generations, 0)
 })
+
+test('a standalone catalog read stops waiting when the adapter is disposed', async () => {
+  let releaseModels!: (models: unknown) => void
+  let keyCalls = 0
+  const { gateway } = gatewayWith(() => ({
+    async send() {
+      throw new Error('must not send')
+    },
+    close() {},
+  }))
+  gateway.listModels = () =>
+    new Promise((resolve) => {
+      releaseModels = resolve as never
+    })
+  const adapter = new CursorAdapter({
+    gateway,
+    apiKey: async () => {
+      keyCalls += 1
+      return 'crsr_test'
+    },
+    cwd: () => '/tmp',
+    keyRef: 'CURSOR_API_KEY',
+    prewarm: false,
+  })
+  const picker = adapter.listModels('cursor')
+  await delay(20)
+  adapter.dispose()
+  const settled = await Promise.race([
+    picker,
+    delay(300).then(() => 'timeout' as const),
+  ])
+  assert.notEqual(settled, 'timeout', 'disposal must settle the picker wait')
+  releaseModels(CATALOG)
+  await delay(20)
+  const callsAfterDispose = keyCalls
+  const after = await adapter.listModels('cursor')
+  assert.deepEqual(after, [])
+  assert.equal(keyCalls, callsAfterDispose, 'no credential read after disposal')
+})
+
+test('reservations are released for streams that never reach the runtime', async () => {
+  const { gateway } = gatewayWith(() => ({
+    async send() {
+      throw new Error('must not send')
+    },
+    close() {},
+  }))
+  const adapter = adapterOf(gateway)
+  const runtime = (
+    adapter as unknown as {
+      runtime: { turnState(): { reservations: number } }
+    }
+  ).runtime
+  // Created and never iterated: closing it releases the reservation.
+  const unopened = adapter.stream(
+    request([{ role: 'user', content: [{ type: 'text', text: 'hi' }] }], {
+      sessionId: 'unopened' as never,
+    }),
+  )
+  assert.equal(runtime.turnState().reservations, 1)
+  await unopened[Symbol.asyncIterator]().return?.()
+  assert.equal(runtime.turnState().reservations, 0)
+
+  // A pre-aborted request releases it through the aborted finish.
+  const controller = new AbortController()
+  controller.abort()
+  const aborted = adapter.stream(
+    request([{ role: 'user', content: [{ type: 'text', text: 'hi' }] }], {
+      sessionId: 'aborted-stream' as never,
+      signal: controller.signal,
+    }),
+  )
+  for await (const _chunk of aborted) {
+    // drain
+  }
+  assert.equal(runtime.turnState().reservations, 0)
+
+  // An unsupported option throws out of the iterator and releases it too.
+  const stopped = adapter.stream(
+    request([{ role: 'user', content: [{ type: 'text', text: 'hi' }] }], {
+      sessionId: 'stopped-stream' as never,
+      stop: ['END'],
+    }),
+  )
+  await assert.rejects(async () => {
+    for await (const _chunk of stopped) {
+      // drain
+    }
+  })
+  assert.equal(runtime.turnState().reservations, 0)
+})
+
+test('an abandoned reservation expires and cannot take ownership', async () => {
+  const { gateway } = gatewayWith(() => ({
+    async send() {
+      return {
+        async *stream() {
+          yield {
+            type: 'assistant',
+            message: { content: [{ type: 'text', text: 'ok' }] },
+          }
+        },
+        async wait() {
+          return { status: 'finished' }
+        },
+        async cancel() {},
+      }
+    },
+    close() {},
+  }))
+  const adapter = new CursorAdapter({
+    gateway,
+    apiKey: async () => 'crsr_test',
+    cwd: () => '/tmp',
+    keyRef: 'CURSOR_API_KEY',
+    prewarm: false,
+    reservationTtlMs: 10,
+  })
+  const runtime = (
+    adapter as unknown as {
+      runtime: { turnState(): { reservations: number } }
+    }
+  ).runtime
+  // Reserved and never opened: it must expire rather than take the session.
+  adapter.stream(
+    request([{ role: 'user', content: [{ type: 'text', text: 'old' }] }], {
+      sessionId: 'expire' as never,
+    }),
+  )
+  await delay(30)
+  await collect(
+    adapter,
+    request([{ role: 'user', content: [{ type: 'text', text: 'new' }] }], {
+      sessionId: 'expire' as never,
+    }),
+  )
+  assert.equal(runtime.turnState().reservations, 0)
+})

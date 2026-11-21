@@ -372,6 +372,8 @@ export interface CursorRuntimeOptions {
   keyRef: string
   /** Diagnostics sink for runs that fail in the background. */
   onWarn?: (message: string) => void
+  /** How long a reserved stream may wait before admission; default 60s. */
+  reservationTtlMs?: number
 }
 
 /** Everything a turn needs; the adapter supplies it per request. */
@@ -385,7 +387,17 @@ export interface CursorTurnOptions {
   purpose?: 'compaction' | 'session-title'
   /** Adapter-assigned order, reserved before its async setup starts. */
   turnSeq?: number
+  /** The adapter's reservation; released on every exit, idempotently. */
+  reservation?: TurnReservation
   reply: Reply
+}
+
+/** One reserved stream; releasing is idempotent. */
+export interface TurnReservation {
+  readonly seq: number
+  readonly at: number
+  released: boolean
+  release(): void
 }
 
 export class CursorRuntime {
@@ -396,8 +408,8 @@ export class CursorRuntime {
   private readonly keyGeneration = new Map<string, number>()
   /** Cancels the work of a turn a newer one superseded. */
   private readonly keyAbort = new Map<string, AbortController>()
-  /** Reservations per session key, released when their turn finishes. */
-  private readonly keyPending = new Map<string, number>()
+  /** Reserved streams per session key, released when each one ends. */
+  private readonly reservations = new Map<string, TurnReservation[]>()
   private warming: Promise<void> | undefined
   private prewarmAgent: CursorAgent | undefined
   private prewarmRun: CursorRun | undefined
@@ -416,16 +428,60 @@ export class CursorRuntime {
   }
 
   /**
-   * Reserve a turn for a known session before its setup starts. The count is
-   * released when the turn finishes, so a generation entry is retired only
-   * once no reserved stream for that conversation can still run.
+   * Reserve a turn for a known session before its setup starts. The handle is
+   * released when the stream closes, finishes, or expires, so a generation
+   * entry is retired only once no reserved stream can still run.
    */
-  reserveTurn(sessionId?: string): number {
+  reserveTurn(sessionId?: string): TurnReservation {
     const seq = this.beginTurn()
-    if (sessionId !== undefined && sessionId.length > 0) {
-      this.keyPending.set(sessionId, (this.keyPending.get(sessionId) ?? 0) + 1)
+    const key =
+      sessionId !== undefined && sessionId.length > 0 ? sessionId : undefined
+    const reservation: TurnReservation = {
+      seq,
+      at: Date.now(),
+      released: false,
+      release: () => this.releaseReservation(key, reservation),
     }
-    return seq
+    if (key !== undefined) {
+      this.reservations.set(key, [
+        ...(this.reservations.get(key) ?? []),
+        reservation,
+      ])
+    }
+    return reservation
+  }
+
+  private releaseReservation(
+    key: string | undefined,
+    reservation: TurnReservation,
+  ): void {
+    if (reservation.released) return
+    reservation.released = true
+    if (key === undefined) return
+    const left = (this.reservations.get(key) ?? []).filter(
+      (entry) => entry !== reservation,
+    )
+    if (left.length > 0) {
+      this.reservations.set(key, left)
+      return
+    }
+    this.reservations.delete(key)
+    // Every reserved stream for this conversation is done: nothing older can
+    // still arrive, so the generation entries can be retired.
+    this.keyGeneration.delete(key)
+    this.keyAbort.delete(key)
+  }
+
+  /** Drop reservations whose stream never reached a turn. */
+  private expireReservations(): void {
+    const ttl = this.options.reservationTtlMs ?? 60_000
+    const now = Date.now()
+    for (const [key, list] of [...this.reservations]) {
+      for (const reservation of [...list]) {
+        if (now - reservation.at > ttl) reservation.release()
+      }
+      void key
+    }
   }
 
   /** Close every agent; called from the plugin's disposer. */
@@ -434,7 +490,7 @@ export class CursorRuntime {
     this.lifetime.abort()
     this.keyAbort.clear()
     this.keyGeneration.clear()
-    this.keyPending.clear()
+    this.reservations.clear()
     // The warmup's one cleanup closes whatever handle exists; its finally
     // then finds the agent already closed and does not close it again.
     void this.prewarmCleanup?.()
@@ -452,10 +508,17 @@ export class CursorRuntime {
   }
 
   /** Cancellation state sizes; a test hook. */
-  turnState(): { controllers: number; generations: number } {
+  turnState(): {
+    controllers: number
+    generations: number
+    reservations: number
+  } {
+    let reservations = 0
+    for (const list of this.reservations.values()) reservations += list.length
     return {
       controllers: this.keyAbort.size,
       generations: this.keyGeneration.size,
+      reservations,
     }
   }
 
@@ -474,29 +537,24 @@ export class CursorRuntime {
     )
     // Ownership follows the adapter's call order, reserved before any await:
     // a later turn owns the conversation even if an earlier one sets up first.
-    const generation = options.turnSeq ?? this.beginTurn()
-    const reservedKey =
-      options.purpose === undefined &&
-      typeof options.sessionId === 'string' &&
-      options.sessionId.length > 0
-        ? options.sessionId
-        : undefined
-    const releaseReservation = () => {
-      if (reservedKey === undefined) return
-      const left = (this.keyPending.get(reservedKey) ?? 1) - 1
-      if (left > 0) {
-        this.keyPending.set(reservedKey, left)
+    const reservation = options.reservation
+    if (reservation !== undefined) {
+      const ttl = this.options.reservationTtlMs ?? 60_000
+      if (Date.now() - reservation.at > ttl) {
+        // An abandoned stream must not take ownership later.
+        reservation.release()
+        reply.finish('aborted')
         return
       }
-      this.keyPending.delete(reservedKey)
-      // Every reserved stream for this conversation is done: nothing older
-      // can still arrive, so the generation entries can be retired.
-      this.keyGeneration.delete(reservedKey)
-      this.keyAbort.delete(reservedKey)
     }
+    const release = () => {
+      reservation?.release()
+      this.expireReservations()
+    }
+    const generation = reservation?.seq ?? options.turnSeq ?? this.beginTurn()
     const prior = this.keyGeneration.get(sessionKey) ?? 0
     if (generation < prior) {
-      releaseReservation()
+      release()
       reply.finish('aborted')
       return
     }
@@ -537,7 +595,7 @@ export class CursorRuntime {
       if (this.keyAbort.get(sessionKey) === turnController) {
         this.keyAbort.delete(sessionKey)
       }
-      releaseReservation()
+      release()
     }
     if (signal.aborted) {
       reply.finish('aborted')
