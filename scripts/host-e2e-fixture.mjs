@@ -319,4 +319,8 @@ export const EXPECTED_REFUSALS = [
   // tests, and the driver makes no picker assertions for this route.
   'https://ollama.com/api/tags',
   'https://ollama.com/api/show',
+  // The Cursor SDK's model catalog is not part of the fixture: the plugin
+  // falls back to its built-in list, and the quota RPCs above stay exact.
+  'https://api2.cursor.sh/',
+  'https://api.cursor.com/',
 ]

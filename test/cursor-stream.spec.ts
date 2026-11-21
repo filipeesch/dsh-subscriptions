@@ -3,6 +3,7 @@ import { test } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { CursorAdapter } from '../src/providers/cursor/adapter.js'
+import { CursorRuntime } from '../src/providers/cursor/runtime.js'
 import type {
   CursorAgent,
   CursorAgentOptions,
@@ -91,8 +92,10 @@ function gatedRun(events: CursorEvent[]): {
 function gatewayWith(agentOf: (options?: CursorAgentOptions) => CursorAgent): {
   gateway: CursorGateway
   agents: CursorAgent[]
+  models: () => number
 } {
   const agents: CursorAgent[] = []
+  let models = 0
   return {
     gateway: {
       async createAgent(options) {
@@ -102,10 +105,12 @@ function gatewayWith(agentOf: (options?: CursorAgentOptions) => CursorAgent): {
       },
       async deleteAgent() {},
       async listModels() {
+        models += 1
         return CATALOG
       },
     },
     agents,
+    models: () => models,
   }
 }
 
@@ -248,8 +253,8 @@ test('a tool round trip runs on the same live agent', async () => {
   assert.equal(sentCount, 1)
 })
 
-test('an already-aborted request creates no agent', async () => {
-  const { gateway, agents } = gatewayWith(() => ({
+test('an already-aborted request creates no agent and reads no catalog', async () => {
+  const { gateway, agents, models } = gatewayWith(() => ({
     async send() {
       throw new Error('must not send')
     },
@@ -265,6 +270,7 @@ test('an already-aborted request creates no agent', async () => {
     }),
   )
   assert.equal(agents.length, 0)
+  assert.equal(models(), 0, 'a cancelled request must not read the catalog')
   assert.equal(
     (chunks.find((c) => c.type === 'finish')?.reason as { kind?: string })
       ?.kind,
@@ -343,4 +349,144 @@ test('disposing while the agent is being created closes the late agent', async (
       ?.kind,
     'error',
   )
+})
+
+test('aborting while the agent is created sends nothing and closes it', async () => {
+  let resolveAgent!: (agent: CursorAgent) => void
+  let closed = 0
+  let sent = 0
+  const agent: CursorAgent = {
+    async send() {
+      sent += 1
+      return gatedRun([]).run
+    },
+    close() {
+      closed += 1
+    },
+  }
+  const { gateway } = gatewayWith(() => agent)
+  gateway.createAgent = () =>
+    new Promise<CursorAgent>((resolve) => {
+      resolveAgent = resolve
+    })
+  const adapter = adapterOf(gateway)
+  const controller = new AbortController()
+  const chunks: Chunk[] = []
+  const stream = (async () => {
+    for await (const chunk of adapter.stream(
+      request([{ role: 'user', content: [{ type: 'text', text: 'hi' }] }], {
+        signal: controller.signal,
+      }),
+    )) {
+      chunks.push(chunk as unknown as Chunk)
+    }
+  })()
+  await delay(20)
+  controller.abort()
+  resolveAgent(agent)
+  await stream
+  assert.equal(sent, 0)
+  assert.equal(closed, 1)
+  assert.equal(
+    (chunks.find((c) => c.type === 'finish')?.reason as { kind?: string })
+      ?.kind,
+    'aborted',
+  )
+})
+
+test('prewarm closes its agent when disposal lands before the send', async () => {
+  let resolveAgent!: (agent: CursorAgent) => void
+  let closed = 0
+  let sent = 0
+  const runtime = new CursorRuntime({
+    gateway: {
+      async createAgent() {
+        return new Promise<CursorAgent>((resolve) => {
+          resolveAgent = resolve
+        })
+      },
+      async deleteAgent() {},
+      async listModels() {
+        return CATALOG
+      },
+    },
+    apiKey: async () => 'crsr_test',
+    cwd: () => '/tmp',
+    contextPreference: () => 'max',
+    keyRef: 'CURSOR_API_KEY',
+  })
+  runtime.prewarm('crsr_test', 'claude-sonnet-5-5')
+  await delay(10)
+  runtime.dispose()
+  resolveAgent({
+    async send() {
+      sent += 1
+      return gatedRun([]).run
+    },
+    close() {
+      closed += 1
+    },
+    agentId: 'warm-agent',
+  })
+  await delay(50)
+  assert.equal(sent, 0)
+  assert.equal(closed, 1)
+})
+
+function retryAgent(): CursorAgent {
+  return {
+    async send() {
+      return {
+        async *stream() {
+          yield {
+            type: 'assistant',
+            message: { content: [{ type: 'text', text: 'ok' }] },
+          }
+        },
+        async wait() {
+          return { status: 'finished' }
+        },
+        async cancel() {},
+      }
+    },
+    close() {},
+  }
+}
+
+function retryGateway(attempts: (string | undefined)[], reject: string[]) {
+  return gatewayWith((options) => {
+    const context = (
+      options?.model as { params?: { id: string; value: string }[] } | undefined
+    )?.params?.find((param) => param.id === 'context')?.value
+    attempts.push(context)
+    if (context !== undefined && reject.includes(context)) {
+      throw new Error('invalid parameters for registry model claude')
+    }
+    return retryAgent()
+  }).gateway
+}
+
+const retryRequest = (sessionId: string) =>
+  request([{ role: 'user', content: [{ type: 'text', text: 'hi' }] }], {
+    sessionId: sessionId as never,
+  })
+
+test('a successful fallback tier is remembered for later conversations', async () => {
+  const attempts: (string | undefined)[] = []
+  const adapter = adapterOf(retryGateway(attempts, ['1m']))
+  await collect(adapter, retryRequest('retry-one'))
+  await collect(adapter, retryRequest('retry-two'))
+  assert.deepEqual(attempts, ['1m', '200k', '200k'])
+})
+
+test('a failed fallback is not remembered', async () => {
+  const attempts: (string | undefined)[] = []
+  const adapter = adapterOf(retryGateway(attempts, ['1m', '200k']))
+  const first = await collect(adapter, retryRequest('fail-one'))
+  assert.equal(
+    (first.find((c) => c.type === 'finish')?.reason as { kind?: string })?.kind,
+    'error',
+  )
+  await collect(adapter, retryRequest('fail-two'))
+  assert.deepEqual(attempts, ['1m', '200k', '1m', '200k'])
 })

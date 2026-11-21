@@ -78,33 +78,28 @@ export function CursorCard({
     }
   }, [rpc])
 
-  const refreshStatus = useCallback(
-    async (refreshCatalog = false) => {
-      try {
-        const [settings, status] = await Promise.all([
-          callSubscriptionsAuth<CursorSettingsView>(rpc, 'cursorSettings', {
-            refresh: refreshCatalog,
-          }),
-          callSubscriptionsAuth<Record<string, { configured: boolean }>>(
-            rpc,
-            'externalStatus',
-            {},
-          ),
-        ])
-        setView(settings)
-        setCeiling(
-          settings.ceilingUSD === undefined ? '' : String(settings.ceilingUSD),
-        )
-        setStatusError(undefined)
-        const isConfigured = status.cursor?.configured === true
-        setConfigured(isConfigured)
-        if (isConfigured) void refreshUsage()
-      } catch (failure) {
-        setStatusError(message(failure))
-      }
-    },
-    [rpc, refreshUsage],
-  )
+  const refreshStatus = useCallback(async () => {
+    try {
+      const [settings, status] = await Promise.all([
+        callSubscriptionsAuth<CursorSettingsView>(rpc, 'cursorSettings', {}),
+        callSubscriptionsAuth<Record<string, { configured: boolean }>>(
+          rpc,
+          'externalStatus',
+          {},
+        ),
+      ])
+      setView(settings)
+      setCeiling(
+        settings.ceilingUSD === undefined ? '' : String(settings.ceilingUSD),
+      )
+      setStatusError(undefined)
+      const isConfigured = status.cursor?.configured === true
+      setConfigured(isConfigured)
+      if (isConfigured) void refreshUsage()
+    } catch (failure) {
+      setStatusError(message(failure))
+    }
+  }, [rpc, refreshUsage])
 
   useEffect(() => {
     void refreshStatus()
@@ -128,14 +123,14 @@ export function CursorCard({
         ceilingUSD: value,
       })
       setSaved(true)
-      await refreshStatus(true)
+      await refreshStatus()
     } catch (failure) {
       setSaveError(message(failure))
     }
   }
 
   const reportedLimit = usage?.windows?.some(
-    (window) => window.limitAmount !== undefined,
+    (window) => window.limitSource === 'provider',
   )
 
   return (
@@ -182,7 +177,7 @@ export function CursorCard({
               style={styles.usageRefresh}
               disabled={loading}
               onClick={() => {
-                void refreshStatus(true)
+                void refreshStatus()
               }}
             >
               {t('usageRefresh')}

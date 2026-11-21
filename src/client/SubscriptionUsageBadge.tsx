@@ -142,7 +142,50 @@ export function pillAccountFor(
   if (account !== undefined) {
     return display.accounts.find((entry) => entry.key === account)
   }
-  return pillAccountOf(display)
+  // An ordinary model id follows the default account; a provider with several
+  // accounts must not substitute the first one's quota for it.
+  return (
+    display.accounts.find((entry) => entry.isDefault) ??
+    (display.accounts.length === 1 ? display.accounts[0] : undefined)
+  )
+}
+
+/** The footer bar a live selection owns; empty when it may not show one. */
+export interface FooterBar {
+  display?: ProviderUsageDisplay
+  account?: AccountUsageDisplay
+  window?: UsageWindow
+  /** Provider name to show when there is no eligible reading. */
+  name?: string
+}
+
+/**
+ * Decide the footer bar for a live model selection. Only Claude, Codex, and
+ * Cursor have a stated subscription; the bar follows the selected provider's
+ * exact account (or its default), and an eligible provider with no reading
+ * shows its name without borrowing another account's numbers.
+ * @param displays - providers that reported usage.
+ * @param selection - the model the next request would use.
+ * @returns the parts the pill renders.
+ */
+export function footerBar(
+  displays: readonly ProviderUsageDisplay[],
+  selection: { provider: string; model: string } | undefined,
+): FooterBar {
+  const provider = selection?.provider
+  const model = selection?.model
+  if (provider === undefined || model === undefined) return {}
+  if (!BAR_PROVIDERS.has(provider)) return {}
+  const display = displays.find((entry) => entry.provider === provider)
+  if (display === undefined) {
+    return { name: (PROVIDER_NAMES as Record<string, string>)[provider] }
+  }
+  const account = pillAccountFor(display, model)
+  const window = account?.windows[0]
+  if (account === undefined || window === undefined) {
+    return { display, name: display.name }
+  }
+  return { display, account, window, name: display.name }
 }
 
 /** Brand display names (short form for the compact badge). */
@@ -871,21 +914,14 @@ export function SubscriptionUsageBadge({
       : badgeSelection?.model
   const expanded = expandedDisplays(displays, dialogProvider)
   const title = translate('usageBadgeTitle')
-  // The bar follows the live selection, never the retained or rotating pill:
-  // it describes the model the next request would use, and only for the
-  // providers whose subscription the footer states (Claude, Codex, Cursor).
-  // An account-scoped model id names its account; an ordinary id follows the
-  // default account, and a scoped account with no reading shows no bar.
-  const barProvider = displayMode === 'always' ? undefined : selection?.provider
-  const barDisplay =
-    barProvider !== undefined && BAR_PROVIDERS.has(barProvider)
-      ? displays.find((entry) => entry.provider === barProvider)
-      : undefined
-  const barAccount =
-    barDisplay === undefined
-      ? undefined
-      : pillAccountFor(barDisplay, selection?.model)
-  const barWindow = barAccount?.windows[0]
+  // The bar follows the live selection in both visible modes, never the
+  // retained or rotating pill: it describes the model the next request would
+  // use. footerBar() owns which providers and accounts may show one.
+  const bar = footerBar(displays, selection)
+  const barDisplay = bar.display
+  const barAccount = bar.account
+  const barWindow = bar.window
+  const barName = bar.name
   const barText =
     barDisplay === undefined || barWindow === undefined
       ? undefined
@@ -912,8 +948,8 @@ export function SubscriptionUsageBadge({
         style={{ ...styles.pill, ...(hover || open ? styles.pillActive : {}) }}
         aria-haspopup="dialog"
         aria-expanded={open}
-        aria-label={`${title} · ${barText ?? label}`}
-        title={barText ?? title}
+        aria-label={`${title} · ${barText ?? barName ?? label}`}
+        title={barText ?? barName ?? title}
         onMouseEnter={() => {
           setHover(true)
         }}
@@ -931,11 +967,9 @@ export function SubscriptionUsageBadge({
             gap: 6,
           }}
         >
-          {barDisplay === undefined ||
-          barWindow === undefined ||
-          barAccount === undefined ? (
-            label
-          ) : (
+          {barDisplay !== undefined &&
+          barWindow !== undefined &&
+          barAccount !== undefined ? (
             <>
               {barDisplay.name}
               <UsageBar
@@ -946,6 +980,10 @@ export function SubscriptionUsageBadge({
                 stateKey={`${barDisplay.provider}:${barAccount.key}`}
               />
             </>
+          ) : barName !== undefined ? (
+            barName
+          ) : (
+            label
           )}
         </span>
       </button>

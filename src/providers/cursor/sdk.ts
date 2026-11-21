@@ -33,14 +33,29 @@ export function configureRipgrep(
   const platform = `${process.platform}-${process.arch}`
   const binaries =
     process.platform === 'win32' ? ['bin/rg.exe', 'bin/rg'] : ['bin/rg']
-  for (const binary of binaries) {
-    try {
-      const path = require.resolve(`@cursor/sdk-${platform}/${binary}`)
-      if (existsSync(path)) return (env.CURSOR_RIPGREP_PATH = path)
-    } catch {
-      /* optional platform package not installed */
+  // The platform package is a dependency of the SDK, so resolve it from the
+  // SDK's own install first: a pnpm layout may not expose it to this package.
+  const scopes: NodeJS.Require[] = []
+  try {
+    scopes.push(createRequire(require.resolve('@cursor/sdk')))
+  } catch {
+    /* the SDK is optional for tests that never load it */
+  }
+  scopes.push(require)
+  for (const scope of scopes) {
+    for (const binary of binaries) {
+      try {
+        const path = scope.resolve(`@cursor/sdk-${platform}/${binary}`)
+        if (existsSync(path)) return (env.CURSOR_RIPGREP_PATH = path)
+      } catch {
+        /* optional platform package not installed for this scope */
+      }
     }
   }
+  process.emitWarning(
+    'Cursor could not find its bundled ripgrep binary. Set CURSOR_RIPGREP_PATH to a ripgrep executable, or reinstall @cursor/sdk with its platform package.',
+    'CursorSdkWarning',
+  )
   return undefined
 }
 

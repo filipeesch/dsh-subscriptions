@@ -679,6 +679,8 @@ export interface UsageWindow {
   usedAmount?: number
   /** Ceiling the provider reports for this window, in the same minor unit. */
   limitAmount?: number
+  /** Whether the ceiling came from the provider or the configured fallback. */
+  limitSource?: 'provider' | 'configured'
   /** Amount still available, when the provider reports it. */
   remainingAmount?: number
   /** ISO 4217 currency of the amounts; absent when the provider reports none. */

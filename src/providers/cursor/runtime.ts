@@ -376,6 +376,8 @@ export class CursorRuntime {
   private readonly overhead = new Map<string, number>()
   private readonly workingContext = new Map<string, string>()
   private warming: Promise<void> | undefined
+  private prewarmAgent: CursorAgent | undefined
+  private prewarmRun: CursorRun | undefined
   private disposed = false
 
   constructor(private readonly options: CursorRuntimeOptions) {}
@@ -383,6 +385,12 @@ export class CursorRuntime {
   /** Close every agent; called from the plugin's disposer. */
   dispose(): void {
     this.disposed = true
+    // A warm agent still being created or sent to is closed here; its own
+    // finally sees the disposal flag and does not double-close.
+    void Promise.resolve(this.prewarmRun?.cancel?.()).catch(() => {})
+    settle(() => this.prewarmAgent?.close?.())
+    this.prewarmRun = undefined
+    this.prewarmAgent = undefined
     for (const slots of this.sessions.values()) {
       for (const session of slots) session.close()
     }
@@ -513,39 +521,48 @@ export class CursorRuntime {
     const onAbort = () => session?.wake()
     signal?.addEventListener?.('abort', onAbort, { once: true })
     try {
-      if (!session || plan.kind === 'fresh') {
-        session = await this.open(
+      const openFresh = async (tier: CursorParam[] | undefined) => {
+        const created = await this.open(
           sessionKey,
           modelId,
-          params,
+          tier,
           transcript,
           apiKey,
           options.sessionId,
         )
-        session.busy = true
+        // Creation is async: a cancel that landed meanwhile must close the
+        // agent instead of sending into it.
+        if (signal?.aborted) {
+          this.drop(created)
+          throw new TurnAborted()
+        }
+        created.busy = true
         try {
-          await sendFirst(session)
+          await sendFirst(created)
         } catch (error) {
-          // Cursor can reject the tier while creating or sending, before any
-          // run exists; that is the same retry as a rejected run.
+          this.drop(created)
+          throw error
+        }
+        if (signal?.aborted) {
+          this.drop(created)
+          throw new TurnAborted()
+        }
+        return created
+      }
+      if (!session || plan.kind === 'fresh') {
+        try {
+          session = await openFresh(params)
+        } catch (error) {
+          // A rejected tier can surface while creating or sending, before any
+          // run exists; it is the same single retry as a rejected run.
           const message = error instanceof Error ? error.message : String(error)
-          if (!isRejectedParams(message)) throw error
-          this.drop(session)
-          const lower = tierRetried
-            ? undefined
-            : smallerContext(options.model, params)
-          if (!lower) throw error
+          if (error instanceof TurnAborted || !isRejectedParams(message)) {
+            throw error
+          }
+          const lower = smallerContext(options.model, params)
+          if (!lower || tierRetried) throw error
           tierRetried = true
-          session = await this.open(
-            sessionKey,
-            modelId,
-            lower,
-            transcript,
-            apiKey,
-            options.sessionId,
-          )
-          session.busy = true
-          await sendFirst(session)
+          session = await openFresh(lower)
         }
         freshRun = true
       } else if (plan.kind === 'send') {
@@ -664,6 +681,8 @@ export class CursorRuntime {
         const status =
           result?.status ?? (session.runError ? 'error' : 'finished')
         if (status === 'finished') {
+          const tier = session.params?.find((param) => param.id === 'context')
+          if (tier) this.workingContext.set(modelId, tier.value)
           reply.usage = runUsage(
             result?.usage,
             session.modelCalls,
@@ -721,9 +740,10 @@ export class CursorRuntime {
       }
     } catch (error) {
       if (session) this.drop(session)
+      const aborted = error instanceof TurnAborted || signal?.aborted === true
       reply.finish(
-        signal?.aborted ? 'aborted' : 'error',
-        signal?.aborted ? undefined : safeError(error, 'run the model'),
+        aborted ? 'aborted' : 'error',
+        aborted ? undefined : safeError(error, 'run the model'),
       )
     } finally {
       signal?.removeEventListener?.('abort', onAbort)
@@ -743,19 +763,24 @@ export class CursorRuntime {
   // Discarded state on dispose only; kept for one process in tests.
   private async runPrewarm(apiKey: string, modelId: string): Promise<void> {
     if (this.disposed) return
+    let agent: CursorAgent | undefined
+    let run: CursorRun | undefined
     try {
       const cwd = this.options.cwd(undefined)
-      const agent = await this.options.gateway.createAgent({
+      agent = await this.options.gateway.createAgent({
         model: { id: modelId },
         apiKey,
         tools: ['mcp'],
         local: { cwd, settingSources: [] },
       })
-      const run = await agent.send('.')
-      await Promise.resolve(run.cancel?.()).catch(() => {})
-      await Promise.resolve(run.wait()).catch(() => {})
-      settle(() => agent.close?.())
+      this.prewarmAgent = agent
       if (this.disposed) return
+      run = await agent.send('.')
+      this.prewarmRun = run
+      if (this.disposed) return
+      await Promise.resolve(run.cancel?.()).catch(() => {})
+      await Promise.resolve(run.wait?.()).catch(() => {})
+      settle(() => agent?.close?.())
       const id = agent.agentId
       if (id) {
         void this.options.gateway
@@ -763,9 +788,14 @@ export class CursorRuntime {
           .catch(() => {})
       }
     } catch (error) {
-      this.warn(
-        `Cursor prewarm failed: ${error instanceof Error ? error.message : String(error)}`,
-      )
+      this.warn(`Cursor prewarm failed: ${safeError(error, 'warm the SDK')}`)
+    } finally {
+      this.prewarmAgent = undefined
+      this.prewarmRun = undefined
+      if (this.disposed) {
+        await Promise.resolve(run?.cancel?.()).catch(() => {})
+        settle(() => agent?.close?.())
+      }
     }
   }
 
@@ -861,6 +891,9 @@ export function safeError(error: unknown, action: string): string {
   }
   return `Cursor failed while trying to ${action}.`
 }
+
+/** Ends a turn whose caller cancelled while an async boundary was open. */
+class TurnAborted extends Error {}
 
 function signatureOf(
   modelId: string,

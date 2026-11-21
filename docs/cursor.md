@@ -35,8 +35,9 @@ missing-credential error on use.
 - id: llm-cursor
   name: dsh-subscriptions
   config:
-    apiKeyRef: CURSOR_API_KEY
-    context: max
+    cursor:
+      apiKeyRef: CURSOR_API_KEY
+      context: max
 ```
 
 | Option      | Default               | Meaning                                                                    |
@@ -91,5 +92,5 @@ HTTP seams. With an account, install the plugin, store the key, open **Settings
 send one prompt with a tool call from the composer.
 
 See the
-[decision record](../../.agents/notes/implemented/provider/2026-11-21-cursor-key-route.md)
+[decision record](../.agents/notes/implemented/provider/2026-11-21-cursor-key-route.md)
 for the endpoint probes and the alternatives.

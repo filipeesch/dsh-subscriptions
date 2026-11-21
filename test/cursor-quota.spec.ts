@@ -223,3 +223,48 @@ test('a plan-info failure leaves the usage reading intact', async () => {
   assert.equal(usage.windows?.length, 1)
   assert.equal(usage.plan, undefined)
 })
+
+test('a present but invalid limit is drift, not a reason to use the fallback', async () => {
+  const { fetch } = fakeFetch([
+    exchange(),
+    {
+      ...CYCLE,
+      spendLimitUsage: { overallLimit: -5, overallUsed: 100 },
+    },
+    { planInfo: { planName: 'Enterprise' } },
+  ])
+  await assert.rejects(
+    fetchCursorUsage('crsr_key', { http: fetch, ceilingUSD: 2_500 }),
+    /not recognized/,
+  )
+})
+
+test('the limit origin travels with the window', async () => {
+  const provided = fakeFetch([
+    exchange(),
+    {
+      ...CYCLE,
+      spendLimitUsage: {
+        overallLimit: 10_000,
+        overallUsed: 1_000,
+        overallRemaining: 9_000,
+      },
+    },
+    { planInfo: { planName: 'Enterprise' } },
+  ])
+  const a = await fetchCursorUsage('crsr_key', { http: provided.fetch })
+  assert.equal(a.windows?.[0]?.limitSource, 'provider')
+
+  const configured = fakeFetch([
+    exchange(),
+    { ...CYCLE, spendLimitUsage: { overallUsed: 1_000 } },
+    { planInfo: { planName: 'Enterprise' } },
+  ])
+  const b = await fetchCursorUsage('crsr_key', {
+    http: configured.fetch,
+    ceilingUSD: 2_500,
+  })
+  assert.equal(b.windows?.[0]?.limitSource, 'configured')
+  assert.equal(b.windows?.[0]?.limitAmount, 250_000)
+  assert.equal(b.windows?.[0]?.remainingAmount, 249_000)
+})

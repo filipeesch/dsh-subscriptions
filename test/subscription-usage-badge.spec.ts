@@ -36,6 +36,7 @@ const {
   usageBadgeIcon,
   groupUsageDisplays,
   loadBadgeRoster,
+  footerBar,
   pillAccountFor,
   usageOf,
 } = await import('../src/client/SubscriptionUsageBadge.js')
@@ -685,4 +686,69 @@ test('a scoped account without a reading gets no account, not the default one', 
     undefined,
   )
   assert.equal(pillAccountFor(display, 'claude-sonnet-5')?.key, 'default')
+})
+
+test('the footer bar follows the live selection, its account, and no substitute', () => {
+  const claude = {
+    provider: 'claude' as const,
+    name: 'Claude',
+    accounts: [
+      {
+        key: 'default',
+        isDefault: true,
+        windows: [{ kind: 'session' as const, usedPercent: 10 }],
+      },
+      {
+        key: 'second',
+        isDefault: false,
+        windows: [{ kind: 'session' as const, usedPercent: 20 }],
+      },
+    ],
+  }
+  const selected = footerBar([claude], {
+    provider: 'claude',
+    model: '~account:second:claude-sonnet-5',
+  })
+  assert.equal(selected.account?.key, 'second')
+  assert.equal(selected.window?.usedPercent, 20)
+
+  const missing = footerBar([claude], {
+    provider: 'claude',
+    model: '~account:missing:claude-sonnet-5',
+  })
+  assert.equal(missing.window, undefined)
+  assert.equal(missing.name, 'Claude')
+
+  // An ordinary id reads the default; without one, no account is borrowed.
+  const noDefault = {
+    ...claude,
+    accounts: [
+      claude.accounts[1]!,
+      {
+        key: 'third',
+        isDefault: false,
+        windows: [{ kind: 'session' as const, usedPercent: 30 }],
+      },
+    ],
+  }
+  assert.equal(
+    footerBar([claude], { provider: 'claude', model: 'claude-sonnet-5' }).window
+      ?.usedPercent,
+    10,
+  )
+  assert.equal(
+    footerBar([noDefault], { provider: 'claude', model: 'claude-sonnet-5' })
+      .window,
+    undefined,
+  )
+
+  // A provider without a stated subscription keeps the old pill behavior.
+  assert.deepEqual(
+    footerBar([claude], { provider: 'grok', model: 'grok-4' }),
+    {},
+  )
+  assert.equal(
+    footerBar([], { provider: 'cursor', model: 'claude-sonnet-5-5' }).name,
+    'Cursor',
+  )
 })

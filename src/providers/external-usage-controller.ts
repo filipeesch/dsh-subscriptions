@@ -75,9 +75,10 @@ export class ExternalUsageController {
   private readonly ollamaBaseURL: LiveValue
   private readonly cache = new Map<
     string,
-    { usage: ProviderUsage; observedAt: number }
+    { usage: ProviderUsage; observedAt: number; stale: boolean }
   >()
   private readonly inflight = new Map<string, Promise<ProviderUsage>>()
+  private readonly generations = new Map<string, number>()
 
   constructor(
     private readonly resolveCredential: ResolveCredential,
@@ -111,12 +112,11 @@ export class ExternalUsageController {
 
   /** Drop the cached reading of one source, or all of them. */
   invalidate(source?: ExternalUsageSource): void {
-    if (source === undefined) {
-      this.cache.clear()
-      return
-    }
-    for (const key of [...this.cache.keys()]) {
-      if (key.startsWith(`${source}|`)) this.cache.delete(key)
+    const keys = new Set([...this.cache.keys(), ...this.inflight.keys()])
+    for (const key of keys) {
+      if (source !== undefined && !key.startsWith(`${source}|`)) continue
+      this.cache.delete(key)
+      this.generations.set(key, (this.generations.get(key) ?? 0) + 1)
     }
   }
 
@@ -136,6 +136,21 @@ export class ExternalUsageController {
     if (credential?.value === undefined || credential.value.length === 0) {
       throw new Error(`${source} API key is not configured`)
     }
+    const read = () =>
+      this.read(source, credential.value, ollamaBase, ceiling, endpoint)
+    // Only Cursor keeps a shared reading: the others are read per call as
+    // before, so their own cards keep their refresh behavior.
+    if (source !== 'cursor') {
+      return this.read(
+        source,
+        credential.value,
+        ollamaBase,
+        ceiling,
+        endpoint,
+        signal,
+      )
+    }
+    if (signal?.aborted) throw new Error('cursor usage read cancelled')
     // The cache belongs to one credential, host, and ceiling: a change to any
     // of them must read again rather than serve the previous account's data.
     const key = [
@@ -149,37 +164,33 @@ export class ExternalUsageController {
     if (!force) {
       const cached = this.cache.get(key)
       if (cached && Date.now() - cached.observedAt < CACHE_TTL_MS) {
-        return cached.usage
+        return this.snapshot(cached)
       }
-      const pending = this.inflight.get(key)
-      if (pending) return pending
     }
-    const task = this.read(
-      source,
-      credential.value,
-      ollamaBase,
-      ceiling,
-      endpoint,
-      signal,
-    ).then(
+    // A forced read still joins one already in flight instead of racing it.
+    const pending = this.inflight.get(key)
+    if (pending) return pending
+    const generation = this.generations.get(key) ?? 0
+    const task = read().then(
       (usage) => {
-        // The response keeps the provider's own shape; the observation time
-        // is cached for the stale fallback and for later reads.
-        this.cache.set(key, {
-          usage,
-          observedAt: usage.observedAt ?? Date.now(),
-        })
+        // An invalidation that landed while this read was in flight wins: the
+        // result goes to this caller but is not published.
+        if ((this.generations.get(key) ?? 0) === generation) {
+          this.cache.set(key, {
+            usage,
+            observedAt: usage.observedAt ?? Date.now(),
+            stale: false,
+          })
+        }
         return usage
       },
       (error: unknown) => {
-        // A failed refresh must not erase a good reading; it goes stale.
+        // A failed refresh marks the shared reading stale, so every later
+        // reader sees that too; the last good numbers survive.
         const cached = this.cache.get(key)
         if (cached) {
-          return {
-            ...cached.usage,
-            stale: true,
-            observedAt: cached.observedAt,
-          }
+          cached.stale = true
+          return this.snapshot(cached)
         }
         throw error
       },
@@ -187,6 +198,19 @@ export class ExternalUsageController {
     task.finally(() => this.inflight.delete(key)).catch(() => {})
     this.inflight.set(key, task)
     return task
+  }
+
+  /** One cached reading, with its freshness fields made explicit. */
+  private snapshot(entry: {
+    usage: ProviderUsage
+    observedAt: number
+    stale: boolean
+  }): ProviderUsage {
+    return {
+      ...entry.usage,
+      observedAt: entry.observedAt,
+      ...(entry.stale ? { stale: true } : {}),
+    }
   }
 
   private async read(

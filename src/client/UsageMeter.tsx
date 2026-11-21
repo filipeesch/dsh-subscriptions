@@ -66,10 +66,16 @@ export function UsageMeter({
   // An invalid reading is unavailable, not a healthy zero.
   const state = valid ? usageColorState(used, pace, preset, fresh) : 'neutral'
   const lead = pace === undefined ? 0 : Math.round(used - pace)
+  // A money window without a ceiling is readable: only its share is unknown.
+  const moneyOnly = !valid && quota.usedAmount !== undefined
   const label = [
-    valid ? quotaText(quota.usedPercent, quotaMode, t) : t('usageMeterInvalid'),
+    valid
+      ? quotaText(quota.usedPercent, quotaMode, t)
+      : moneyOnly
+        ? t('usageMeterShareUnavailable')
+        : t('usageMeterInvalid'),
     // An invalid reading already states unavailability; the stale line would repeat it.
-    !valid
+    !valid && !moneyOnly
       ? ''
       : !fresh
         ? t('usageMeterStale')

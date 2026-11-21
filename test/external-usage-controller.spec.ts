@@ -249,67 +249,86 @@ test('usage snapshots ref and host before the first await', async () => {
   )
 })
 
-test('one successful read serves every caller until forced or invalidated', async () => {
-  let calls = 0
-  const http = (async () => {
-    calls += 1
-    return Response.json({
-      usages: {
-        limit_7d: { usedRatio: 0.25, resetAt: '2026-10-01T00:00:00Z' },
-      },
-    })
+function cursorRouter(): {
+  http: typeof fetch
+  periods: () => number
+  fail: (value: boolean) => void
+} {
+  let periods = 0
+  let failing = false
+  const http = (async (url: string | URL | Request) => {
+    const target = String(url)
+    if (target.includes('exchange_user_api_key')) {
+      return Response.json({ accessToken: 'access-token' })
+    }
+    if (target.includes('GetCurrentPeriodUsage')) {
+      periods += 1
+      if (failing) throw new Error('boom')
+      return Response.json({
+        billingCycleStart: '1',
+        billingCycleEnd: '2',
+        spendLimitUsage: {
+          overallLimit: 10_000,
+          overallUsed: 1_000,
+          overallRemaining: 9_000,
+        },
+      })
+    }
+    return Response.json({ planInfo: { planName: 'Enterprise' } })
   }) as typeof fetch
-  const controller = new ExternalUsageController(
-    async () => ({ value: 'kimi-secret' }),
+  return {
     http,
+    periods: () => periods,
+    fail: (value: boolean) => {
+      failing = value
+    },
+  }
+}
+
+test('one Cursor reading serves every caller until forced or invalidated', async () => {
+  const router = cursorRouter()
+  const controller = new ExternalUsageController(
+    async () => ({ value: 'cursor-secret' }),
+    router.http,
   )
-  const first = await controller.usage('kimi-code')
-  const second = await controller.usage('kimi-code')
-  assert.equal(calls, 1)
-  assert.deepEqual(second, first)
-  await controller.usage('kimi-code', undefined, true)
-  assert.equal(calls, 2)
-  controller.invalidate('kimi-code')
-  await controller.usage('kimi-code')
-  assert.equal(calls, 3)
+  const first = await controller.usage('cursor')
+  const second = await controller.usage('cursor')
+  assert.equal(router.periods(), 1)
+  assert.deepEqual(second.windows, first.windows)
+  await controller.usage('cursor', undefined, true)
+  assert.equal(router.periods(), 2)
+  controller.invalidate('cursor')
+  await controller.usage('cursor')
+  assert.equal(router.periods(), 3)
 })
 
-test('a failed refresh keeps the last good reading and marks it stale', async () => {
-  let calls = 0
-  const http = (async () => {
-    calls += 1
-    if (calls > 1) throw new Error('boom')
-    return Response.json({
-      usages: {
-        limit_7d: { usedRatio: 0.25, resetAt: '2026-10-01T00:00:00Z' },
-      },
-    })
-  }) as typeof fetch
+test('a failed refresh marks the shared reading stale for later readers', async () => {
+  const router = cursorRouter()
   const controller = new ExternalUsageController(
-    async () => ({ value: 'kimi-secret' }),
-    http,
+    async () => ({ value: 'cursor-secret' }),
+    router.http,
   )
-  const good = await controller.usage('kimi-code')
-  const stale = await controller.usage('kimi-code', undefined, true)
-  assert.deepEqual(stale.windows, good.windows)
-  assert.equal(stale.stale, true)
-  assert.equal(typeof stale.observedAt, 'number')
+  const good = await controller.usage('cursor')
+  router.fail(true)
+  const failed = await controller.usage('cursor', undefined, true)
+  assert.deepEqual(failed.windows, good.windows)
+  assert.equal(failed.stale, true)
+  assert.equal(typeof failed.observedAt, 'number')
+  // The next ordinary read inside the window must not look fresh again.
+  const later = await controller.usage('cursor')
+  assert.equal(later.stale, true)
+  assert.equal(later.observedAt, failed.observedAt)
 })
 
 test('a changed credential reads again instead of serving the old account', async () => {
-  let value = 'kimi-one'
-  const keys: string[] = []
-  const http = (async (_url: string | URL | Request, init?: RequestInit) => {
-    keys.push((init?.headers as Record<string, string>).authorization ?? 'none')
-    return Response.json({
-      usages: {
-        limit_7d: { usedRatio: 0.25, resetAt: '2026-10-01T00:00:00Z' },
-      },
-    })
-  }) as typeof fetch
-  const controller = new ExternalUsageController(async () => ({ value }), http)
-  await controller.usage('kimi-code')
-  value = 'kimi-two'
-  await controller.usage('kimi-code')
-  assert.deepEqual(keys, ['Bearer kimi-one', 'Bearer kimi-two'])
+  const router = cursorRouter()
+  let value = 'cursor-one'
+  const controller = new ExternalUsageController(
+    async () => ({ value }),
+    router.http,
+  )
+  await controller.usage('cursor')
+  value = 'cursor-two'
+  await controller.usage('cursor')
+  assert.equal(router.periods(), 2)
 })

@@ -136,7 +136,8 @@ let CODEX_MODEL,
   EXPECTED_REFUSALS,
   FIXTURE_REQUESTS,
   USAGE_PERCENT,
-  MINIMAX_WINDOWS
+  MINIMAX_WINDOWS,
+  CURSOR_SPEND
 let HOST_CONTRACT, HOST_CONTRACT_MISS, SECTION_EN
 
 try {
@@ -148,6 +149,7 @@ try {
     FIXTURE_REQUESTS,
     USAGE_PERCENT,
     MINIMAX_WINDOWS,
+    CURSOR_SPEND,
   } = await import('./host-e2e-fixture.mjs'))
   // Node strips the types from these dependency-free modules; see their headers.
   ;({ HOST_CONTRACT, HOST_CONTRACT_MISS } = await import(
@@ -1016,7 +1018,8 @@ function dialogSections(cdp) {
   return cdp.evaluate(`[...document.querySelectorAll('[role="dialog"] section')].map(section => ({
     name: [...(section.querySelector('span')?.childNodes ?? [])]
       .filter(node => node.nodeType === Node.TEXT_NODE).map(node => node.textContent).join('').trim(),
-    percents: [...section.querySelectorAll('dd')].map(dd => /^\\s*(\\d+)%/.exec(dd.textContent ?? '')?.[1] ?? dd.textContent),
+    percents: [...section.querySelectorAll('dd')].map(dd => /(\\d+)%/.exec(dd.textContent ?? '')?.[1] ?? dd.textContent),
+    texts: [...section.querySelectorAll('dd')].map(dd => dd.textContent ?? ''),
   }))`)
 }
 
@@ -1107,6 +1110,19 @@ function dialogMismatches(sections) {
         `${name}: shows ${JSON.stringify(matches[0].percents)}, fixture serves ${percent}%`,
       )
     }
+  }
+  // The Cursor row states money, not only its share.
+  const cursorTexts = (
+    sections.find((section) => section.name === 'Cursor')?.texts ?? []
+  ).join(' ')
+  const cursorDigits = cursorTexts.replace(/\D+/g, '')
+  if (
+    !cursorDigits.includes(String(CURSOR_SPEND.usedCents)) ||
+    !cursorDigits.includes(String(CURSOR_SPEND.limitCents))
+  ) {
+    wrong.push(
+      `Cursor: shows ${JSON.stringify(cursorTexts)}, expected the fixture spend and ceiling`,
+    )
   }
   // Copilot is signed in, but the plugin has no Copilot usage endpoint.
   const minimax = sections.filter((section) => section.name === 'MiniMax')

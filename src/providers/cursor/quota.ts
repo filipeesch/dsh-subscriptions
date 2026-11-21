@@ -165,9 +165,19 @@ export async function fetchCursorUsage(
   const planUsage = record(period.planUsage)
 
   const windows: UsageWindow[] = []
-  const overallLimit = positive(spend?.overallLimit)
-  const overallUsed = amount(spend?.overallUsed)
-  const overallRemaining = amount(spend?.overallRemaining)
+  const rawUsed = spend?.overallUsed
+  const rawLimit = spend?.overallLimit
+  const rawRemaining = spend?.overallRemaining
+  // A present but unusable amount is drift; it must not silently become the
+  // fallback ceiling or a made-up remainder.
+  const presentInvalid = (value: unknown) =>
+    value !== undefined && amount(value) === undefined
+  const spendValid =
+    !presentInvalid(rawUsed) &&
+    !presentInvalid(rawLimit) &&
+    !presentInvalid(rawRemaining)
+  const overallUsed = spendValid ? amount(rawUsed) : undefined
+  const providedLimit = spendValid ? positive(rawLimit) : undefined
 
   if (overallUsed !== undefined) {
     const configured = positive(
@@ -175,11 +185,15 @@ export async function fetchCursorUsage(
         ? undefined
         : Math.round(options.ceilingUSD * 100),
     )
-    const limit = overallLimit ?? configured
+    const limit = providedLimit ?? configured
     const remaining =
       limit === undefined
-        ? overallRemaining
-        : (overallRemaining ?? Math.max(0, limit - overallUsed))
+        ? spendValid
+          ? amount(rawRemaining)
+          : undefined
+        : providedLimit === undefined
+          ? Math.max(0, limit - overallUsed)
+          : (amount(rawRemaining) ?? Math.max(0, limit - overallUsed))
     windows.push({
       kind: 'other',
       scope: 'Included usage',
@@ -189,7 +203,13 @@ export async function fetchCursorUsage(
         ? {}
         : { usedPercent: Math.min(100, (overallUsed / limit) * 100) }),
       usedAmount: overallUsed,
-      ...(limit === undefined ? {} : { limitAmount: limit }),
+      ...(limit === undefined
+        ? {}
+        : {
+            limitAmount: limit,
+            limitSource:
+              providedLimit === undefined ? 'configured' : 'provider',
+          }),
       ...(remaining === undefined || remaining < 0
         ? {}
         : { remainingAmount: remaining }),
@@ -214,7 +234,9 @@ export async function fetchCursorUsage(
         kind: 'other',
         scope: bucket.scope,
         usedPercent,
-        ...(limitCents === undefined ? {} : { limitAmount: limitCents }),
+        ...(limitCents === undefined
+          ? {}
+          : { limitAmount: limitCents, limitSource: 'provider' }),
         ...timing,
       })
     }

@@ -28,7 +28,12 @@ import {
 } from './models.js'
 import type { Image } from './prompt.js'
 import { ChunkQueue, Reply } from './reply.js'
-import { CursorRuntime, type CursorGateway, type CursorRun } from './runtime.js'
+import {
+  CursorRuntime,
+  safeError,
+  type CursorGateway,
+  type CursorRun,
+} from './runtime.js'
 import { imageRefs, readRequest, type CursorImageRef } from './transcript.js'
 
 const CATALOG_TTL_MS = 10 * 60_000
@@ -136,6 +141,15 @@ export class CursorAdapter extends LlmAdapter {
         'Cursor does not support stop sequences',
         'UNSUPPORTED_OPTION',
       )
+    }
+    // A request the host already cancelled must not touch the catalog, the
+    // attachment store, or the SDK.
+    if (options.signal?.aborted) {
+      const cancelled = new ChunkQueue()
+      const reply = new Reply(cancelled)
+      reply.finish('aborted')
+      yield* cancelled
+      return
     }
     const [models, images] = await Promise.all([
       this.models(),
@@ -255,7 +269,7 @@ export class CursorAdapter extends LlmAdapter {
       }
     } catch (error) {
       this.options.onWarn?.(
-        `Cursor catalog failed: ${error instanceof Error ? error.message : String(error)}`,
+        `Cursor catalog failed: ${safeError(error, 'list the models')}`,
       )
     }
     const live = models.length > 0
