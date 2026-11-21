@@ -390,6 +390,8 @@ export class CursorRuntime {
   private readonly sessions = new Map<string, CursorSession[]>()
   private readonly overhead = new Map<string, number>()
   private readonly workingContext = new Map<string, string>()
+  /** Newest turn per session key; an older create must not publish. */
+  private readonly keyGeneration = new Map<string, number>()
   private warming: Promise<void> | undefined
   private prewarmAgent: CursorAgent | undefined
   private prewarmRun: CursorRun | undefined
@@ -545,9 +547,16 @@ export class CursorRuntime {
     }
 
     const messages = transcript.messages as unknown as Record<string, unknown>[]
-    const candidates = (this.sessions.get(sessionKey) ?? []).filter(
-      (entry) => !entry.closed && !entry.busy,
-    )
+    const usable = (entry: CursorSession) =>
+      !entry.closed &&
+      !entry.busy &&
+      // A refreshed catalog can withdraw a tier the live agent still runs.
+      (entry.params?.find((param) => param.id === 'context')?.value ===
+        undefined ||
+        offered.includes(
+          entry.params!.find((param) => param.id === 'context')!.value,
+        ))
+    const candidates = (this.sessions.get(sessionKey) ?? []).filter(usable)
     const requestKey = requestKeyOf(modelId, requestedParams, credentialId)
     let session = candidates.find((entry) => entry.requestKey === requestKey)
     let plan = planIncrement(session, messages)
@@ -595,21 +604,29 @@ export class CursorRuntime {
       session?.wake()
     }
     signal?.addEventListener?.('abort', onAbort, { once: true })
+    const generation = (this.keyGeneration.get(sessionKey) ?? 0) + 1
+    this.keyGeneration.set(sessionKey, generation)
     try {
       const openFresh = async (
         effective: CursorParam[] | undefined,
         fellBack = false,
       ) => {
-        const created = await this.open(
-          sessionKey,
-          modelId,
-          requestedParams,
-          effective,
-          transcript,
-          apiKey,
-          options.sessionId,
-          signal,
-        )
+        const created = await Promise.race([
+          this.open(
+            sessionKey,
+            modelId,
+            requestedParams,
+            effective,
+            transcript,
+            apiKey,
+            options.sessionId,
+            signal,
+            generation,
+          ),
+          aborted.then(() => {
+            throw new TurnAborted()
+          }),
+        ])
         created.fellBack = fellBack
         // Creation is async: a cancel that landed meanwhile must close the
         // agent instead of sending into it.
@@ -720,6 +737,11 @@ export class CursorRuntime {
               }
             }
           }
+        }
+        if (this.disposed || session.closed) {
+          this.drop(session)
+          reply.finish('aborted')
+          return
         }
         if (signal?.aborted) {
           this.drop(session)
@@ -921,6 +943,7 @@ export class CursorRuntime {
     apiKey: string,
     sessionId: string | undefined,
     signal?: AbortSignal,
+    generation = 0,
   ): Promise<CursorSession> {
     if (this.disposed) throw new Error('Cursor runtime is disposed')
     const credentialId = hash(apiKey)
@@ -955,6 +978,12 @@ export class CursorRuntime {
       throw new Error('Cursor runtime is disposed')
     }
     if (signal?.aborted) {
+      settle(() => agent.close?.())
+      throw new TurnAborted()
+    }
+    // A newer turn of the same conversation owns the key now: close this
+    // late handle without publishing it.
+    if ((this.keyGeneration.get(key) ?? 0) !== generation) {
       settle(() => agent.close?.())
       throw new TurnAborted()
     }

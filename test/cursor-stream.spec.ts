@@ -4,6 +4,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { CursorAdapter } from '../src/providers/cursor/adapter.js'
 import { CursorRuntime } from '../src/providers/cursor/runtime.js'
+import { ChunkQueue, Reply } from '../src/providers/cursor/reply.js'
 import type {
   CursorAgent,
   CursorAgentOptions,
@@ -1271,4 +1272,241 @@ test('a cancelled create never closes the agent that replaced it', async () => {
     ),
   )
   assert.deepEqual(closed, ['A'])
+})
+
+test('an unload finishes an active turn without the SDK stream ending', async () => {
+  const { gateway } = gatewayWith(() => ({
+    async send() {
+      return {
+        async *stream() {
+          yield {
+            type: 'assistant',
+            message: { content: [{ type: 'text', text: 'working' }] },
+          }
+          await new Promise<void>(() => {
+            /* never ends until the SDK cooperates */
+          })
+        },
+        async wait() {
+          return { status: 'finished' }
+        },
+        async cancel() {},
+      }
+    },
+    close() {},
+  }))
+  const adapter = adapterOf(gateway)
+  const chunks: Chunk[] = []
+  const stream = (async () => {
+    for await (const chunk of adapter.stream(
+      request([{ role: 'user', content: [{ type: 'text', text: 'hi' }] }]),
+    )) {
+      chunks.push(chunk as unknown as Chunk)
+    }
+  })()
+  await waitFor(() => chunks.some((c) => c.type === 'text-delta'))
+  adapter.dispose()
+  await stream
+  assert.equal(
+    (chunks.find((c) => c.type === 'finish')?.reason as { kind?: string })
+      ?.kind,
+    'aborted',
+  )
+})
+
+test('an abort during a blocked create finishes before the create resolves', async () => {
+  let resolveAgent!: (agent: CursorAgent) => void
+  let closed = 0
+  const { gateway } = gatewayWith(() => ({
+    async send() {
+      throw new Error('must not send')
+    },
+    close() {},
+  }))
+  gateway.createAgent = () =>
+    new Promise<CursorAgent>((resolve) => {
+      resolveAgent = resolve
+    })
+  const adapter = adapterOf(gateway)
+  const controller = new AbortController()
+  const chunks: Chunk[] = []
+  const stream = (async () => {
+    for await (const chunk of adapter.stream(
+      request([{ role: 'user', content: [{ type: 'text', text: 'hi' }] }], {
+        signal: controller.signal,
+      }),
+    )) {
+      chunks.push(chunk as unknown as Chunk)
+    }
+  })()
+  await delay(20)
+  controller.abort()
+  await stream
+  assert.equal(
+    (chunks.find((c) => c.type === 'finish')?.reason as { kind?: string })
+      ?.kind,
+    'aborted',
+    'the stream must end before the create resolves',
+  )
+  resolveAgent({
+    async send() {
+      throw new Error('must not send')
+    },
+    close() {
+      closed += 1
+    },
+  })
+  await delay(20)
+  assert.equal(closed, 1)
+})
+
+test('an out-of-order create never replaces the newer agent', async () => {
+  let created = 0
+  const pending: ((agent: CursorAgent) => void)[] = []
+  const closed: string[] = []
+  const sends: string[] = []
+  const makeAgent = (name: string): CursorAgent => ({
+    async send() {
+      sends.push(name)
+      return {
+        async *stream() {
+          yield {
+            type: 'assistant',
+            message: { content: [{ type: 'text', text: name }] },
+          }
+        },
+        async wait() {
+          return { status: 'finished' }
+        },
+        async cancel() {},
+      }
+    },
+    close() {
+      closed.push(name)
+    },
+  })
+  const { gateway } = gatewayWith(() => makeAgent('unused'))
+  gateway.createAgent = () =>
+    new Promise<CursorAgent>((resolve) => {
+      created += 1
+      pending.push((agent) => resolve(agent))
+    })
+  const adapter = adapterOf(gateway)
+  const first = collect(
+    adapter,
+    request([{ role: 'user', content: [{ type: 'text', text: 'A' }] }], {
+      sessionId: 'order' as never,
+    }),
+  )
+  const second = collect(
+    adapter,
+    request([{ role: 'user', content: [{ type: 'text', text: 'B' }] }], {
+      sessionId: 'order' as never,
+    }),
+  )
+  await delay(20)
+  assert.equal(created, 2)
+  pending[1]!(makeAgent('B'))
+  await second
+  pending[0]!(makeAgent('A'))
+  await first
+  assert.deepEqual(closed, ['A'])
+  await collect(
+    adapter,
+    request(
+      [
+        {
+          role: 'user' as const,
+          content: [{ type: 'text' as const, text: 'B' }],
+        },
+        {
+          role: 'assistant' as const,
+          content: [{ type: 'text' as const, text: 'B' }],
+        },
+        {
+          role: 'user' as const,
+          content: [{ type: 'text' as const, text: 'C' }],
+        },
+      ],
+      { sessionId: 'order' as never },
+    ),
+  )
+  assert.deepEqual(sends, ['B', 'B'])
+})
+
+test('a catalog refresh withdraws a learned tier from reuse', async () => {
+  const contexts: (string | undefined)[] = []
+  let sends = 0
+  const agent = (): CursorAgent => ({
+    async send() {
+      sends += 1
+      return {
+        async *stream() {
+          yield {
+            type: 'assistant',
+            message: { content: [{ type: 'text', text: 'ok' }] },
+          }
+        },
+        async wait() {
+          return { status: 'finished' }
+        },
+        async cancel() {},
+      }
+    },
+    close() {},
+  })
+  const gateway: CursorGateway = {
+    async createAgent(options) {
+      const context = (
+        options.model as
+          { params?: readonly { id: string; value: string }[] } | undefined
+      )?.params?.find((param) => param.id === 'context')?.value
+      contexts.push(context)
+      if (context === '1m') {
+        throw new Error('invalid parameters for registry model claude')
+      }
+      return agent()
+    },
+    async deleteAgent() {},
+    async listModels() {
+      return []
+    },
+  }
+  const runtime = new CursorRuntime({
+    gateway,
+    apiKey: async () => 'crsr_key',
+    cwd: () => '/tmp',
+    contextPreference: () => 'max',
+    keyRef: 'CURSOR_API_KEY',
+  })
+  const catalog = (values: string[]) => ({
+    id: 'claude-sonnet-5-5',
+    displayName: 'Claude',
+    parameters: [{ id: 'context', values: values.map((value) => ({ value })) }],
+  })
+  const drive = async (
+    model: ReturnType<typeof catalog>,
+    text: string,
+    sessionId: string,
+  ) => {
+    const queue = new ChunkQueue()
+    const reply = new Reply(queue)
+    void runtime.runTurn({
+      model,
+      transcript: {
+        systemPrompt: '',
+        tools: [],
+        messages: [{ role: 'user', content: [{ type: 'text', text }] }],
+      },
+      reply,
+      sessionId,
+    } as never)
+    for await (const _chunk of queue) {
+      // drain
+    }
+  }
+  await drive(catalog(['1m', '200k']), 'one', 'catalog')
+  await drive(catalog(['1m']), 'two', 'catalog')
+  assert.deepEqual(contexts, ['1m', '200k', '1m'])
+  assert.equal(sends, 1, 'the retired-tier agent is not reused')
 })
