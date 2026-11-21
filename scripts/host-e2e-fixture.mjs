@@ -321,6 +321,8 @@ export const EXPECTED_REFUSALS = [
   'https://ollama.com/api/show',
   // The Cursor SDK's model catalog is not part of the fixture: the plugin
   // falls back to its built-in list, and the quota RPCs above stay exact.
-  'https://api2.cursor.sh/',
-  'https://api.cursor.com/',
+  // Both refusals are exact strings: the client's catalog URL and the
+  // socket-level connection the SDK opens for it.
+  'https://api.cursor.com/v1/models',
+  'api2.cursor.sh:443',
 ]

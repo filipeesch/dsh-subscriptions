@@ -47,8 +47,9 @@ test('a money window states used, ceiling, remaining, and reset', () => {
   assert.equal(hasMoney(window), true)
   const text = windowTooltip(window, t)
   assert.match(text, /537[.,]13/)
-  assert.match(text, /2\s?500[.,]00/)
-  assert.match(text, /1\s?962[.,]87/)
+  // Grouped and ungrouped formats both name the same amount.
+  assert.match(text, /2[.,\s]?500[.,]00/)
+  assert.match(text, /1[.,\s]?962[.,]87/)
   assert.match(text, /resets/)
 })
 
