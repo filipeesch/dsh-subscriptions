@@ -14,6 +14,7 @@ import {
 import { UsageMeter } from './UsageMeter.js'
 import { quotaText, useQuotaClock } from './quota-display.js'
 import { formatMoney } from './money-format.js'
+import { CursorModelsManager } from './CursorModelsManager.js'
 
 type Translate = SubscriptionsSectionInjected['t']
 
@@ -24,6 +25,91 @@ export interface CursorSettingsView {
   context: string
   ceilingUSD?: number
   models?: number
+  /** Whether the published-capacity source may fetch. */
+  publishedContext?: boolean
+  /** The source's state, for the status line. */
+  knownContext?: { enabled: boolean; fetchedAt?: number }
+}
+
+/** What one manual refresh reported. */
+interface CursorRefreshOutcome {
+  enabled: boolean
+  status: 'refreshed' | 'failed' | 'unavailable'
+  fetchedAt?: number
+  reason?: string
+  windows?: number
+}
+
+/** A date the current UI language can read unambiguously. */
+export function formatRefreshTime(fetchedAt: number, locale?: string): string {
+  const language =
+    locale ??
+    (typeof navigator === 'undefined' ? 'en' : navigator.language) ??
+    'en'
+  try {
+    return new Intl.DateTimeFormat(language, {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    }).format(fetchedAt)
+  } catch {
+    return new Date(fetchedAt).toISOString()
+  }
+}
+
+/**
+ * The published-capacity source's status: whether it is on, when it last
+ * refreshed, and the two controls. Presentational, so a test can render it
+ * without a host.
+ */
+export function CursorSourceStatus({
+  t,
+  enabled,
+  fetchedAt,
+  busy,
+  onRefresh,
+  onToggle,
+  locale,
+}: {
+  t: Translate
+  enabled: boolean
+  fetchedAt?: number
+  busy: boolean
+  onRefresh: () => void
+  onToggle: (enabled: boolean) => void
+  /** Locale for the timestamp; defaults to the browser's. */
+  locale?: string
+}) {
+  const when =
+    fetchedAt === undefined
+      ? t('cursorSourceNever')
+      : t('cursorSourceUpdated', {
+          date: formatRefreshTime(fetchedAt, locale),
+        })
+  return (
+    <div style={{ display: 'grid', gap: 4 }}>
+      <p style={styles.status} role="status">
+        {enabled ? t('cursorSourceOn') : t('cursorSourceOff')} · {when}
+      </p>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+        <button
+          type="button"
+          style={styles.button}
+          disabled={busy || !enabled}
+          onClick={onRefresh}
+        >
+          {t('cursorSourceRefresh')}
+        </button>
+        <button
+          type="button"
+          style={styles.button}
+          disabled={busy}
+          onClick={() => onToggle(!enabled)}
+        >
+          {enabled ? t('cursorSourceDisable') : t('cursorSourceEnable')}
+        </button>
+      </div>
+    </div>
+  )
 }
 
 function message(error: unknown): string {
@@ -55,6 +141,10 @@ export function CursorCard({
   const [ceiling, setCeiling] = useState('')
   const [saveError, setSaveError] = useState<string>()
   const [saved, setSaved] = useState(false)
+  const [manage, setManage] = useState(false)
+  const [sourceBusy, setSourceBusy] = useState(false)
+  const [sourceError, setSourceError] = useState<string>()
+  const [sourceNotice, setSourceNotice] = useState<string>()
 
   const refreshUsage = useCallback(async () => {
     setLoading(true)
@@ -129,6 +219,93 @@ export function CursorCard({
     }
   }
 
+  const setPublished = async (enabled: boolean): Promise<void> => {
+    setSourceBusy(true)
+    setSourceError(undefined)
+    setSourceNotice(undefined)
+    try {
+      await callSubscriptionsAuth(rpc, 'cursorSetSettings', {
+        settings: { publishedContext: enabled },
+      })
+      await refreshStatus()
+    } catch (failure) {
+      setSourceError(
+        t('cursorSourceToggleFailed', { message: message(failure) }),
+      )
+    } finally {
+      setSourceBusy(false)
+    }
+  }
+
+  const refreshSource = async (): Promise<void> => {
+    setSourceBusy(true)
+    setSourceError(undefined)
+    setSourceNotice(undefined)
+    try {
+      const outcome = await callSubscriptionsAuth<CursorRefreshOutcome>(
+        rpc,
+        'cursorRefreshContext',
+        {},
+      )
+      if (outcome.status === 'refreshed') {
+        // The response is the new state; no second settings round trip.
+        setView((current) =>
+          current === undefined
+            ? current
+            : {
+                ...current,
+                publishedContext: outcome.enabled,
+                knownContext: {
+                  enabled: outcome.enabled,
+                  ...(outcome.fetchedAt === undefined
+                    ? {}
+                    : { fetchedAt: outcome.fetchedAt }),
+                },
+              },
+        )
+        return
+      }
+      if (outcome.status === 'failed') {
+        setSourceError(
+          t(
+            outcome.fetchedAt === undefined
+              ? 'cursorSourceRefreshFailedNoCache'
+              : 'cursorSourceRefreshFailedRetained',
+            { message: outcome.reason ?? '' },
+          ),
+        )
+        const fetchedAt = outcome.fetchedAt
+        if (fetchedAt !== undefined) {
+          setView((current) =>
+            current === undefined
+              ? current
+              : {
+                  ...current,
+                  knownContext: { enabled: outcome.enabled, fetchedAt },
+                },
+          )
+        }
+        return
+      }
+      setSourceNotice(
+        outcome.reason === 'disabled'
+          ? t('cursorSourceDisabledRefresh')
+          : t('cursorSourceNoModels'),
+      )
+    } catch (failure) {
+      setSourceError(
+        t(
+          view?.knownContext?.fetchedAt === undefined
+            ? 'cursorSourceRefreshFailedNoCache'
+            : 'cursorSourceRefreshFailedRetained',
+          { message: message(failure) },
+        ),
+      )
+    } finally {
+      setSourceBusy(false)
+    }
+  }
+
   const reportedLimit = usage?.windows?.some(
     (window) => window.limitSource === 'provider',
   )
@@ -156,6 +333,32 @@ export function CursorCard({
       </p>
       {view !== undefined && (
         <p style={styles.status}>{t('cursorKeyRef', { ref: view.keyRef })}</p>
+      )}
+      {view !== undefined && (
+        <CursorSourceStatus
+          t={t}
+          enabled={view.publishedContext ?? true}
+          {...(view.knownContext?.fetchedAt === undefined
+            ? {}
+            : { fetchedAt: view.knownContext.fetchedAt })}
+          busy={sourceBusy}
+          onRefresh={() => {
+            void refreshSource()
+          }}
+          onToggle={(enabled) => {
+            void setPublished(enabled)
+          }}
+        />
+      )}
+      {sourceNotice !== undefined && (
+        <p style={styles.status} role="status">
+          {sourceNotice}
+        </p>
+      )}
+      {sourceError !== undefined && (
+        <p style={styles.error} role="alert">
+          {sourceError}
+        </p>
       )}
       {statusError !== undefined && (
         <p style={styles.error}>{t('usageError', { message: statusError })}</p>
@@ -235,6 +438,14 @@ export function CursorCard({
       )}
       {view !== undefined && (
         <div style={styles.actions}>
+          <button
+            type="button"
+            style={{ ...styles.button, fontWeight: 600 }}
+            aria-haspopup="dialog"
+            onClick={() => setManage(true)}
+          >
+            {t('cursorManage')}
+          </button>
           <label
             style={{
               ...styles.status,
@@ -283,6 +494,16 @@ export function CursorCard({
       )}
       {saveError !== undefined && <p style={styles.error}>{saveError}</p>}
       {saved && <p style={styles.status}>{t('cursorCeilingSaved')}</p>}
+      {manage && (
+        <CursorModelsManager
+          rpc={rpc}
+          t={t}
+          onClose={() => setManage(false)}
+          onSaved={() => {
+            void refreshStatus()
+          }}
+        />
+      )}
     </div>
   )
 }

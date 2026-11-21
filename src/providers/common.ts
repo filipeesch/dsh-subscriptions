@@ -863,18 +863,18 @@ export async function discoverAcrossAccounts(
 export const DISCOVERY_TTL_MS = 5 * 60_000
 
 /** A durable snapshot of one provider's discovered catalog. */
-export interface CatalogSnapshot {
+export interface CatalogSnapshot<Model = DiscoveredModel> {
   /** Epoch milliseconds of the successful fetch that produced it. */
   at: number
-  models: DiscoveredModel[]
+  models: Model[]
 }
 
 /** The durable half of a {@link ModelCatalogCache} (the models.json store). */
-export interface CatalogPersistence {
+export interface CatalogPersistence<Model = DiscoveredModel> {
   /** The last persisted snapshot, or undefined when absent or unusable. */
-  load(): Promise<CatalogSnapshot | undefined>
+  load(): Promise<CatalogSnapshot<Model> | undefined>
   /** Persist a fresh snapshot (write-through after every successful fetch). */
-  save(snapshot: CatalogSnapshot): Promise<void>
+  save(snapshot: CatalogSnapshot<Model>): Promise<void>
   /** Drop the persisted snapshot (a 401 proved the credential changed). */
   clear(): Promise<void>
 }
@@ -891,9 +891,9 @@ export interface CatalogPersistence {
  * last-known state across restarts and receives every successful fetch. A 401
  * that still fails after a forced token refresh must call {@link invalidate}.
  */
-export class ModelCatalogCache {
-  private entry: CatalogSnapshot | undefined
-  private inflight: Promise<DiscoveredModel[]> | undefined
+export class ModelCatalogCache<Model = DiscoveredModel> {
+  private entry: CatalogSnapshot<Model> | undefined
+  private inflight: Promise<Model[]> | undefined
   /** Settles once the persisted snapshot (when any) has been considered. */
   private seeded: Promise<void> | undefined
   /** Set by {@link invalidate} so an in-flight disk read cannot resurrect dropped state. */
@@ -902,7 +902,7 @@ export class ModelCatalogCache {
   private generation = 0
 
   constructor(
-    private readonly persistence?: CatalogPersistence,
+    private readonly persistence?: CatalogPersistence<Model>,
     private readonly ttlMs = DISCOVERY_TTL_MS,
   ) {}
 
@@ -910,7 +910,7 @@ export class ModelCatalogCache {
    * The cached catalog when fresh, without fetching.
    * @returns the cached models, or `undefined` when absent or stale.
    */
-  cached(): readonly DiscoveredModel[] | undefined {
+  cached(): readonly Model[] | undefined {
     if (this.entry === undefined || Date.now() - this.entry.at >= this.ttlMs)
       return undefined
     return this.entry.models
@@ -921,8 +921,13 @@ export class ModelCatalogCache {
    * capability metadata forward when a later fetch cannot re-enrich.
    * @returns the last-known models, or `undefined` when nothing has been stored.
    */
-  lastKnown(): readonly DiscoveredModel[] | undefined {
+  lastKnown(): readonly Model[] | undefined {
     return this.entry?.models
+  }
+
+  /** Settle the one-time persisted-snapshot read, so last-known checks see it. */
+  async ready(): Promise<void> {
+    await this.ensureSeeded()
   }
 
   /** Load the persisted snapshot once; a fetch or invalidate that landed first wins. */
@@ -944,15 +949,13 @@ export class ModelCatalogCache {
   }
 
   /** Run (or join) the single in-flight fetch, updating memory and disk on success. */
-  private refresh(
-    fetcher: () => Promise<DiscoveredModel[]>,
-  ): Promise<DiscoveredModel[]> {
+  private refresh(fetcher: () => Promise<Model[]>): Promise<Model[]> {
     if (this.inflight !== undefined) return this.inflight
     const gen = this.generation
     const pending = fetcher()
       .then((models) => {
         if (this.generation !== gen) return models
-        const snapshot: CatalogSnapshot = { at: Date.now(), models }
+        const snapshot: CatalogSnapshot<Model> = { at: Date.now(), models }
         this.entry = snapshot
         // Write-through is fire-and-forget: a failed save only costs durability.
         void this.persistence?.save(snapshot).catch(() => undefined)
@@ -971,11 +974,21 @@ export class ModelCatalogCache {
    * @returns the discovered models.
    * @throws the fetcher's failure (the `listModels` caller warns and falls back).
    */
-  async get(
-    fetcher: () => Promise<DiscoveredModel[]>,
-  ): Promise<readonly DiscoveredModel[]> {
+  async get(fetcher: () => Promise<Model[]>): Promise<readonly Model[]> {
     await this.ensureSeeded()
     return this.cached() ?? this.refresh(fetcher)
+  }
+
+  /**
+   * Refresh now regardless of the TTL, joining an in-flight fetch. A manager's
+   * explicit Reload uses this; ordinary reads keep the TTL.
+   * @param fetcher - performs the provider's model-list request.
+   * @returns the discovered models.
+   * @throws the fetcher's failure.
+   */
+  async force(fetcher: () => Promise<Model[]>): Promise<readonly Model[]> {
+    await this.ensureSeeded()
+    return this.refresh(fetcher)
   }
 
   /**
@@ -988,19 +1001,24 @@ export class ModelCatalogCache {
    *   falls back to its static metadata). Never throws.
    */
   async resolve(
-    fetcher: () => Promise<DiscoveredModel[]>,
-  ): Promise<readonly DiscoveredModel[] | undefined> {
+    fetcher: () => Promise<Model[]>,
+    onRefreshed?: (models: readonly Model[]) => void,
+  ): Promise<readonly Model[] | undefined> {
     await this.ensureSeeded()
     const fresh = this.cached()
     if (fresh !== undefined) return fresh
     const known = this.entry?.models
     if (known !== undefined) {
       // Stale-while-revalidate: the refresh outcome serves the NEXT resolve.
-      this.refresh(fetcher).catch(() => undefined)
+      this.refresh(fetcher)
+        .then((models) => onRefreshed?.(models))
+        .catch(() => undefined)
       return known
     }
     try {
-      return await this.refresh(fetcher)
+      const models = await this.refresh(fetcher)
+      onRefreshed?.(models)
+      return models
     } catch {
       return undefined
     }

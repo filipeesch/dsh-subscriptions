@@ -24,14 +24,18 @@
  */
 
 import {
+  resolveModelId,
+  type CursorCatalogModel,
+  type CursorParam,
+} from './catalog.js'
+import {
+  contextTierValue,
   isRejectedParams,
   modelParams,
   offeredContextValues,
-  resolveModelId,
+  offeredTierValue,
   smallerContext,
-  type CursorCatalogModel,
-  type CursorParam,
-} from './models.js'
+} from './params.js'
 import {
   estimateTranscript,
   fingerprint,
@@ -366,8 +370,18 @@ export interface CursorRuntimeOptions {
   apiKey: () => Promise<string | undefined>
   /** Working directory for agents of one session. */
   cwd: (sessionId: string | undefined) => string
-  /** Context tier preference (`max` by default). */
-  contextPreference: () => string
+  /** Context tier preference for one model (`max` by default). */
+  contextPreference: (modelId: string) => string
+  /** The tier Cursor accepted for this model and preference, when one is remembered. */
+  acceptedTier?: (modelId: string, preference: string) => string | undefined
+  /** Remember a tier Cursor accepted after a rejection. */
+  rememberAcceptedTier?: (
+    modelId: string,
+    value: string,
+    preference: string,
+  ) => void
+  /** Drop a remembered tier that no longer applies. */
+  forgetAcceptedTier?: (modelId: string) => void
   /** Credential reference named in a missing-key diagnostic. */
   keyRef: string
   /** Diagnostics sink for runs that fail in the background. */
@@ -405,7 +419,6 @@ export interface TurnReservation {
 export class CursorRuntime {
   private readonly sessions = new Map<string, CursorSession[]>()
   private readonly overhead = new Map<string, number>()
-  private readonly workingContext = new Map<string, string>()
   /** Newest turn per session key; an older create must not publish. */
   private readonly keyGeneration = new Map<string, number>()
   /** Cancels the work of a turn a newer one superseded. */
@@ -644,27 +657,39 @@ export class CursorRuntime {
     }
     const modelId = resolveModelId(options.model.id)
 
+    const preference = this.options.contextPreference(modelId)
     const requestedParams = modelParams(
       options.model,
       options.reasoning,
-      this.options.contextPreference(),
+      preference,
     )
-    let params = requestedParams
-    // A learned tier belongs to this credential and configured preference,
-    // and is usable only while the catalog still offers it.
-    const tierKey = [
-      modelId,
-      hash(apiKey),
-      this.options.contextPreference(),
-    ].join('|')
+    // One effective tier decides both the request and the agent's request key.
+    // A remembered tier belongs to this preference and is usable only while the
+    // catalog still offers it; a changed preference or a withdrawn tier falls
+    // back to the configured one and is forgotten.
     const offered = offeredContextValues(options.model)
-    const known = this.workingContext.get(tierKey)
-    if (known !== undefined && offered.includes(known)) {
-      params = params?.map((param) =>
-        param.id === 'context' ? { id: param.id, value: known } : param,
-      )
-    } else if (known !== undefined) {
-      this.workingContext.delete(tierKey)
+    const remembered = this.options.acceptedTier?.(modelId, preference)
+    const accepted =
+      remembered === undefined
+        ? undefined
+        : offeredTierValue(options.model, remembered)
+    if (remembered !== undefined && accepted === undefined) {
+      this.options.forgetAcceptedTier?.(modelId)
+    }
+    const requestTier =
+      accepted ??
+      (offered.length > 0
+        ? contextTierValue(options.model, undefined, preference)
+        : undefined)
+    let params = requestedParams
+    if (params !== undefined && requestTier !== undefined) {
+      params = params.some((param) => param.id === 'context')
+        ? params.map((param) =>
+            param.id === 'context'
+              ? { id: param.id, value: requestTier }
+              : param,
+          )
+        : [...params, { id: 'context', value: requestTier }]
     }
     const credentialId = hash(apiKey)
 
@@ -744,7 +769,7 @@ export class CursorRuntime {
           entry.params!.find((param) => param.id === 'context')!.value,
         ))
     const candidates = (this.sessions.get(sessionKey) ?? []).filter(usable)
-    const requestKey = requestKeyOf(modelId, requestedParams, credentialId)
+    const requestKey = requestKeyOf(modelId, params, credentialId)
     session = candidates.find((entry) => entry.requestKey === requestKey)
     let plan = planIncrement(session, messages)
     if (session === undefined) {
@@ -791,8 +816,7 @@ export class CursorRuntime {
           this.open(
             sessionKey,
             modelId,
-            requestedParams,
-            effective,
+            effective ?? params,
             transcript,
             apiKey,
             options.sessionId,
@@ -960,8 +984,9 @@ export class CursorRuntime {
           // Only a fallback that proved necessary is learned: a concurrent run
           // on the configured tier must not undo it.
           const tier = session.params?.find((param) => param.id === 'context')
-          if (tier && session.fellBack)
-            this.workingContext.set(tierKey, tier.value)
+          if (tier && session.fellBack) {
+            this.options.rememberAcceptedTier?.(modelId, tier.value, preference)
+          }
           reply.usage = runUsage(
             result?.usage,
             session.modelCalls,
@@ -1115,7 +1140,6 @@ export class CursorRuntime {
   private async open(
     key: string,
     modelId: string,
-    requested: CursorParam[] | undefined,
     params: CursorParam[] | undefined,
     transcript: CursorTranscript,
     apiKey: string,
@@ -1131,7 +1155,7 @@ export class CursorRuntime {
       params,
       modelId,
       credentialId,
-      requestKeyOf(modelId, requested, credentialId),
+      requestKeyOf(modelId, params, credentialId),
     )
     session.onIdle = (idle) => this.drop(idle)
     session.systemPrompt = transcript.systemPrompt

@@ -53,8 +53,15 @@ async function mount(
   credentials?: Pick<CredentialProvider, 'resolve'>,
 ): Promise<FakeConnectionHandler> {
   const ctx = new Context()
+  // Capture route re-announcements, the host's signal to re-list models.
+  const replacedRoutes: string[][] = []
   ctx.provide('llm', {
-    registerAdapter: () => Object.assign(() => {}, { replace: () => {} }),
+    registerAdapter: () =>
+      Object.assign(() => {}, {
+        replace: (routes: string[]) => {
+          replacedRoutes.push(routes)
+        },
+      }),
   })
   const fake = createFakeConnection()
   ctx.provide('connection', fake.connection)
@@ -67,6 +74,8 @@ async function mount(
   ctx.plugin(plugin, { providers: ['codex'], codexClientVersion: '0.153.4' })
   await new Promise((resolve) => setTimeout(resolve, 50))
   assert.ok(fake.registered(), 'the subscriptions-auth routes were registered')
+  ;(fake.handler as unknown as { replacedRoutes: string[][] }).replacedRoutes =
+    replacedRoutes
   return fake.handler
 }
 
@@ -111,13 +120,14 @@ test('removed Cursor and proxy RPC endpoints have no routes', async () => {
   const handler = await mount()
   const signal = new AbortController().signal
   for (const endpoint of [
+    // The old standalone plugin's account endpoints stay gone; the settings
+    // card instead serves cursorModels, cursorSetSettings, and
+    // cursorRefreshContext.
     'cursorStatus',
     'cursorLogin',
     'cursorCancel',
     'cursorLogout',
     'cursorUsage',
-    'cursorModels',
-    'cursorSetSettings',
     'proxyGet',
     'proxySet',
     'proxyTest',
@@ -396,4 +406,96 @@ test('the Cursor card reads settings and validates the ceiling payload', async (
     cleared.ok && (cleared.value as { ceilingUSD?: number }).ceilingUSD,
     undefined,
   )
+})
+
+test('the Cursor model manager reads rows and validates its writes', async () => {
+  // The Cursor route registers only when credentials exist; the handler needs
+  // the retained registration handle to observe the picker notification.
+  const handler = await mount(undefined, { resolve: async () => undefined })
+  const signal = new AbortController().signal
+  const models = await handler('cursorModels', {}, signal)
+  assert.equal(models.ok, true)
+  if (models.ok) {
+    const value = models.value as {
+      provider: string
+      context: string
+      models: unknown[]
+      knownContext: { enabled: boolean }
+    }
+    assert.equal(value.provider, 'cursor')
+    assert.equal(value.context, 'max')
+    assert.deepEqual(value.models, [])
+    assert.equal(value.knownContext.enabled, true)
+  }
+  // The force flag is a boolean when present.
+  const malformed = await handler('cursorModels', { force: 'yes' }, signal)
+  assert.equal(malformed.ok, false)
+  if (!malformed.ok) assert.equal(malformed.error.code, 'bad-request')
+  // A settings write needs an object.
+  for (const payload of [
+    null,
+    {},
+    { settings: null },
+    { settings: [] },
+    { settings: 'x' },
+  ]) {
+    const result = await handler('cursorSetSettings', payload, signal)
+    assert.equal(result.ok, false, JSON.stringify(payload))
+  }
+  const saved = await handler(
+    'cursorSetSettings',
+    {
+      settings: {
+        publishedContext: false,
+        models: { 'composer-2': { contextWindow: 200_000 } },
+      },
+    },
+    signal,
+  )
+  assert.equal(saved.ok, true)
+  const after = await handler('cursorSettings', {}, signal)
+  assert.equal(
+    after.ok && (after.value as { publishedContext: boolean }).publishedContext,
+    false,
+  )
+  // Refreshing with a disabled source reports why it did not run.
+  const status = await handler('cursorRefreshContext', {}, signal)
+  assert.equal(status.ok, true)
+  if (status.ok) {
+    const value = status.value as {
+      enabled: boolean
+      status: string
+      reason?: string
+    }
+    assert.equal(value.enabled, false)
+    assert.equal(value.status, 'unavailable')
+    assert.equal(value.reason, 'disabled')
+  }
+  const replaces = (handler as unknown as { replacedRoutes: string[][] })
+    .replacedRoutes
+  const beforeInvalid = replaces.length
+  // An invalid field is a bad request that names the field, not an internal error.
+  const invalid = await handler(
+    'cursorSetSettings',
+    { settings: { models: { m: { contextWindow: -1 } } } },
+    signal,
+  )
+  assert.equal(invalid.ok, false)
+  assert.equal(replaces.length, beforeInvalid, 'a refused save is silent')
+  // A successful save re-announces the route so a loaded picker re-lists.
+  const beforeSave = replaces.length
+  const savedModels = await handler(
+    'cursorSetSettings',
+    { settings: { models: { 'claude-sonnet-5-5': { enabled: false } } } },
+    signal,
+  )
+  assert.equal(savedModels.ok, true)
+  assert.ok(
+    replaces.length > beforeSave && replaces.at(-1)?.includes('cursor'),
+    'the Cursor route was re-announced after this save',
+  )
+  if (!invalid.ok) {
+    assert.equal(invalid.error.code, 'bad-request')
+    assert.match(invalid.error.message, /contextWindow/)
+  }
 })

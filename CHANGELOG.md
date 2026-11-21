@@ -1,3 +1,21 @@
+## v0.5.0 — 2026-11-21
+
+- **Cursor context capacity.** The route resolves its advertised window from the
+  effective context tier, then the capacity the public models.dev catalog
+  publishes (a third-party estimate), then a manual value, then 200 000 tokens.
+  The projection, the last catalog, the accepted tier, and per-model settings
+  are stored under the DSH home. Models Cursor lists without a tier now
+  advertise the capacity the provider or the public catalog states instead of
+  the generic default, and a tier Cursor accepted after a rejection is announced
+  while the catalog still offers it.
+- **Cursor model manager.** The Cursor card gains a **Manage models** dialog
+  (enablement, context tier, manual window, and the resolved source), a
+  published-source status line with an explicit refresh outcome, and an on/off
+  switch that stops cached capacities from being served. Configuration gains
+  `contextWindows`, `models`, and `publishedContext`.
+- **Shared state helpers.** A shared atomic JSON writer now backs the Cursor
+  settings and catalog stores, and the model catalog cache is generic.
+
 ## v0.4.0 — 2026-11-21
 
 - **Cursor route.** The `cursor` route adds Cursor's models to the picker over

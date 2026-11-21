@@ -12,17 +12,15 @@
  * throw on every call, which is worse than having no fallback at all.
  */
 
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { dirname, resolve } from 'node:path'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { ProviderId } from '../auth/store.js'
+import { loadJsonFile, serializeWrites, writeJsonFile } from '../json-file.js'
 import type {
   CatalogPersistence,
   CatalogSnapshot,
   DiscoveredModel,
 } from './common.js'
-import { parseJsonText } from '../json-text.js'
 
 /**
  * Absolute path of the catalog store file.
@@ -213,105 +211,18 @@ export function sanitizeSnapshot(value: unknown): CatalogSnapshot | undefined {
   return { at: raw.at, models }
 }
 
-/** Read the whole file; missing or unparsable reads as an empty cache. */
+/** Read the whole file; missing, unreadable, or unparsable reads as an empty cache. */
 async function readCatalogFile(path: string): Promise<CatalogFile> {
-  let text: string
-  try {
-    text = await readFile(path, 'utf8')
-  } catch {
-    return {}
-  }
-  try {
-    // A leading BOM must not hide a hand-edited cache behind the static catalog.
-    const parsed: unknown = parseJsonText(text)
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))
-      return {}
-    return parsed as CatalogFile
-  } catch {
-    return {}
-  }
-}
-
-/**
- * Windows refuses to replace a file another handle holds open without
- * `FILE_SHARE_DELETE` (an indexer, antivirus scan, or a second dsh profile
- * reading the cache), surfacing as a transient `EPERM`/`EBUSY`/`EACCES` on
- * `rename` (V1ki/dsh-plugin-subscriptions#129). On Windows only, retry
- * briefly before giving the write up: on POSIX those codes are real
- * failures, so retrying would only delay surfacing them.
- */
-const RENAME_RETRY_CODES: ReadonlySet<string> = new Set([
-  'EPERM',
-  'EBUSY',
-  'EACCES',
-])
-const RENAME_RETRIES = 5
-const RENAME_RETRY_DELAY_MS = 20
-
-/** `rename` with a short bounded retry on Windows share-mode conflicts. */
-async function renameWithRetry(from: string, to: string): Promise<void> {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      await rename(from, to)
-      return
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code
-      if (
-        process.platform !== 'win32' ||
-        attempt >= RENAME_RETRIES ||
-        code === undefined ||
-        !RENAME_RETRY_CODES.has(code)
-      )
-        throw error
-      await new Promise((resolve) =>
-        setTimeout(resolve, RENAME_RETRY_DELAY_MS * (attempt + 1)),
-      )
-    }
-  }
-}
-
-/** Persist the whole file atomically (tmp file + rename). */
-async function writeCatalogFile(
-  store: CatalogFile,
-  path: string,
-): Promise<void> {
-  await mkdir(dirname(path), { recursive: true })
-  const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2)}`
-  try {
-    await writeFile(tmp, JSON.stringify(store, null, 2))
-    await renameWithRetry(tmp, path)
-  } catch (error) {
-    await rm(tmp, { force: true })
-    throw error
-  }
-}
-
-/**
- * Like the auth store, mutations of one resolved path share an in-process
- * write chain in call order. Each reads after the preceding mutation settles;
- * a failure rejects its caller without blocking later mutations. Idle chains
- * are removed. Separate processes (or filesystem aliases of a path) are not
- * locked and remain last-writer-wins.
- */
-const writeChains = new Map<string, Promise<unknown>>()
-
-async function serialize<T>(
-  path: string,
-  action: () => Promise<T>,
-): Promise<T> {
-  const key = resolve(path)
-  const previous = writeChains.get(key) ?? Promise.resolve()
-  const next = previous.then(action, action)
-  const tail = next.then(
-    () => undefined,
-    () => undefined,
+  const loaded = await loadJsonFile(path)
+  if (loaded.kind !== 'value') return {}
+  // A leading BOM must not hide a hand-edited cache behind the static catalog.
+  if (
+    typeof loaded.value !== 'object' ||
+    loaded.value === null ||
+    Array.isArray(loaded.value)
   )
-  writeChains.set(key, tail)
-  try {
-    return await next
-  } finally {
-    if (writeChains.get(key) === tail) writeChains.delete(key)
-  }
+    return {}
+  return loaded.value as CatalogFile
 }
 
 /**
@@ -331,18 +242,18 @@ export function catalogStore(
       return sanitizeSnapshot((await readCatalogFile(path))[provider])
     },
     async save(snapshot) {
-      return serialize(path, async () => {
+      return serializeWrites(path, async () => {
         const store = await readCatalogFile(path)
         store[provider] = snapshot
-        await writeCatalogFile(store, path)
+        await writeJsonFile(path, store)
       })
     },
     async clear() {
-      return serialize(path, async () => {
+      return serializeWrites(path, async () => {
         const store = await readCatalogFile(path)
         if (store[provider] === undefined) return
         delete store[provider]
-        await writeCatalogFile(store, path)
+        await writeJsonFile(path, store)
       })
     },
   }
@@ -372,7 +283,7 @@ export function accountCatalogStore(
         : undefined
     },
     async save(snapshot) {
-      return serialize(path, async () => {
+      return serializeWrites(path, async () => {
         const store = await readCatalogFile(path)
         const accounts =
           typeof store.accounts === 'object' &&
@@ -385,11 +296,11 @@ export function accountCatalogStore(
           [account]: snapshot,
         }
         store.accounts = { ...accounts, [provider]: section }
-        await writeCatalogFile(store, path)
+        await writeJsonFile(path, store)
       })
     },
     async clear() {
-      return serialize(path, async () => {
+      return serializeWrites(path, async () => {
         const store = await readCatalogFile(path)
         const section = accountSection(store, provider)
         if (section === undefined || !Object.hasOwn(section, account)) return
@@ -399,7 +310,7 @@ export function accountCatalogStore(
           ...(store.accounts as Record<string, unknown>),
           [provider]: rest,
         }
-        await writeCatalogFile(store, path)
+        await writeJsonFile(path, store)
       })
     },
   }

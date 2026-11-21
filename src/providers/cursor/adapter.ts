@@ -15,17 +15,27 @@ import type {
   LlmResolvedModelInfo,
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
-import { withTimeout, DISCOVERY_TIMEOUT_MS } from '../common.js'
 import {
-  CURSOR_ROUTE,
-  DEFAULT_CURSOR_API_KEY_REF,
-  DEFAULT_CURSOR_CONTEXT,
+  DISCOVERY_TIMEOUT_MS,
+  ModelCatalogCache,
+  withTimeout,
+  type CatalogPersistence,
+} from '../common.js'
+import {
   FALLBACK_MODELS,
-  contextWindowFor,
   modelNames,
-  reasoningInfo,
   type CursorCatalogModel,
-} from './models.js'
+} from './catalog.js'
+import { cursorCatalogStore } from './catalog-store.js'
+import { resolveContextWindow } from './context-window.js'
+import {
+  DEFAULT_CURSOR_CONTEXT,
+  contextTierValue,
+  offeredTierValue,
+  reasoningInfo,
+} from './params.js'
+import { catalogSignature } from './catalog.js'
+import { CURSOR_ROUTE, DEFAULT_CURSOR_API_KEY_REF } from './route.js'
 import type { Image } from './prompt.js'
 import { ChunkQueue, Reply } from './reply.js'
 import {
@@ -37,7 +47,6 @@ import {
 import { imageRefs, readRequest, type CursorImageRef } from './transcript.js'
 
 const CATALOG_TTL_MS = 10 * 60_000
-const CATALOG_RETRY_MS = 60_000
 /** Attachments are immutable, and every request carries the whole history: read each once. */
 const IMAGE_CACHE_SIZE = 64
 
@@ -49,8 +58,34 @@ export interface CursorAdapterOptions {
   apiKey: () => Promise<string | undefined>
   /** Working directory for one session's agent. */
   cwd: (sessionId: string | undefined) => string
-  /** Live context tier preference (default `max`). */
-  contextPreference?: () => string
+  /** Live context tier preference for one model (default `max`). */
+  contextPreference?: (modelId?: string) => string
+  /** Capacity the public catalog publishes for one model, when it describes it. */
+  publishedWindow?: (modelId: string) => number | undefined
+  /** Manual window for one model; settings already won over configuration. */
+  manualWindow?: (modelId: string) => number | undefined
+  /** The tier Cursor accepted for this model and preference, when remembered. */
+  acceptedTier?: (modelId: string, preference: string) => string | undefined
+  /** Remember a tier Cursor accepted after a rejection. */
+  rememberAcceptedTier?: (
+    modelId: string,
+    value: string,
+    preference: string,
+  ) => void
+  /**
+   * Drop a remembered tier that no longer applies. The expected record, when
+   * given, protects a newer concurrent record from a stale withdrawal.
+   */
+  forgetAcceptedTier?: (
+    modelId: string,
+    expected?: { value: string; preference: string },
+  ) => void
+  /** Whether a model appears in the picker; absent means enabled. */
+  enabled?: (modelId: string) => boolean
+  /** Called with the ids a successful live catalog read listed. */
+  onCatalog?: (ids: readonly string[]) => void
+  /** Called after new catalog metadata is installed, when it changed. */
+  onCatalogApplied?: (models: readonly CursorCatalogModel[]) => void
   /** Read one image attachment's bytes; absent means text-only. */
   readImage?: (
     ref: CursorImageRef,
@@ -64,19 +99,21 @@ export interface CursorAdapterOptions {
   prewarm?: boolean
   /** How long a reserved stream may wait before admission (tests shorten it). */
   reservationTtlMs?: number
-  /** Catalog cache lifetime for tests; defaults to the live/retry windows. */
+  /** Catalog cache lifetime for tests; defaults to ten minutes. */
   catalogTtlMs?: number
+  /** Catalog persistence for tests; defaults to the plugin's stored catalog. */
+  catalogPersistence?: CatalogPersistence<CursorCatalogModel>
 }
 
 export class CursorAdapter extends LlmAdapter {
   private readonly runtime: CursorRuntime
-  private catalog:
-    { models: CursorCatalogModel[]; live: boolean; at: number } | undefined
-  private loading: Promise<CursorCatalogModel[]> | undefined
-  private loadToken: object | undefined
-  /** Catalog loads waiting on the adapter lifetime; never accumulates. */
-  private disposalListeners = 0
+  /** Durable, stale-while-revalidate catalog; a restart seeds it from disk. */
+  private readonly catalog: ModelCatalogCache<CursorCatalogModel>
   private readonly images = new Map<string, Image>()
+  /** Whether the projected source has been told which ids the catalog lists. */
+  private seedNotified = false
+  /** Picker-facing metadata the host was last told about. */
+  private lastPickerSignature: string | undefined
 
   constructor(private readonly options: CursorAdapterOptions) {
     super()
@@ -84,14 +121,27 @@ export class CursorAdapter extends LlmAdapter {
       gateway: options.gateway,
       apiKey: options.apiKey,
       cwd: options.cwd,
-      contextPreference: () =>
-        options.contextPreference?.() ?? DEFAULT_CURSOR_CONTEXT,
+      contextPreference: (modelId) =>
+        options.contextPreference?.(modelId) ?? DEFAULT_CURSOR_CONTEXT,
+      ...(options.acceptedTier === undefined
+        ? {}
+        : { acceptedTier: options.acceptedTier }),
+      ...(options.rememberAcceptedTier === undefined
+        ? {}
+        : { rememberAcceptedTier: options.rememberAcceptedTier }),
+      ...(options.forgetAcceptedTier === undefined
+        ? {}
+        : { forgetAcceptedTier: options.forgetAcceptedTier }),
       keyRef: options.keyRef ?? DEFAULT_CURSOR_API_KEY_REF,
       ...(options.reservationTtlMs === undefined
         ? {}
         : { reservationTtlMs: options.reservationTtlMs }),
       ...(options.onWarn === undefined ? {} : { onWarn: options.onWarn }),
     })
+    this.catalog = new ModelCatalogCache(
+      options.catalogPersistence ?? cursorCatalogStore(),
+      options.catalogTtlMs ?? CATALOG_TTL_MS,
+    )
   }
 
   /** Aborts adapter setup too, not only the runtime's turns. */
@@ -110,7 +160,9 @@ export class CursorAdapter extends LlmAdapter {
   override async listModels(
     provider: string,
   ): Promise<readonly LlmModelInfo[]> {
-    const models = await this.models()
+    const models = (await this.models('list')).filter(
+      (model) => this.options.enabled?.(model.id) !== false,
+    )
     const names = modelNames(models)
     return models.map((model) => ({
       provider,
@@ -124,14 +176,14 @@ export class CursorAdapter extends LlmAdapter {
     provider: string,
     model: string,
   ): Promise<LlmResolvedModelInfo> {
-    const models = await this.models()
+    const models = await this.models('resolve')
     const entry = models.find((candidate) => candidate.id === model)
     const info: LlmResolvedModelInfo = {
       provider,
       id: model,
       name: modelNames(models).get(model) ?? model,
       inputModalities: this.modalities(),
-      context: { contextWindow: this.contextWindow(entry) },
+      context: { contextWindow: this.windowFor(model, entry).tokens },
       systemPromptUpdate: 'in-history',
     }
     const reasoning = reasoningInfo(entry)
@@ -237,7 +289,10 @@ export class CursorAdapter extends LlmAdapter {
         })
       }
     })
-    const setup = Promise.all([this.models(), this.loadImages(options, signal)])
+    const setup = Promise.all([
+      this.models('resolve'),
+      this.loadImages(options, signal),
+    ])
     const first = await Promise.race([setup, cancelled])
     if (first === 'aborted') {
       const queue = new ChunkQueue()
@@ -285,9 +340,66 @@ export class CursorAdapter extends LlmAdapter {
     }
   }
 
-  /** The catalog size when one is already loaded; never triggers an SDK read. */
-  cachedModelCount(): number | undefined {
-    return this.catalog?.models.length
+  /**
+   * The catalog for display. Awaits the stored seed and falls back to the
+   * built-in list, so the manager is never empty while the picker is usable.
+   * Never triggers an SDK read.
+   */
+  async catalogSnapshot(): Promise<readonly CursorCatalogModel[]> {
+    if (this.lifetime.signal.aborted) return this.catalog.lastKnown() ?? []
+    const apiKey = await this.options.apiKey()
+    // A stored catalog is not served without a credential, same as the picker.
+    if (!apiKey) return []
+    await this.catalog.ready()
+    this.publishKnownIds()
+    return this.catalog.cached() ?? this.catalog.lastKnown() ?? FALLBACK_MODELS
+  }
+
+  /**
+   * Reload the catalog now, bypassing the TTL (the model manager's Reload).
+   * @returns the models; a disposed adapter or missing key reads as empty.
+   * @throws when the SDK read fails, so the caller can state the failure
+   *   instead of showing a stale catalog as a successful reload.
+   */
+  async refreshCatalog(): Promise<readonly CursorCatalogModel[]> {
+    if (this.lifetime.signal.aborted) return this.catalog.lastKnown() ?? []
+    const apiKey = await this.options.apiKey()
+    if (!apiKey) return []
+    try {
+      const models = await this.catalog.force(() => this.fetchCatalog(apiKey))
+      // The cache now holds the new entry; only then is a re-list useful.
+      this.catalogApplied(models)
+      return models
+    } catch (error) {
+      this.options.onWarn?.(
+        `Cursor catalog failed: ${safeError(error, 'list the models')}`,
+      )
+      throw error
+    }
+  }
+
+  /**
+   * Revalidate a stored catalog in the background at plugin start: its ids are
+   * published to the public projection, and the SDK is consulted even when the
+   * stored document is still inside its TTL. A missing key or an absent stored
+   * catalog does nothing.
+   */
+  async revalidateCatalog(): Promise<void> {
+    // A background call has no caller to absorb a rejection: the credential
+    // read, the seed read, and the SDK read all stay inside this guard.
+    try {
+      if (this.lifetime.signal.aborted) return
+      const apiKey = await this.options.apiKey()
+      if (!apiKey) return
+      await this.catalog.ready()
+      if (this.catalog.lastKnown() === undefined) return
+      this.publishKnownIds()
+      await this.refreshCatalog()
+    } catch (error) {
+      this.options.onWarn?.(
+        `Cursor catalog revalidation failed: ${safeError(error, 'read the catalog')}`,
+      )
+    }
   }
 
   /** One-shot helper used by tests and diagnostics: the run handle is not exposed. */
@@ -295,11 +407,19 @@ export class CursorAdapter extends LlmAdapter {
     return this.options.readImage === undefined ? ['text'] : ['text', 'image']
   }
 
-  private contextWindow(entry: CursorCatalogModel | undefined): number {
-    return contextWindowFor(
-      entry,
-      this.options.contextPreference?.() ?? DEFAULT_CURSOR_CONTEXT,
-    )
+  private windowFor(modelId: string, entry: CursorCatalogModel | undefined) {
+    const preference =
+      this.options.contextPreference?.(modelId) ?? DEFAULT_CURSOR_CONTEXT
+    return resolveContextWindow({
+      model: entry,
+      tier: contextTierValue(
+        entry,
+        this.options.acceptedTier?.(modelId, preference),
+        preference,
+      ),
+      publishedWindow: this.options.publishedWindow?.(modelId),
+      manualWindow: this.options.manualWindow?.(modelId),
+    })
   }
 
   private async loadImages(
@@ -335,107 +455,154 @@ export class CursorAdapter extends LlmAdapter {
     return out
   }
 
-  private async models(): Promise<CursorCatalogModel[]> {
+  /**
+   * The catalog for one call. A list read waits for freshness; a request read
+   * serves the last known catalog while a stale entry refreshes in the
+   * background, so a turn never waits on the catalog network.
+   * @param mode - `list` for the picker, `resolve` for a request or resolution.
+   * @returns the models to serve.
+   */
+  private async models(
+    mode: 'list' | 'resolve',
+  ): Promise<readonly CursorCatalogModel[]> {
     // A disposed adapter must not wait on discovery or read a credential.
-    if (this.lifetime.signal.aborted) return this.catalog?.models ?? []
-    const cached = this.catalog
-    const ttl = this.options.catalogTtlMs
-    if (
-      cached &&
-      Date.now() - cached.at <
-        (ttl ?? (cached.live ? CATALOG_TTL_MS : CATALOG_RETRY_MS))
-    ) {
-      return cached.models
-    }
-    // Discovery belongs to the adapter, not to whichever caller happened to
-    // start it: one caller's cancellation must not fail another's wait. The
-    // disposal race lives on the shared load, so completed reads leave no
-    // pending handlers behind.
-    return this.loading ?? this.startLoad()
-  }
-
-  /** Catalog waits still attached to the adapter lifetime; a test hook. */
-  pendingCatalogWaits(): number {
-    return this.disposalListeners
-  }
-
-  private startLoad(): Promise<CursorCatalogModel[]> {
-    const token = {}
-    this.loadToken = token
+    if (this.lifetime.signal.aborted) return this.catalog.lastKnown() ?? []
+    const apiKey = await this.options.apiKey()
+    // No key means logged out: advertise nothing so the picker hides the route.
+    if (!apiKey) return []
+    await this.catalog.ready()
+    this.publishKnownIds()
+    const fetcher = () => this.fetchCatalog(apiKey)
+    const pending =
+      mode === 'resolve'
+        ? this.catalog
+            .resolve(fetcher, (models) => this.catalogApplied(models))
+            .then((models) => models ?? FALLBACK_MODELS)
+        : this.listFromCatalog(fetcher)
+    // Disposal settles a pending read instead of waiting for the network; the
+    // fetch itself finishes in the background and only writes memory.
     const listener = new AbortController()
-    let fired = false
-    const loading = Promise.race([
-      this.load(token),
-      new Promise<CursorCatalogModel[]>((resolve) => {
-        if (this.lifetime.signal.aborted) {
-          fired = true
-          resolve(this.catalog?.models ?? [])
-          return
-        }
-        this.disposalListeners += 1
-        this.lifetime.signal.addEventListener(
-          'abort',
-          () => {
-            fired = true
-            this.disposalListeners -= 1
-            resolve(this.catalog?.models ?? [])
-          },
-          { once: true, signal: listener.signal },
-        )
-      }),
-    ]).finally(() => {
-      // Drop the listener as soon as the load settles, whichever side won.
-      listener.abort()
-      if (!fired) this.disposalListeners -= 1
-      if (this.loading === loading) this.loading = undefined
+    const aborted = new Promise<'aborted'>((resolve) => {
+      if (this.lifetime.signal.aborted) {
+        resolve('aborted')
+        return
+      }
+      this.lifetime.signal.addEventListener('abort', () => resolve('aborted'), {
+        once: true,
+        signal: listener.signal,
+      })
     })
-    this.loading = loading
-    return loading
+    try {
+      const result = await Promise.race([pending, aborted])
+      return result === 'aborted' ? (this.catalog.lastKnown() ?? []) : result
+    } finally {
+      listener.abort()
+    }
   }
 
-  private async load(token?: object): Promise<CursorCatalogModel[]> {
-    let models: CursorCatalogModel[] = []
-    let apiKey: string | undefined
+  /**
+   * Tell the public projection which ids the stored seed lists, once. Without
+   * this a restart could project nothing until the first live read succeeds.
+   */
+  private publishKnownIds(): void {
+    if (this.seedNotified) return
+    const known = this.catalog.lastKnown()
+    if (known === undefined || known.length === 0) return
+    this.seedNotified = true
+    this.lastPickerSignature ??= catalogSignature(known)
+    this.options.onCatalog?.(known.map((model) => model.id))
+  }
+
+  /** Notify the picker after a new catalog entry is installed, if it changed. */
+  private catalogApplied(models: readonly CursorCatalogModel[]): void {
+    const signature = catalogSignature(models)
+    if (signature === this.lastPickerSignature) return
+    this.lastPickerSignature = signature
+    this.options.onCatalogApplied?.(models)
+  }
+
+  /**
+   * The picker read. A fresh cache answers directly; a stale or seeded catalog
+   * answers immediately while the refresh runs, so a restart lists the stored
+   * models before the live read completes. Only a cold cache waits for the
+   * read, and a failed one falls back to the built-in list.
+   */
+  private async listFromCatalog(
+    fetcher: () => Promise<CursorCatalogModel[]>,
+  ): Promise<readonly CursorCatalogModel[]> {
+    await this.catalog.ready()
+    const fresh = this.catalog.cached()
+    if (fresh !== undefined) return fresh
+    const known = this.catalog.lastKnown()
+    if (known !== undefined) {
+      // The refresh outcome serves the next read; the failure is a diagnostic.
+      void this.catalog
+        .force(fetcher)
+        .then((models) => this.catalogApplied(models))
+        .catch((error: unknown) => {
+          this.options.onWarn?.(
+            `Cursor catalog failed: ${safeError(error, 'list the models')}`,
+          )
+        })
+      return known
+    }
     try {
-      if (this.lifetime.signal.aborted) return this.catalog?.models ?? []
-      apiKey = await this.options.apiKey()
-      if (this.lifetime.signal.aborted) {
-        return this.catalog?.models ?? []
-      }
-      if (apiKey) {
-        const discovered = await withTimeout(
-          () => this.options.gateway.listModels({ apiKey: apiKey! }),
-          DISCOVERY_TIMEOUT_MS,
-        )
-        models = discovered ?? []
-      }
+      const models = await this.catalog.get(fetcher)
+      this.catalogApplied(models)
+      return [...models]
     } catch (error) {
       this.options.onWarn?.(
         `Cursor catalog failed: ${safeError(error, 'list the models')}`,
       )
+      return FALLBACK_MODELS
     }
-    const live = models.length > 0
-    // A load a newer load replaced, or one after disposal, must not publish.
-    if (this.loadToken !== token || this.lifetime.signal.aborted) {
-      return this.catalog?.models ?? []
+  }
+
+  /**
+   * Read the live catalog and pay the one-time warmup.
+   * @param apiKey - the resolved credential.
+   * @returns the models the catalog reported.
+   * @throws when the adapter was disposed, the read timed out, or the catalog
+   *   reported no models (an empty read must not replace a known catalog).
+   */
+  private async fetchCatalog(apiKey: string): Promise<CursorCatalogModel[]> {
+    this.lifetime.signal.throwIfAborted()
+    const discovered = await withTimeout(
+      () => this.options.gateway.listModels({ apiKey }),
+      DISCOVERY_TIMEOUT_MS,
+    )
+    this.lifetime.signal.throwIfAborted()
+    if (discovered === undefined || discovered.length === 0) {
+      throw new Error('the catalog read returned no models')
     }
-    // No key means logged out: advertise nothing so the picker hides the route.
-    if (!apiKey) {
-      this.catalog = { models: [], live: false, at: Date.now() }
-      return []
-    }
-    // A cancelled or superseded load returned above; this one is current.
-    if (live && this.options.prewarm !== false) {
+    if (this.options.prewarm !== false) {
       const modelId =
-        models.find((model) => model.id === 'default')?.id ?? models[0].id
+        discovered.find((model) => model.id === 'default')?.id ??
+        discovered[0].id
       this.runtime.prewarm(apiKey, modelId)
     }
-    this.catalog = {
-      models: live ? models : FALLBACK_MODELS,
-      live,
-      at: Date.now(),
+    // Every live read tells the public projection which ids it may target.
+    this.seedNotified = true
+    this.options.onCatalog?.(discovered.map((model) => model.id))
+    // A tier the catalog no longer offers is forgotten now, not only on the
+    // model's next turn: otherwise a withdrawal followed by a reappearance
+    // could make stale acceptance effective again without a turn in between.
+    this.pruneWithdrawnTiers(discovered)
+    return discovered
+  }
+
+  /** Forget remembered tiers whose model no longer offers that value. */
+  private pruneWithdrawnTiers(models: readonly CursorCatalogModel[]): void {
+    for (const model of models) {
+      const preference = this.options.contextPreference?.(model.id) ?? 'max'
+      const remembered = this.options.acceptedTier?.(model.id, preference)
+      if (remembered === undefined) continue
+      if (offeredTierValue(model, remembered) !== undefined) continue
+      this.options.forgetAcceptedTier?.(model.id, {
+        value: remembered,
+        preference,
+      })
     }
-    return this.catalog.models
   }
 }
 

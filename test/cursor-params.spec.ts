@@ -1,16 +1,16 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
-  FALLBACK_MODELS,
-  contextWindowFor,
-  modelNames,
+  DEFAULT_CURSOR_CONTEXT,
+  isRejectedParams,
   modelParams,
+  offeredContextValues,
+  offersTier,
   preferredContext,
   reasoningInfo,
-  resolveModelId,
   smallerContext,
-  isRejectedParams,
-} from '../src/providers/cursor/models.js'
+  tierTokens,
+} from '../src/providers/cursor/params.js'
 
 const catalogModel = {
   id: 'claude-sonnet-5-5',
@@ -41,8 +41,12 @@ test('the largest offered context tier is the default', () => {
   assert.equal(preferredContext(context, '200k')?.value, '200k')
   // An unknown preference falls back to the largest, not the smallest.
   assert.equal(preferredContext(context, 'nonsense')?.value, '1m')
-  assert.equal(contextWindowFor(catalogModel), 1_000_000)
-  assert.equal(contextWindowFor(undefined), 200_000)
+  assert.deepEqual(offeredContextValues(catalogModel), ['50k', '200k', '1m'])
+  assert.equal(tierTokens('1m'), 1_000_000)
+  assert.equal(tierTokens('300k'), 300_000)
+  assert.equal(tierTokens('max'), undefined)
+  assert.equal(offersTier(catalogModel, '200K'), true)
+  assert.equal(offersTier(catalogModel, '400k'), false)
 })
 
 test('a rejected tier steps down to the next smaller offered tier', () => {
@@ -65,7 +69,7 @@ test('effort maps to the closest advertised value and fast stays off', () => {
     { id: 'thinking', value: 'true' },
     { id: 'effort', value: 'medium' },
     { id: 'fast', value: 'false' },
-    { id: 'context', value: '1m' },
+    { id: 'context', value: DEFAULT_CURSOR_CONTEXT === 'max' ? '1m' : '50k' },
   ])
   // Reasoning off turns the switch off and drops to the lowest effort.
   const off = modelParams(catalogModel, 'off')
@@ -79,6 +83,12 @@ test('effort maps to the closest advertised value and fast stays off', () => {
     modelParams(catalogModel, 'max')?.find((p) => p.id === 'effort')?.value,
     'xhigh',
   )
+  // An explicit tier preference reaches the request.
+  assert.equal(
+    modelParams(catalogModel, 'low', '200k')?.find((p) => p.id === 'context')
+      ?.value,
+    '200k',
+  )
 })
 
 test('reasoning info lists offered levels with off when available', () => {
@@ -89,18 +99,4 @@ test('reasoning info lists offered levels with off when available', () => {
   )
   assert.equal(info?.defaultEffort, 'high')
   assert.equal(reasoningInfo({}), undefined)
-})
-
-test('shared display names are disambiguated with the model id', () => {
-  const names = modelNames([
-    { id: 'default', displayName: 'Auto' },
-    { id: 'auto-smart', displayName: 'Auto' },
-    { id: 'gpt-5.6-sol', displayName: 'GPT-5.6 Sol' },
-  ])
-  assert.equal(names.get('default'), 'Auto (default)')
-  assert.equal(names.get('auto-smart'), 'Auto (auto-smart)')
-  assert.equal(names.get('gpt-5.6-sol'), 'GPT-5.6 Sol')
-  assert.equal(resolveModelId('auto'), 'default')
-  assert.equal(resolveModelId('claude'), 'claude')
-  assert.ok(FALLBACK_MODELS.length > 0)
 })

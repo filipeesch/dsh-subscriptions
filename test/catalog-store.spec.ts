@@ -705,7 +705,8 @@ test('readers see the previous complete file until a complete temporary file is 
         dirname(path),
         'rename source must be in the same directory',
       )
-      assert.ok(String(file).startsWith(`${path}.tmp-`))
+      assert.ok(String(file).startsWith(`${path}.`))
+      assert.ok(String(file).endsWith('.tmp'))
       await originalWriteFile(file, '{"partial":')
       partialWritten.resolve()
       await finishWrite.promise

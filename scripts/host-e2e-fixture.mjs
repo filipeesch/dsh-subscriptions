@@ -288,6 +288,24 @@ export const FIXTURE_REQUESTS = {
     },
     required: true,
   },
+  // The published-capacity source is optional in the fixture: the catalog read
+  // above is refused, so the route usually has no ids to project. Planning the
+  // request keeps a future projection from failing the run as an unplanned URL.
+  'GET https://models.dev/api.json': {
+    credential: null,
+    body: {
+      anthropic: {
+        models: {
+          'claude-sonnet-5-5': {
+            id: 'claude-sonnet-5-5',
+            name: 'Claude Sonnet 5.5',
+            limit: { context: 1_000_000 },
+          },
+        },
+      },
+    },
+    required: false,
+  },
   'GET https://registry.npmjs.org/@anthropic-ai%2fclaude-code/latest': {
     credential: null,
     body: { version: '9.9.9' },
