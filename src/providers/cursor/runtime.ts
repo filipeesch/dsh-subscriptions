@@ -417,6 +417,8 @@ export class CursorRuntime {
   dispose(): void {
     this.disposed = true
     this.lifetime.abort()
+    this.keyAbort.clear()
+    this.keyGeneration.clear()
     // The warmup's one cleanup closes whatever handle exists; its finally
     // then finds the agent already closed and does not close it again.
     void this.prewarmCleanup?.()
@@ -431,6 +433,14 @@ export class CursorRuntime {
     let count = 0
     for (const slots of this.sessions.values()) count += slots.length
     return count
+  }
+
+  /** Cancellation state sizes; a test hook. */
+  turnState(): { controllers: number; generations: number } {
+    return {
+      controllers: this.keyAbort.size,
+      generations: this.keyGeneration.size,
+    }
   }
 
   /** Tokens Cursor adds on top of the transcript for one model; a test hook. */
@@ -484,8 +494,24 @@ export class CursorRuntime {
       session?.wake()
     }
     signal.addEventListener('abort', onAbort, { once: true })
+    // Every early exit past this point must release the listener and the
+    // controller; only the current turn may delete the key's entries.
+    const cleanupTurn = () => {
+      signal.removeEventListener('abort', onAbort)
+      if (this.keyAbort.get(sessionKey) === turnController) {
+        this.keyAbort.delete(sessionKey)
+        // No newer turn has been reserved, so nothing older can still arrive.
+        if (
+          generation === this.turnSeq &&
+          this.keyGeneration.get(sessionKey) === generation
+        ) {
+          this.keyGeneration.delete(sessionKey)
+        }
+      }
+    }
     if (signal.aborted) {
       reply.finish('aborted')
+      cleanupTurn()
       return
     }
     let apiKey: string | undefined
@@ -496,11 +522,13 @@ export class CursorRuntime {
       ])
       if (credential === 'aborted') {
         reply.finish('aborted')
+        cleanupTurn()
         return
       }
       apiKey = credential.value
     } catch (error) {
       reply.finish('error', safeError(error, 'resolve the Cursor API key'))
+      cleanupTurn()
       return
     }
     if (!apiKey) {
@@ -509,10 +537,12 @@ export class CursorRuntime {
         `No Cursor API key. Store ${this.options.keyRef} in DSH credentials.`,
         ERROR_CODES.missingKey,
       )
+      cleanupTurn()
       return
     }
-    if (signal?.aborted) {
+    if (signal?.aborted || !owns()) {
       reply.finish('aborted')
+      cleanupTurn()
       return
     }
     const modelId = resolveModelId(options.model.id)
@@ -889,10 +919,7 @@ export class CursorRuntime {
         aborted ? undefined : safeError(error, 'run the model'),
       )
     } finally {
-      signal.removeEventListener('abort', onAbort)
-      if (this.keyAbort.get(sessionKey) === turnController) {
-        this.keyAbort.delete(sessionKey)
-      }
+      cleanupTurn()
       if (session) {
         session.busy = false
         if (!session.closed) session.touch()

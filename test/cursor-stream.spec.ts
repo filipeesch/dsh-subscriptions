@@ -1797,3 +1797,127 @@ test('a newer turn interrupts an older blocked create', async () => {
   await delay(20)
   assert.equal(closed, 1)
 })
+
+test('closing the iterator during setup aborts before discovery is released', async () => {
+  let releaseModels!: (models: unknown) => void
+  let created = 0
+  const { gateway } = gatewayWith(() => {
+    created += 1
+    return {
+      async send() {
+        throw new Error('must not send')
+      },
+      close() {},
+    }
+  })
+  gateway.listModels = () =>
+    new Promise((resolve) => {
+      releaseModels = resolve as never
+    })
+  const adapter = adapterOf(gateway)
+  const iterable = adapter.stream(
+    request([{ role: 'user', content: [{ type: 'text', text: 'hi' }] }]),
+  )
+  const iterator = iterable[Symbol.asyncIterator]()
+  const first = iterator.next()
+  await delay(20)
+  const closed = await Promise.race([
+    iterator.return?.() ?? Promise.resolve(),
+    delay(200).then(() => 'timeout' as const),
+  ])
+  assert.notEqual(closed, 'timeout', 'return() must settle before discovery')
+  releaseModels(CATALOG)
+  await first
+  assert.equal(created, 0)
+})
+
+test('an aborted catalog load cannot overwrite a newer one', async () => {
+  let releaseFirst!: (models: unknown) => void
+  let calls = 0
+  const { gateway } = gatewayWith(() => ({
+    async send() {
+      return {
+        async *stream() {},
+        async wait() {
+          return { status: 'finished' }
+        },
+        async cancel() {},
+      }
+    },
+    close() {},
+  }))
+  gateway.listModels = async () => {
+    calls += 1
+    if (calls === 1) {
+      return await new Promise((resolve) => {
+        releaseFirst = resolve as never
+      })
+    }
+    return [
+      { id: 'b', displayName: 'B' },
+      { id: 'c', displayName: 'C' },
+    ]
+  }
+  const adapter = adapterOf(gateway)
+  const controller = new AbortController()
+  const chunks: Chunk[] = []
+  const stream = (async () => {
+    for await (const chunk of adapter.stream(
+      request([{ role: 'user', content: [{ type: 'text', text: 'hi' }] }], {
+        signal: controller.signal,
+      }),
+    )) {
+      chunks.push(chunk as unknown as Chunk)
+    }
+  })()
+  await delay(20)
+  controller.abort()
+  await stream
+  // A newer read starts its own load instead of joining the abandoned one.
+  const newer = await adapter.listModels('cursor')
+  assert.deepEqual(
+    newer.map((model) => model.id),
+    ['b', 'c'],
+  )
+  releaseFirst([{ id: 'a', displayName: 'A' }])
+  await delay(20)
+  const after = await adapter.listModels('cursor')
+  assert.deepEqual(
+    after.map((model) => model.id),
+    ['b', 'c'],
+    'the abandoned load must not publish over the newer catalog',
+  )
+})
+
+test('early exits release their cancellation state', async () => {
+  const { gateway } = gatewayWith(() => ({
+    async send() {
+      throw new Error('must not send')
+    },
+    close() {},
+  }))
+  // No credential: every turn returns before any provider work.
+  const adapter = new CursorAdapter({
+    gateway,
+    apiKey: async () => undefined,
+    cwd: () => '/tmp',
+    keyRef: 'CURSOR_API_KEY',
+    prewarm: false,
+  })
+  for (const session of ['a', 'b', 'c', 'd']) {
+    await collect(
+      adapter,
+      request([{ role: 'user', content: [{ type: 'text', text: 'hi' }] }], {
+        sessionId: session as never,
+      }),
+    )
+  }
+  const runtime = (
+    adapter as unknown as {
+      runtime: { turnState(): { controllers: number; generations: number } }
+    }
+  ).runtime
+  assert.equal(runtime.turnState().controllers, 0)
+  adapter.dispose()
+  assert.equal(runtime.turnState().generations, 0)
+})

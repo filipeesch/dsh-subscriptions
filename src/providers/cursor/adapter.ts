@@ -69,6 +69,8 @@ export class CursorAdapter extends LlmAdapter {
   private catalog:
     { models: CursorCatalogModel[]; live: boolean; at: number } | undefined
   private loading: Promise<CursorCatalogModel[]> | undefined
+  private loadSignal: AbortSignal | undefined
+  private loadToken: object | undefined
   private readonly images = new Map<string, Image>()
 
   constructor(private readonly options: CursorAdapterOptions) {
@@ -144,13 +146,32 @@ export class CursorAdapter extends LlmAdapter {
     // iterated: a later call owns the conversation even if an earlier one
     // starts its setup first.
     const turnSeq = this.runtime.beginTurn()
-    return this.streamTurn(options, turnSeq)
+    const controller = new AbortController()
+    const iterator = this.streamTurn(options, turnSeq, controller)
+    // A generator's return() queues behind a pending next(), so abort before
+    // delegating: closing the stream must stop setup synchronously.
+    return {
+      [Symbol.asyncIterator]: () => ({
+        next: () => iterator.next(),
+        async return(): Promise<IteratorResult<StreamChunk>> {
+          controller.abort()
+          void iterator.return?.(undefined).catch(() => {})
+          return { done: true, value: undefined }
+        },
+        async throw(error?: unknown): Promise<IteratorResult<StreamChunk>> {
+          controller.abort()
+          void iterator.throw?.(error).catch(() => {})
+          throw error
+        },
+      }),
+    }
   }
 
   private async *streamTurn(
     options: GenerateOptions,
     turnSeq: number,
-  ): AsyncIterable<StreamChunk> {
+    controller: AbortController,
+  ): AsyncGenerator<StreamChunk> {
     if (options?.stop?.length) {
       throw new LlmError(
         'Cursor does not support stop sequences',
@@ -160,7 +181,6 @@ export class CursorAdapter extends LlmAdapter {
     // Installed before setup so a cancel, a disposed adapter, or an iterator
     // teardown stops the wait instead of letting discovery finish and start
     // work for a request nobody wants.
-    const controller = new AbortController()
     const signal = AbortSignal.any([
       controller.signal,
       this.lifetime.signal,
@@ -291,14 +311,29 @@ export class CursorAdapter extends LlmAdapter {
     ) {
       return cached.models
     }
-    const loading = this.load(signal).finally(() => {
-      this.loading = undefined
+    // An in-flight load whose own requester went away no longer serves anyone:
+    // start a fresh one instead of handing the newer caller the orphan's data.
+    const inFlight = this.loading
+    if (inFlight !== undefined && this.loadSignal?.aborted !== true) {
+      return inFlight
+    }
+    const token = {}
+    this.loadToken = token
+    this.loadSignal = signal
+    const loading = this.load(signal, token).finally(() => {
+      if (this.loading === loading) {
+        this.loading = undefined
+        this.loadSignal = undefined
+      }
     })
     this.loading = loading
     return loading
   }
 
-  private async load(signal?: AbortSignal): Promise<CursorCatalogModel[]> {
+  private async load(
+    signal?: AbortSignal,
+    token?: object,
+  ): Promise<CursorCatalogModel[]> {
     let models: CursorCatalogModel[] = []
     let apiKey: string | undefined
     try {
@@ -321,13 +356,17 @@ export class CursorAdapter extends LlmAdapter {
       )
     }
     const live = models.length > 0
+    // A cancelled load, or one a newer load replaced, must not publish.
+    if (this.loadToken !== token || signal?.aborted === true) {
+      return this.catalog?.models ?? []
+    }
     // No key means logged out: advertise nothing so the picker hides the route.
     if (!apiKey) {
       this.catalog = { models: [], live: false, at: Date.now() }
       return []
     }
-    // A cancelled request must not leave a warmup agent behind.
-    if (live && this.options.prewarm !== false && signal?.aborted !== true) {
+    // A cancelled or superseded load returned above; this one is current.
+    if (live && this.options.prewarm !== false) {
       const modelId =
         models.find((model) => model.id === 'default')?.id ?? models[0].id
       this.runtime.prewarm(apiKey, modelId)
