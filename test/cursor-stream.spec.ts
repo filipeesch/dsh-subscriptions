@@ -490,3 +490,167 @@ test('a failed fallback is not remembered', async () => {
   await collect(adapter, retryRequest('fail-two'))
   assert.deepEqual(attempts, ['1m', '200k', '1m', '200k'])
 })
+
+test('cancelling while the catalog loads ends the request without an agent', async () => {
+  let resolveModels!: (models: unknown) => void
+  const { gateway, agents } = gatewayWith(() => ({
+    async send() {
+      throw new Error('must not send')
+    },
+    close() {},
+  }))
+  const adapter = adapterOf(gateway)
+  gateway.listModels = () =>
+    new Promise((resolve) => {
+      resolveModels = resolve as never
+    })
+  const controller = new AbortController()
+  const chunks: Chunk[] = []
+  const stream = (async () => {
+    for await (const chunk of adapter.stream(
+      request([{ role: 'user', content: [{ type: 'text', text: 'hi' }] }], {
+        signal: controller.signal,
+      }),
+    )) {
+      chunks.push(chunk as unknown as Chunk)
+    }
+  })()
+  await delay(20)
+  controller.abort()
+  await stream
+  assert.equal(agents.length, 0)
+  assert.equal(
+    (chunks.find((c) => c.type === 'finish')?.reason as { kind?: string })
+      ?.kind,
+    'aborted',
+  )
+  resolveModels(CATALOG)
+})
+
+test('cancelling during a fallback create sends nothing', async () => {
+  const firstSend = { count: 0 }
+  let resolveSecond!: (agent: CursorAgent) => void
+  let secondClosed = 0
+  const secondAgent: CursorAgent = {
+    async send() {
+      throw new Error('must not send after abort')
+    },
+    close() {
+      secondClosed += 1
+    },
+  }
+  const firstAgent: CursorAgent = {
+    async send() {
+      firstSend.count += 1
+      return {
+        async *stream() {},
+        async wait() {
+          return {
+            status: 'error',
+            error: { message: 'invalid parameters for registry model claude' },
+          }
+        },
+        async cancel() {},
+      }
+    },
+    close() {},
+  }
+  const { gateway } = gatewayWith((options) => {
+    const context = (
+      options?.model as { params?: { id: string; value: string }[] } | undefined
+    )?.params?.find((param) => param.id === 'context')?.value
+    if (context === '1m') return firstAgent
+    return new Promise<CursorAgent>((resolve) => {
+      resolveSecond = resolve
+    }) as never
+  })
+  const adapter = adapterOf(gateway)
+  const controller = new AbortController()
+  const chunks: Chunk[] = []
+  const stream = (async () => {
+    for await (const chunk of adapter.stream(
+      request([{ role: 'user', content: [{ type: 'text', text: 'hi' }] }], {
+        signal: controller.signal,
+      }),
+    )) {
+      chunks.push(chunk as unknown as Chunk)
+    }
+  })()
+  await waitFor(() => chunks.length > 0 || firstSend.count > 0)
+  await delay(20)
+  controller.abort()
+  resolveSecond(secondAgent)
+  await stream
+  assert.equal(firstSend.count, 1)
+  assert.equal(secondClosed, 1)
+  assert.equal(
+    (chunks.find((c) => c.type === 'finish')?.reason as { kind?: string })
+      ?.kind,
+    'aborted',
+  )
+})
+
+test('a failed prewarm send closes its agent once', async () => {
+  let closed = 0
+  const runtime = new CursorRuntime({
+    gateway: {
+      async createAgent() {
+        return {
+          async send() {
+            throw new Error('send failed')
+          },
+          close() {
+            closed += 1
+          },
+        }
+      },
+      async deleteAgent() {},
+      async listModels() {
+        return CATALOG
+      },
+    },
+    apiKey: async () => 'crsr_test',
+    cwd: () => '/tmp',
+    contextPreference: () => 'max',
+    keyRef: 'CURSOR_API_KEY',
+  })
+  runtime.prewarm('crsr_test', 'claude-sonnet-5-5')
+  await delay(50)
+  assert.equal(closed, 1)
+})
+
+test('disposal during a pending prewarm send closes its agent once', async () => {
+  let closed = 0
+  let rejectSend!: (error: Error) => void
+  const runtime = new CursorRuntime({
+    gateway: {
+      async createAgent() {
+        return {
+          async send() {
+            return await new Promise((_, reject) => {
+              rejectSend = reject
+            })
+          },
+          close() {
+            closed += 1
+          },
+        }
+      },
+      async deleteAgent() {},
+      async listModels() {
+        return CATALOG
+      },
+    },
+    apiKey: async () => 'crsr_test',
+    cwd: () => '/tmp',
+    contextPreference: () => 'max',
+    keyRef: 'CURSOR_API_KEY',
+  })
+  runtime.prewarm('crsr_test', 'claude-sonnet-5-5')
+  await delay(20)
+  runtime.dispose()
+  await delay(10)
+  rejectSend(new Error('send failed after dispose'))
+  await delay(50)
+  assert.equal(closed, 1)
+})

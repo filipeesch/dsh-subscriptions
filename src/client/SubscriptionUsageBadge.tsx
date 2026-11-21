@@ -142,12 +142,10 @@ export function pillAccountFor(
   if (account !== undefined) {
     return display.accounts.find((entry) => entry.key === account)
   }
-  // An ordinary model id follows the default account; a provider with several
-  // accounts must not substitute the first one's quota for it.
-  return (
-    display.accounts.find((entry) => entry.isDefault) ??
-    (display.accounts.length === 1 ? display.accounts[0] : undefined)
-  )
+  // An ordinary model id follows the default account only. Grouping drops
+  // accounts without readings, so "one reporting account" is not "one
+  // configured account": a non-default survivor must not speak for the model.
+  return display.accounts.find((entry) => entry.isDefault)
 }
 
 /** The footer bar a live selection owns; empty when it may not show one. */

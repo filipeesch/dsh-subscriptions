@@ -98,6 +98,13 @@ function tiers(
     .sort((a, b) => a.tokens - b.tokens)
 }
 
+/** Every context tier the model currently offers, smallest to largest. */
+export function offeredContextValues(
+  model: { cursorParameters?: unknown; parameters?: unknown } | undefined,
+): string[] {
+  return tiers(find(defsOf(model), 'context')).map((tier) => tier.value)
+}
+
 /**
  * The offered context tier a preference names. `max` (the default) selects the
  * largest tier; an exact tier such as `300k` selects itself; an unknown value

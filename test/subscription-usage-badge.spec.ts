@@ -752,3 +752,60 @@ test('the footer bar follows the live selection, its account, and no substitute'
     'Cursor',
   )
 })
+
+test('an ordinary model does not borrow a non-default account that survived grouping', () => {
+  const roster = [
+    {
+      provider: 'claude' as const,
+      account: { key: 'default', isDefault: true },
+    },
+    {
+      provider: 'claude' as const,
+      account: { key: 'second', isDefault: false },
+    },
+  ]
+  const windowsOf = new Map([
+    ['claude:second', [{ kind: 'session' as const, usedPercent: 20 }]],
+  ])
+  const displays = groupUsageDisplays(roster, windowsOf, new Map())
+  assert.equal(displays.length, 1)
+  assert.equal(displays[0]?.accounts.length, 1)
+  const bar = footerBar(displays, {
+    provider: 'claude',
+    model: 'claude-sonnet-5',
+  })
+  assert.equal(bar.window, undefined)
+  assert.equal(bar.name, 'Claude')
+  // The same account is reachable only through its own scoped id.
+  const scoped = footerBar(displays, {
+    provider: 'claude',
+    model: '~account:second:claude-sonnet-5',
+  })
+  assert.equal(scoped.window?.usedPercent, 20)
+
+  // A synthetic key source's account is the default, so it still shows.
+  const cursorRoster = [
+    {
+      provider: 'cursor' as const,
+      account: { key: 'cursor', isDefault: true },
+    },
+  ]
+  const cursorWindows = new Map([
+    [
+      'cursor:cursor',
+      [{ kind: 'other' as const, usedAmount: 100, currency: 'USD' }],
+    ],
+  ])
+  const cursorDisplays = groupUsageDisplays(
+    cursorRoster,
+    cursorWindows,
+    new Map(),
+  )
+  assert.equal(
+    footerBar(cursorDisplays, {
+      provider: 'cursor',
+      model: 'claude-sonnet-5-5',
+    }).window?.usedAmount,
+    100,
+  )
+})

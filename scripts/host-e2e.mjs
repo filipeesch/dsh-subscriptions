@@ -623,6 +623,27 @@ async function drive(cdp, page, evidence) {
     `ok: usage pill ${CODEX_PILL} renders in the composer (${placement})`,
   )
 
+  // Product: the bar is inside the pill, prints no numbers, and follows the
+  // host's context gauge instead of preceding it.
+  const bar = await cdp.evaluate(barProbe())
+  if (!bar.found)
+    throw new ProductFailure(
+      'the collapsed pill disappeared before the bar check',
+    )
+  if (!bar.bar)
+    throw new ProductFailure(
+      'the collapsed pill renders no quota bar for the selected model',
+    )
+  if (!bar.followsHost)
+    throw new ProductFailure(
+      'the quota bar does not follow the host context gauge in the stats row',
+    )
+  if (bar.text.includes('%'))
+    throw new ProductFailure('the collapsed pill still prints its numbers')
+  console.log(
+    'ok: the collapsed pill shows a number-free bar after the context gauge',
+  )
+
   // Product: the dialog lists every source with its own percentage.
   const colorPreset = await cdp.evaluate(
     `localStorage.getItem('dsh.subscriptions.usageColorPreset')`,
@@ -1487,6 +1508,29 @@ function pillProbe() {
     return {
       placement,
       pillBackground: placed === null ? null : getComputedStyle(placed).backgroundColor,
+    }
+  })()`
+}
+
+/** The collapsed pill's quota bar: present, number-free, and after the host stats. */
+function barProbe() {
+  const { row } = HOST_CONTRACT.markers.composerStats
+  return `(() => {
+    const pill = [...document.querySelectorAll('button.dsh-subscription-usage-pill')]
+      .find(button => (button.getAttribute('aria-label') || '').includes(${JSON.stringify(CODEX_PILL)}))
+    if (pill === undefined) return { found: false }
+    const bar = pill.querySelector('[role="img"]')
+    const rowEl = pill.closest('[${row}]')
+    const stats = rowEl === null ? [] : [...rowEl.querySelectorAll('[data-composer-stat]')]
+    return {
+      found: true,
+      bar: bar !== null,
+      followsHost: stats.some(
+        (stat) =>
+          (stat.compareDocumentPosition(pill) & Node.DOCUMENT_POSITION_FOLLOWING) !==
+          0,
+      ),
+      text: pill.textContent || '',
     }
   })()`
 }

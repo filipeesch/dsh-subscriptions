@@ -26,6 +26,7 @@
 import {
   isRejectedParams,
   modelParams,
+  offeredContextValues,
   resolveModelId,
   smallerContext,
   type CursorCatalogModel,
@@ -378,6 +379,7 @@ export class CursorRuntime {
   private warming: Promise<void> | undefined
   private prewarmAgent: CursorAgent | undefined
   private prewarmRun: CursorRun | undefined
+  private prewarmCleanup: (() => Promise<void>) | undefined
   private disposed = false
 
   constructor(private readonly options: CursorRuntimeOptions) {}
@@ -385,12 +387,9 @@ export class CursorRuntime {
   /** Close every agent; called from the plugin's disposer. */
   dispose(): void {
     this.disposed = true
-    // A warm agent still being created or sent to is closed here; its own
-    // finally sees the disposal flag and does not double-close.
-    void Promise.resolve(this.prewarmRun?.cancel?.()).catch(() => {})
-    settle(() => this.prewarmAgent?.close?.())
-    this.prewarmRun = undefined
-    this.prewarmAgent = undefined
+    // The warmup's one cleanup closes whatever handle exists; its finally
+    // then finds the agent already closed and does not close it again.
+    void this.prewarmCleanup?.()
     for (const slots of this.sessions.values()) {
       for (const session of slots) session.close()
     }
@@ -442,11 +441,21 @@ export class CursorRuntime {
       options.reasoning,
       this.options.contextPreference(),
     )
-    const known = this.workingContext.get(modelId)
-    if (known) {
+    // A learned tier belongs to this credential and configured preference,
+    // and is usable only while the catalog still offers it.
+    const tierKey = [
+      modelId,
+      hash(apiKey),
+      this.options.contextPreference(),
+    ].join('|')
+    const offered = offeredContextValues(options.model)
+    const known = this.workingContext.get(tierKey)
+    if (known !== undefined && offered.includes(known)) {
       params = params?.map((param) =>
         param.id === 'context' ? { id: param.id, value: known } : param,
       )
+    } else if (known !== undefined) {
+      this.workingContext.delete(tierKey)
     }
     const signature = signatureOf(modelId, params)
     const sessionKey = sessionKeyFor(
@@ -462,7 +471,8 @@ export class CursorRuntime {
         transcript.messages,
         reply.content as never,
       )
-    const contextTokens = () => transcriptTokens() + this.overhead.get(modelId)!
+    const contextTokens = () =>
+      transcriptTokens() + (this.overhead.get(modelId) ?? 0)
 
     const send = (
       session: CursorSession,
@@ -597,16 +607,9 @@ export class CursorRuntime {
           session.systemPrompt = transcript.systemPrompt
         } else {
           this.drop(session)
-          session = await this.open(
-            sessionKey,
-            modelId,
-            params,
-            transcript,
-            apiKey,
-            options.sessionId,
-          )
-          session.busy = true
-          await sendFirst(session)
+          // The rebuild is a new agent like any other: same abort checks and
+          // late-handle cleanup as the first send.
+          session = await openFresh(params)
           freshRun = true
         }
       } else {
@@ -681,8 +684,10 @@ export class CursorRuntime {
         const status =
           result?.status ?? (session.runError ? 'error' : 'finished')
         if (status === 'finished') {
+          // Only a fallback that proved necessary is learned: a concurrent run
+          // on the configured tier must not undo it.
           const tier = session.params?.find((param) => param.id === 'context')
-          if (tier) this.workingContext.set(modelId, tier.value)
+          if (tier && tierRetried) this.workingContext.set(tierKey, tier.value)
           reply.usage = runUsage(
             result?.usage,
             session.modelCalls,
@@ -716,16 +721,7 @@ export class CursorRuntime {
         if (lower) {
           tierRetried = true
           this.drop(session)
-          session = await this.open(
-            sessionKey,
-            modelId,
-            lower,
-            transcript,
-            apiKey,
-            options.sessionId,
-          )
-          session.busy = true
-          await sendFirst(session)
+          session = await openFresh(lower)
           session.seen = transcript.messages.map((message) =>
             fingerprint(message as never),
           )
@@ -765,6 +761,20 @@ export class CursorRuntime {
     if (this.disposed) return
     let agent: CursorAgent | undefined
     let run: CursorRun | undefined
+    let cancelled = false
+    let agentClosed = false
+    // One cleanup path closes whatever handle exists by then, exactly once.
+    const close = async (): Promise<void> => {
+      if (run !== undefined && !cancelled) {
+        cancelled = true
+        await Promise.resolve(run.cancel?.()).catch(() => {})
+      }
+      if (agent !== undefined && !agentClosed) {
+        agentClosed = true
+        settle(() => agent?.close?.())
+      }
+    }
+    this.prewarmCleanup = close
     try {
       const cwd = this.options.cwd(undefined)
       agent = await this.options.gateway.createAgent({
@@ -778,9 +788,9 @@ export class CursorRuntime {
       run = await agent.send('.')
       this.prewarmRun = run
       if (this.disposed) return
+      cancelled = true
       await Promise.resolve(run.cancel?.()).catch(() => {})
       await Promise.resolve(run.wait?.()).catch(() => {})
-      settle(() => agent?.close?.())
       const id = agent.agentId
       if (id) {
         void this.options.gateway
@@ -792,10 +802,8 @@ export class CursorRuntime {
     } finally {
       this.prewarmAgent = undefined
       this.prewarmRun = undefined
-      if (this.disposed) {
-        await Promise.resolve(run?.cancel?.()).catch(() => {})
-        settle(() => agent?.close?.())
-      }
+      this.prewarmCleanup = undefined
+      await close()
     }
   }
 

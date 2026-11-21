@@ -60,6 +60,9 @@ const DEFAULT_REFS: Record<ExternalUsageSource, string> = {
 /** How long one successful read serves the card and every mounted composer. */
 const CACHE_TTL_MS = 60_000
 
+/** Bound one shared Cursor read; a hung connection becomes a stale reading. */
+const READ_TIMEOUT_MS = 20_000
+
 /** Non-reversible short identity of a credential value, for cache keys only. */
 function fingerprintOf(value: string): string {
   let hash = 0x811c9dc5
@@ -116,6 +119,8 @@ export class ExternalUsageController {
     for (const key of keys) {
       if (source !== undefined && !key.startsWith(`${source}|`)) continue
       this.cache.delete(key)
+      // Detach in-flight work too: a new read must not join the old result.
+      this.inflight.delete(key)
       this.generations.set(key, (this.generations.get(key) ?? 0) + 1)
     }
   }
@@ -136,8 +141,8 @@ export class ExternalUsageController {
     if (credential?.value === undefined || credential.value.length === 0) {
       throw new Error(`${source} API key is not configured`)
     }
-    const read = () =>
-      this.read(source, credential.value, ollamaBase, ceiling, endpoint)
+    const read = (signal?: AbortSignal) =>
+      this.read(source, credential.value, ollamaBase, ceiling, endpoint, signal)
     // Only Cursor keeps a shared reading: the others are read per call as
     // before, so their own cards keep their refresh behavior.
     if (source !== 'cursor') {
@@ -171,18 +176,18 @@ export class ExternalUsageController {
     const pending = this.inflight.get(key)
     if (pending) return pending
     const generation = this.generations.get(key) ?? 0
-    const task = read().then(
+    const timeout = new AbortController()
+    const timer = setTimeout(() => timeout.abort(), READ_TIMEOUT_MS)
+    const task = read(timeout.signal).then(
       (usage) => {
         // An invalidation that landed while this read was in flight wins: the
         // result goes to this caller but is not published.
+        const observedAt = usage.observedAt ?? Date.now()
         if ((this.generations.get(key) ?? 0) === generation) {
-          this.cache.set(key, {
-            usage,
-            observedAt: usage.observedAt ?? Date.now(),
-            stale: false,
-          })
+          this.cache.set(key, { usage, observedAt, stale: false })
         }
-        return usage
+        // Live and cached callers see the same timestamped snapshot.
+        return { ...usage, observedAt }
       },
       (error: unknown) => {
         // A failed refresh marks the shared reading stale, so every later
@@ -195,9 +200,42 @@ export class ExternalUsageController {
         throw error
       },
     )
-    task.finally(() => this.inflight.delete(key)).catch(() => {})
+    task
+      .finally(() => {
+        clearTimeout(timer)
+        // Only this task may remove its own entry: an invalidated read must
+        // not detach the read that replaced it.
+        if (this.inflight.get(key) === task) this.inflight.delete(key)
+      })
+      .catch(() => {})
     this.inflight.set(key, task)
-    return task
+    if (signal === undefined) return task
+    // A caller that goes away stops waiting; the shared read still completes
+    // for the cache and the next caller.
+    task.catch(() => {})
+    return this.untilAborted(task, signal)
+  }
+
+  /** Wait for a shared read, but let one caller's cancellation stop its wait. */
+  private async untilAborted<T>(
+    task: Promise<T>,
+    signal: AbortSignal,
+  ): Promise<T> {
+    if (signal.aborted) throw new Error('usage read cancelled')
+    return new Promise<T>((resolve, reject) => {
+      const onAbort = () => reject(new Error('usage read cancelled'))
+      signal.addEventListener('abort', onAbort, { once: true })
+      task.then(
+        (value) => {
+          signal.removeEventListener('abort', onAbort)
+          resolve(value)
+        },
+        (error) => {
+          signal.removeEventListener('abort', onAbort)
+          reject(error)
+        },
+      )
+    })
   }
 
   /** One cached reading, with its freshness fields made explicit. */

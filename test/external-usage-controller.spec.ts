@@ -332,3 +332,48 @@ test('a changed credential reads again instead of serving the old account', asyn
   await controller.usage('cursor')
   assert.equal(router.periods(), 2)
 })
+
+test('an invalidated read is neither joined nor republished', async () => {
+  let releaseFirst!: () => void
+  let periods = 0
+  const http = (async (url: string | URL | Request) => {
+    const target = String(url)
+    if (target.includes('exchange_user_api_key')) {
+      return Response.json({ accessToken: 'access-token' })
+    }
+    if (target.includes('GetCurrentPeriodUsage')) {
+      periods += 1
+      if (periods === 1) {
+        await new Promise<void>((resolve) => {
+          releaseFirst = resolve
+        })
+        return Response.json({
+          billingCycleStart: '1',
+          billingCycleEnd: '2',
+          spendLimitUsage: { overallLimit: 10_000, overallUsed: 1_000 },
+        })
+      }
+      return Response.json({
+        billingCycleStart: '1',
+        billingCycleEnd: '2',
+        spendLimitUsage: { overallLimit: 10_000, overallUsed: 2_000 },
+      })
+    }
+    return Response.json({ planInfo: { planName: 'Enterprise' } })
+  }) as typeof fetch
+  const controller = new ExternalUsageController(
+    async () => ({ value: 'cursor-secret' }),
+    http,
+  )
+  const pending = controller.usage('cursor', undefined, true)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  controller.invalidate('cursor')
+  const fresh = await controller.usage('cursor')
+  assert.equal(periods, 2, 'the new caller must not join the detached read')
+  assert.equal(fresh.windows?.[0]?.usedAmount, 2_000)
+  assert.equal(typeof fresh.observedAt, 'number')
+  releaseFirst()
+  const old = await pending
+  assert.equal(old.windows?.[0]?.usedAmount, 1_000)
+  assert.equal(typeof old.observedAt, 'number')
+})

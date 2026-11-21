@@ -151,20 +151,44 @@ export class CursorAdapter extends LlmAdapter {
       yield* cancelled
       return
     }
-    const [models, images] = await Promise.all([
-      this.models(),
-      this.loadImages(options),
-    ])
-    const transcript = readRequest(options, images)
-    const queue = new ChunkQueue()
-    const reply = new Reply(queue)
-    // Closing the stream (host abort, iterator teardown) must not leave the
-    // Cursor run or its agent working in the background.
+    // Installed before setup so a cancel stops the wait instead of letting
+    // discovery finish and start a warmup for a request nobody wants.
     const controller = new AbortController()
     const signal =
       options.signal === undefined
         ? controller.signal
         : AbortSignal.any([options.signal, controller.signal])
+    const cancelled = new Promise<'aborted'>((resolve) => {
+      if (signal.aborted) resolve('aborted')
+      else {
+        signal.addEventListener('abort', () => resolve('aborted'), {
+          once: true,
+        })
+      }
+    })
+    const setup = Promise.all([
+      this.models(signal),
+      this.loadImages(options, signal),
+    ])
+    const first = await Promise.race([setup, cancelled])
+    if (first === 'aborted') {
+      const queue = new ChunkQueue()
+      const reply = new Reply(queue)
+      reply.finish('aborted')
+      yield* queue
+      return
+    }
+    const [models, images] = first
+    if (signal.aborted) {
+      const queue = new ChunkQueue()
+      const reply = new Reply(queue)
+      reply.finish('aborted')
+      yield* queue
+      return
+    }
+    const transcript = readRequest(options, images)
+    const queue = new ChunkQueue()
+    const reply = new Reply(queue)
     void this.runtime.runTurn({
       model: {
         id: options.model,
@@ -210,6 +234,7 @@ export class CursorAdapter extends LlmAdapter {
 
   private async loadImages(
     options: GenerateOptions,
+    signal: AbortSignal,
   ): Promise<Map<string, Image>> {
     const out = new Map<string, Image>()
     const read = this.options.readImage
@@ -220,7 +245,7 @@ export class CursorAdapter extends LlmAdapter {
         let image = this.images.get(id)
         if (!image) {
           try {
-            image = await read(ref, options.signal)
+            image = await read(ref, signal)
           } catch (error) {
             this.options.onWarn?.(
               `Cursor image ${id} unreadable: ${error instanceof Error ? error.message : String(error)}`,
@@ -240,7 +265,7 @@ export class CursorAdapter extends LlmAdapter {
     return out
   }
 
-  private async models(): Promise<CursorCatalogModel[]> {
+  private async models(signal?: AbortSignal): Promise<CursorCatalogModel[]> {
     const cached = this.catalog
     if (
       cached &&
@@ -248,14 +273,14 @@ export class CursorAdapter extends LlmAdapter {
     ) {
       return cached.models
     }
-    const loading = this.load().finally(() => {
+    const loading = this.load(signal).finally(() => {
       this.loading = undefined
     })
     this.loading = loading
     return loading
   }
 
-  private async load(): Promise<CursorCatalogModel[]> {
+  private async load(signal?: AbortSignal): Promise<CursorCatalogModel[]> {
     let models: CursorCatalogModel[] = []
     let apiKey: string | undefined
     try {
@@ -278,7 +303,8 @@ export class CursorAdapter extends LlmAdapter {
       this.catalog = { models: [], live: false, at: Date.now() }
       return []
     }
-    if (live && this.options.prewarm !== false) {
+    // A cancelled request must not leave a warmup agent behind.
+    if (live && this.options.prewarm !== false && signal?.aborted !== true) {
       const modelId =
         models.find((model) => model.id === 'default')?.id ?? models[0].id
       this.runtime.prewarm(apiKey, modelId)
