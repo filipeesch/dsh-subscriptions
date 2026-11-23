@@ -324,12 +324,16 @@ export function CursorModelsManager({
         }
         adopt(data)
       } catch (failure) {
-        if (!alive.current) return
+        // A superseded read states nothing: a newer read already describes the
+        // state this failure would report as broken.
+        if (!alive.current || sequence !== readSequence.current) return
         const text = t('cursorModelsLoadFailed', { message: message(failure) })
         // A failed reload keeps the rows on screen and states the failure.
         setPageError(text)
       } finally {
-        if (alive.current) {
+        // Only the newest read clears the busy flags; a superseded one would
+        // otherwise stop the indicator for the read still in flight.
+        if (alive.current && sequence === readSequence.current) {
           setLoading(false)
           setReloading(false)
         }

@@ -1094,6 +1094,65 @@ test('an older read cannot restore a stale source state', async () => {
   })
 })
 
+test('a superseded read does not state its own failure', async () => {
+  let sourceOn = true
+  let reads = 0
+  let release: (() => void) | undefined
+  const rpc = {
+    async call(
+      _channel: string,
+      endpoint: string,
+      payload: Record<string, unknown>,
+    ) {
+      const name = endpoint.replace('subscriptions-auth.', '')
+      if (name === 'cursorSetSettings') {
+        const settings = payload.settings as { publishedContext?: boolean }
+        if (settings.publishedContext !== undefined)
+          sourceOn = settings.publishedContext
+        return { ok: true, value: {} }
+      }
+      if (name === 'cursorModels') {
+        reads += 1
+        const snapshot = sourceOn
+        if (reads === 2) {
+          await new Promise<void>((resolveWait) => {
+            release = resolveWait
+          })
+          // The older read then fails, after a newer one already answered.
+          throw new Error('catalog offline')
+        }
+        return {
+          ok: true,
+          value: {
+            ...modelsView(),
+            knownContext: { enabled: snapshot, fetchedAt: refreshedAt },
+          },
+        }
+      }
+      return { ok: false, error: { message: 'unexpected ' + name } }
+    },
+  } as never
+  await withDom(async (dom) => {
+    await dom.render(
+      createElement(CursorModelsManager, {
+        rpc,
+        t,
+        onClose: () => undefined,
+        onSaved: () => undefined,
+      }),
+    )
+    await dom.click(buttonByText(dom, en.cursorModelsReload))
+    // A newer read (the source switch) answers while the reload hangs.
+    await dom.click(buttonByText(dom, en.cursorCapacityDisable))
+    await dom.wait(60)
+    release?.()
+    await dom.wait(80)
+    // The stale failure is not stated over the newest state.
+    assert.doesNotMatch(dom.text(), /catalog offline/)
+    assert.match(dom.text(), new RegExp(en.cursorCapacityOff.slice(0, 20)))
+  })
+})
+
 test('a typed window writes after the pause and marks the row manual', async () => {
   const { rpc, calls } = fakeRpc((endpoint) => {
     if (endpoint === 'cursorModels') return { ok: true, value: modelsView() }
