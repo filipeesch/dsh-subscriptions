@@ -25,18 +25,13 @@ export function memoryCatalogStore(): CatalogPersistence<CursorCatalogModel> {
     },
   }
 }
+
 /** The three runtime hooks one in-memory tier store provides. */
 export interface MemoryTierStore {
-  acceptedTier: (modelId: string, preference: string) => string | undefined
-  rememberAcceptedTier: (
-    modelId: string,
-    value: string,
-    preference: string,
-  ) => void
-  forgetAcceptedTier: (
-    modelId: string,
-    expected?: { value: string; preference: string },
-  ) => void
+  /** What the runtime and resolution see for one model. */
+  acceptedTier: (modelId: string) => string | undefined
+  rememberAcceptedTier: (modelId: string, value: string) => void
+  forgetAcceptedTier: (modelId: string, expected?: { value: string }) => void
 }
 
 /**
@@ -44,24 +39,16 @@ export interface MemoryTierStore {
  * store exposes to the runtime and to model resolution.
  */
 export function memoryTierStore(): MemoryTierStore {
-  const tiers = new Map<string, { value: string; preference: string }>()
+  const tiers = new Map<string, string>()
   return {
-    acceptedTier(modelId, preference) {
-      const entry = tiers.get(modelId)
-      return entry !== undefined && entry.preference === preference
-        ? entry.value
-        : undefined
+    acceptedTier(modelId) {
+      return tiers.get(modelId)
     },
-    rememberAcceptedTier(modelId, value, preference) {
-      tiers.set(modelId, { value, preference })
+    rememberAcceptedTier(modelId, value) {
+      tiers.set(modelId, value)
     },
     forgetAcceptedTier(modelId, expected) {
-      const entry = tiers.get(modelId)
-      if (
-        expected !== undefined &&
-        (entry?.value !== expected.value ||
-          entry?.preference !== expected.preference)
-      ) {
+      if (expected !== undefined && tiers.get(modelId) !== expected.value) {
         return
       }
       tiers.delete(modelId)

@@ -6,7 +6,7 @@ import { test } from 'node:test'
 import {
   MODELS_DEV_URL,
   PublishedContext,
-  isPublishedCatalogDocument,
+  hasPublishedCatalogShape,
   lastSegment,
   mostDeclared,
   normalizeModelKey,
@@ -156,28 +156,30 @@ test('disagreement resolves by most declared, then the larger value', () => {
 })
 
 test('the document shape check separates malformed input from an empty projection', () => {
-  assert.equal(isPublishedCatalogDocument(published), true)
-  assert.equal(isPublishedCatalogDocument({}), false)
-  assert.equal(isPublishedCatalogDocument({ invalid: true }), false)
+  assert.equal(hasPublishedCatalogShape(published), true)
+  assert.equal(hasPublishedCatalogShape({}), false)
+  // A provider that is not an object is a broken response.
+  assert.equal(hasPublishedCatalogShape({ invalid: true }), false)
   // A provider whose models entry is an array is not the catalog shape.
-  assert.equal(isPublishedCatalogDocument({ p: { models: [] } }), false)
-  // A malformed nested entry is not a catalog with no capacities.
+  assert.equal(hasPublishedCatalogShape({ p: { models: [] } }), false)
+  assert.equal(hasPublishedCatalogShape({ p: {} }), false)
+  assert.equal(hasPublishedCatalogShape([]), false)
+  assert.equal(hasPublishedCatalogShape(null), false)
+  assert.equal(hasPublishedCatalogShape('not a document'), false)
+  // Whether an entry carries a capacity is the projection's business: the
+  // endpoint lists image, speech, and transcription models with no window, and
+  // one of those must not hide the readable entries.
   assert.equal(
-    isPublishedCatalogDocument({ p: { models: { x: null } } }),
-    false,
-  )
-  assert.equal(
-    isPublishedCatalogDocument({ p: { models: { x: { id: 'x' } } } }),
-    true,
-  )
-  assert.equal(
-    isPublishedCatalogDocument({
+    hasPublishedCatalogShape({
       p: { models: { x: { limit: { context: 0 } } } },
     }),
-    false,
+    true,
   )
-  assert.equal(isPublishedCatalogDocument([]), false)
-  assert.equal(isPublishedCatalogDocument(null), false)
+  assert.equal(hasPublishedCatalogShape({ p: { models: { x: null } } }), true)
+  assert.equal(
+    hasPublishedCatalogShape({ p: { models: { x: { id: 'x' } } } }),
+    true,
+  )
 })
 
 test('the service reads a persisted projection and reports staleness', () => {
@@ -398,15 +400,51 @@ test('the note path refreshes only when stale, out of band', async () => {
   assert.equal(fetched, 2)
 })
 
-test('a malformed nested model map keeps the previous projection', async () => {
+test('an entry without a capacity does not fail the refresh', async () => {
+  // The shape this projection reads from the live endpoint: image, speech, and
+  // transcription models declare no context window at all, and a zero window
+  // stands beside the readable entries.
+  const document = {
+    anthropic: published.anthropic,
+    openai: {
+      models: {
+        'gpt-image-2': { id: 'gpt-image-2', limit: { context: 0 } },
+        'gpt-transcribe': { id: 'gpt-transcribe' },
+      },
+    },
+  }
+  const service = new PublishedContext({
+    enabled: () => true,
+    now: () => 9_000,
+    fetch: async () => jsonResponse(document),
+  })
+  assert.deepEqual(
+    await service.refresh(['claude-sonnet-5-5', 'gpt-image-2']),
+    {
+      status: 'refreshed',
+      fetchedAt: 9_000,
+      windows: 1,
+    },
+  )
+  assert.equal(service.windowFor('claude-sonnet-5-5'), 1_000_000)
+  assert.equal(service.windowFor('gpt-image-2'), undefined)
+})
+
+test('an unreadable entry is skipped rather than fatal', async () => {
   const service = seededService({
     now: () => 9_000,
-    fetch: async () => jsonResponse({ p: { models: { x: null } } }),
+    fetch: async () =>
+      jsonResponse({
+        p: { models: { x: null, y: { id: 'y', limit: { context: 300_000 } } } },
+      }),
   })
-  const outcome = await service.refresh(['deepseek-v41-flash-1017'])
-  assert.equal(outcome.status, 'failed')
-  assert.equal(service.fetchedAt(), 950)
-  assert.equal(service.windowFor('deepseek-v41-flash-1017'), 1_048_576)
+  assert.deepEqual(await service.refresh(['y']), {
+    status: 'refreshed',
+    fetchedAt: 9_000,
+    windows: 1,
+  })
+  assert.equal(service.windowFor('y'), 300_000)
+  assert.equal(service.fetchedAt(), 9_000)
 })
 
 test('a valid catalog with no matching capacity replaces the projection', async () => {

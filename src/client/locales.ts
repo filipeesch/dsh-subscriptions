@@ -261,26 +261,39 @@ export const en = {
   cursorManage: 'Manage models',
   cursorManageTitle: 'Manage Cursor models',
   cursorManageHint:
-    'Disable models you do not use, choose the context tier each requests, and ' +
-    'set a window only when neither the catalog nor models.dev describes the ' +
-    'model. A model disabled here leaves the picker, while a saved conversation ' +
-    'keeps working.',
-  cursorSourceOn: 'Context capacities from models.dev: on',
-  cursorSourceOff: 'Context capacities from models.dev: off',
+    'Disable models you do not use and correct a window that models.dev gets ' +
+    'wrong. A model disabled here leaves the picker, while a saved conversation ' +
+    'keeps working. Changes save as you make them.',
+  cursorSourceOn: 'Context capacities: automatic (models.dev)',
+  cursorSourceOff: 'Context capacities: models.dev is off',
   cursorSourceNever: 'never refreshed',
   cursorSourceUpdated: 'last refresh {date}',
-  cursorSourceRefresh: 'Refresh capacities',
-  cursorSourceDisable: 'Turn off capacities from models.dev',
-  cursorSourceEnable: 'Turn on capacities from models.dev',
   cursorSourceRefreshFailedRetained:
     'Could not refresh capacities ({message}). Using the last successful refresh.',
   cursorSourceRefreshFailedNoCache:
     'Could not refresh capacities ({message}). Models without a tier use their manual window or the default.',
-  cursorSourceToggleFailed: 'Could not change the capacity source: {message}',
-  cursorSourceDisabledRefresh:
-    'The capacity source is off. Turn it on before refreshing.',
-  cursorSourceNoModels:
+  cursorCapacityTitle: 'Context capacities',
+  cursorCapacityOn:
+    'A model whose catalog entry offers no context tier reads its window from ' +
+    'the public models.dev catalog.',
+  cursorCapacityOff:
+    'The public catalog is not read. A model without a tier uses its manual ' +
+    'window or the 200 000 default.',
+  cursorCapacityFallback:
+    '{count} of {total} models advertise the default 200 000 window.',
+  cursorCapacityAllDescribed:
+    'Every listed model reads its window from a tier, a manual value, or ' +
+    'models.dev.',
+  cursorCapacityRefresh: 'Refresh now',
+  cursorCapacityRefreshing: 'Refreshing…',
+  cursorCapacityEnable: 'Turn on',
+  cursorCapacityDisable: 'Turn off',
+  cursorCapacityRefreshed: 'Capacities refreshed: {count} models described.',
+  cursorCapacityDisabledRefresh:
+    'The source is off. Turn it on before refreshing.',
+  cursorCapacityNoModels:
     'No models are listed yet, so there is nothing to refresh.',
+  cursorCapacityToggleFailed: 'Could not change the capacity source: {message}',
   cursorModelsLoading: 'Loading the Cursor catalog…',
   cursorModelsEmpty: 'Cursor has not published any models yet.',
   cursorModelsRetry: 'Retry',
@@ -288,22 +301,21 @@ export const en = {
   cursorModelsReloading: 'Reloading…',
   cursorModelsLoadFailed: 'Could not load the Cursor models: {message}',
   cursorModelsSaveFailed: 'Could not save the Cursor model settings: {message}',
+  cursorModelsSummary: '{enabled} of {total} enabled',
   cursorModelEnabled: 'Enable {model}',
-  cursorModelTier: 'Context tier',
-  cursorModelTierFor: 'Context tier for {model}',
-  cursorModelAuto: 'Auto',
-  cursorModelWindow: 'Window (tokens)',
   cursorModelWindowFor: 'Context window for {model}',
-  cursorModelWindowHint: 'Leave blank to clear a manual value.',
-  cursorModelTierWithdrawn: 'no longer offered',
-  cursorModelContextMin: 'Smallest offered tier',
-  cursorModelContextMax: 'Largest offered tier',
+  cursorModelOverride: 'Override the context window for {model}',
+  cursorModelResetOverride: 'Return {model} to the automatic window',
+  cursorModelWindowInvalid:
+    'Enter a positive whole number of tokens, or leave the field empty to use ' +
+    'the automatic window.',
+  cursorModelWriteFailed: 'Could not save {model}: {message}',
   cursorModelNotDescribed: "no parameters in Cursor's catalog",
   cursorWindowTier: 'provider tier {tier}',
   cursorWindowPublished: 'published by models.dev',
   cursorWindowManual: 'manual value',
   cursorWindowDefault: 'documented default',
-  cursorWindowInvalid: 'Enter a positive whole number of tokens for {model}.',
+  cursorWindowReplaces: 'replaces {value} from models.dev',
   cursorSave: 'Save',
   cursorCancel: 'Cancel',
   cursorSaving: 'Saving…',
@@ -607,21 +619,32 @@ export const zh = {
   cursorManage: '管理模型',
   cursorManageTitle: '管理 Cursor 模型',
   cursorManageHint:
-    '停用不用的模型、选择每个模型请求的上下文档位，并仅在目录与 models.dev 都未描述该模型时设置窗口。在此停用的模型会从选择器移除，但已保存的会话仍可继续。',
-  cursorSourceOn: '来自 models.dev 的上下文容量：开启',
-  cursorSourceOff: '来自 models.dev 的上下文容量：关闭',
+    '停用不用的模型，并修正 models.dev 描述错误的窗口。在此停用的模型会从选择器移除，但已保存的会话仍可继续。修改会即时保存。',
+  cursorSourceOn: '上下文容量：自动（models.dev）',
+  cursorSourceOff: '上下文容量：models.dev 已关闭',
   cursorSourceNever: '从未刷新',
   cursorSourceUpdated: '最近刷新：{date}',
-  cursorSourceRefresh: '刷新容量',
-  cursorSourceDisable: '关闭来自 models.dev 的容量',
-  cursorSourceEnable: '开启来自 models.dev 的容量',
   cursorSourceRefreshFailedRetained:
     '刷新容量失败（{message}）。仍在使用上次成功刷新的容量。',
   cursorSourceRefreshFailedNoCache:
     '刷新容量失败（{message}）。未提供档位的模型使用手动窗口或默认值。',
-  cursorSourceToggleFailed: '无法更改容量来源：{message}',
-  cursorSourceDisabledRefresh: '容量来源已关闭，请先开启再刷新。',
-  cursorSourceNoModels: '尚未列出任何模型，暂无可刷新的内容。',
+  cursorCapacityTitle: '上下文容量',
+  cursorCapacityOn:
+    '目录未提供上下文档位的模型，其窗口来自公开的 models.dev 目录。',
+  cursorCapacityOff:
+    '不读取公开目录。没有档位的模型使用手动窗口或 200 000 默认值。',
+  cursorCapacityFallback:
+    '{total} 个模型中有 {count} 个使用默认的 200 000 窗口。',
+  cursorCapacityAllDescribed:
+    '所有模型都从档位、手动值或 models.dev 取得窗口。',
+  cursorCapacityRefresh: '立即刷新',
+  cursorCapacityRefreshing: '刷新中…',
+  cursorCapacityEnable: '启用',
+  cursorCapacityDisable: '停用',
+  cursorCapacityRefreshed: '容量已刷新：描述了 {count} 个模型。',
+  cursorCapacityDisabledRefresh: '容量来源已关闭，请先开启再刷新。',
+  cursorCapacityNoModels: '尚未列出任何模型，暂无可刷新的内容。',
+  cursorCapacityToggleFailed: '无法更改容量来源：{message}',
   cursorModelsLoading: '正在加载 Cursor 模型目录…',
   cursorModelsEmpty: 'Cursor 尚未发布任何模型。',
   cursorModelsRetry: '重试',
@@ -629,22 +652,19 @@ export const zh = {
   cursorModelsReloading: '重新加载中…',
   cursorModelsLoadFailed: '加载 Cursor 模型失败：{message}',
   cursorModelsSaveFailed: '保存 Cursor 模型设置失败：{message}',
+  cursorModelsSummary: '已启用 {enabled}/{total}',
   cursorModelEnabled: '启用 {model}',
-  cursorModelTier: '上下文档位',
-  cursorModelTierFor: '{model} 的上下文档位',
-  cursorModelAuto: '自动',
-  cursorModelWindow: '窗口（token）',
   cursorModelWindowFor: '{model} 的上下文窗口',
-  cursorModelWindowHint: '留空即可清除手动值。',
-  cursorModelTierWithdrawn: '不再提供',
-  cursorModelContextMin: '提供的最小档位',
-  cursorModelContextMax: '提供的最大档位',
+  cursorModelOverride: '为 {model} 覆盖上下文窗口',
+  cursorModelResetOverride: '让 {model} 恢复自动窗口',
+  cursorModelWindowInvalid: '请输入正整数 token 数，或留空以使用自动窗口。',
+  cursorModelWriteFailed: '无法保存 {model}：{message}',
   cursorModelNotDescribed: 'Cursor 目录未提供参数',
   cursorWindowTier: '提供方档位 {tier}',
   cursorWindowPublished: '由 models.dev 公开',
   cursorWindowManual: '手动值',
   cursorWindowDefault: '默认值',
-  cursorWindowInvalid: '请为 {model} 输入正整数 token 数。',
+  cursorWindowReplaces: '替代 models.dev 的 {value}',
   cursorSave: '保存',
   cursorCancel: '取消',
   cursorSaving: '保存中…',

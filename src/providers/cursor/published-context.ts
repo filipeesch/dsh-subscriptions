@@ -147,11 +147,16 @@ export function publishedEntries(document: unknown): PublishedModel[] {
 
 /**
  * Whether a document has the shape this projection understands: a non-empty
- * object of providers, each with a models object. A structurally valid catalog
- * may match no listed id (an empty projection), which is different from a
- * malformed response and must not be confused with one.
+ * object of provider objects, each carrying a models object.
+ *
+ * Whether one entry declares a capacity is the projection's business, not the
+ * document's. The endpoint lists image, speech, and transcription models with
+ * `limit.context: 0`; judging those here would make one such entry hide every
+ * readable one. `publishedEntries` skips an entry it cannot read, and a
+ * structurally valid catalog may still match no listed id, which is different
+ * from a malformed response and must not be confused with one.
  */
-export function isPublishedCatalogDocument(value: unknown): boolean {
+export function hasPublishedCatalogShape(value: unknown): boolean {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const providers = Object.values(value as Record<string, unknown>)
   if (providers.length === 0) return false
@@ -159,51 +164,10 @@ export function isPublishedCatalogDocument(value: unknown): boolean {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry))
       return false
     const models = (entry as { models?: unknown }).models
-    if (
-      models === null ||
-      typeof models !== 'object' ||
-      Array.isArray(models)
-    ) {
-      return false
-    }
-    // A model map is only readable when every entry is an object; a null or
-    // malformed nested entry means the response itself is broken, not that the
-    // catalog legitimately has no capacities.
-    return Object.values(models as Record<string, unknown>).every((model) =>
-      isPublishedModelEntry(model),
+    return (
+      models !== null && typeof models === 'object' && !Array.isArray(models)
     )
   })
-}
-
-/** Whether one nested model entry has the fields the projection may read. */
-function isPublishedModelEntry(value: unknown): boolean {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
-  const entry = value as {
-    id?: unknown
-    name?: unknown
-    limit?: unknown
-  }
-  if (entry.id !== undefined) {
-    if (typeof entry.id !== 'string' || !entry.id.trim()) return false
-  }
-  if (entry.name !== undefined && typeof entry.name !== 'string') return false
-  if (entry.limit !== undefined) {
-    if (
-      !entry.limit ||
-      typeof entry.limit !== 'object' ||
-      Array.isArray(entry.limit)
-    ) {
-      return false
-    }
-    const context = (entry.limit as { context?: unknown }).context
-    if (
-      context !== undefined &&
-      (typeof context !== 'number' || !Number.isFinite(context) || context <= 0)
-    ) {
-      return false
-    }
-  }
-  return true
 }
 
 /** Whether one published entry belongs to the model's own vendor. */
@@ -444,7 +408,7 @@ export class PublishedContext {
         this.deps.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         this.deps.maxBytes ?? DEFAULT_MAX_BYTES,
       )
-      if (!isPublishedCatalogDocument(document)) {
+      if (!hasPublishedCatalogShape(document)) {
         throw new Error(
           'models.dev returned a document this projection cannot read',
         )

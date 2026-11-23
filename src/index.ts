@@ -103,9 +103,7 @@ import {
 } from './providers/key-route.js'
 import { CursorAdapter, CURSOR_ROUTE } from './providers/cursor/adapter.js'
 import { DEFAULT_CURSOR_API_KEY_REF } from './providers/cursor/route.js'
-import { DEFAULT_CURSOR_CONTEXT } from './providers/cursor/params.js'
 import {
-  contextPreferenceFor,
   enabledFor,
   manualWindowFor,
   publishedContextEnabled,
@@ -268,14 +266,12 @@ export interface Config {
   cursor?: {
     /** Credential reference naming the Cursor API key (default CURSOR_API_KEY). */
     apiKeyRef?: string
-    /** Context tier preference: `max` (default) or an offered tier such as `300k`. */
-    context?: string
     /** Working directory for Cursor agents; default is the session's directory. */
     cwd?: string
-    /** Manual advertised window per model; a last resort behind tier and published capacity. */
+    /** Manual advertised window per model; it outranks the published capacity. */
     contextWindows?: Record<string, unknown>
-    /** Per-model baseline: enablement and tier preference. */
-    models?: Record<string, { enabled?: boolean; context?: string }>
+    /** Per-model baseline: enablement. */
+    models?: Record<string, { enabled?: boolean }>
     /** Whether the models.dev projection may fetch (default true). */
     publishedContext?: boolean
   }
@@ -333,14 +329,13 @@ export const Config: z<Config> = z.object({
   }),
   cursor: z.object({
     apiKeyRef: z.string().default(DEFAULT_CURSOR_API_KEY_REF),
-    context: z.string().default(DEFAULT_CURSOR_CONTEXT),
     cwd: z.string(),
     // Individual entries are validated by the policy, not the schema: one bad
     // entry is ignored instead of rejecting the whole configuration.
     // Raw values are accepted here and validated one entry at a time by the
     // policy, so one bad type does not reject the whole configuration.
     contextWindows: z.dict(z.any()),
-    models: z.dict(z.object({ enabled: z.boolean(), context: z.string() })),
+    models: z.dict(z.object({ enabled: z.boolean() })),
     publishedContext: z.boolean(),
   }),
   ollama: z.object({
@@ -1419,11 +1414,9 @@ export function apply(ctx: Context, config: Config): void {
   const cursorApiKeyRef = (): string =>
     config.cursor?.apiKeyRef ?? DEFAULT_CURSOR_API_KEY_REF
   // Per field: the stored setting, then the configured baseline, then the route
-  // default. A model without any of them follows the route-wide tier.
+  // default. The requested tier is not configurable: it is always the largest
+  // the catalog offers, minus any tier Cursor accepted after a rejection.
   const cursorPolicy = () => config.cursor
-  const cursorContextFor = (modelId: string | undefined): string =>
-    contextPreferenceFor(cursorSettings.get(), cursorPolicy(), modelId)
-  const cursorContext = (): string => cursorContextFor(undefined)
   const cursorManualWindow = (modelId: string): number | undefined =>
     manualWindowFor(cursorSettings.get(), cursorPolicy(), modelId)
   const cursorEnabled = (modelId: string): boolean =>
@@ -1471,15 +1464,13 @@ export function apply(ctx: Context, config: Config): void {
       apiKey: async () => (await resolveCredential(cursorApiKeyRef()))?.value,
       cwd: (sessionId) =>
         cursorWorkingDirectory(ctx, sessionId, config.cursor?.cwd),
-      contextPreference: cursorContextFor,
       publishedWindow: (modelId) => cursorPublished.windowFor(modelId),
       manualWindow: cursorManualWindow,
       enabled: cursorEnabled,
-      acceptedTier: (modelId, preference) =>
-        cursorSettings.acceptedTier(modelId, preference),
-      rememberAcceptedTier: (modelId, value, preference) => {
+      acceptedTier: (modelId) => cursorSettings.acceptedTier(modelId),
+      rememberAcceptedTier: (modelId, value) => {
         void cursorSettings
-          .rememberAcceptedTier(modelId, value, preference)
+          .rememberAcceptedTier(modelId, value)
           .catch(cursorTierWarning)
       },
       forgetAcceptedTier: (modelId, expected) => {
@@ -1548,7 +1539,6 @@ export function apply(ctx: Context, config: Config): void {
     ollamaCatalog,
     cursorSettings,
     cursorApiKeyRef,
-    cursorContext,
     cursorCatalog: async (refresh?: boolean) => {
       if (refresh === true) {
         return (await cursorAdapter?.refreshCatalog()) ?? []

@@ -9,11 +9,7 @@ import { memoryCatalogStore, memoryTierStore } from './cursor-test-helpers.js'
 import type { CursorCatalogModel } from '../src/providers/cursor/catalog.js'
 import { PublishedContext } from '../src/providers/cursor/published-context.js'
 import { CursorSettingsStore } from '../src/providers/cursor-settings.js'
-import {
-  contextPreferenceFor,
-  enabledFor,
-  manualWindowFor,
-} from '../src/providers/cursor/policy.js'
+import { enabledFor, manualWindowFor } from '../src/providers/cursor/policy.js'
 import {
   cursorCatalogStore,
   loadCursorCatalog,
@@ -780,18 +776,17 @@ test('startup revalidation publishes the seed and reads the SDK once', async () 
 
 test('a withdrawn tier is forgotten on catalog change and cannot reappear without a turn', async () => {
   const tier = memoryTierStore()
-  tier.rememberAcceptedTier('claude-sonnet-5-5', '200k', 'max')
+  tier.rememberAcceptedTier('claude-sonnet-5-5', '200k')
   let models = CATALOG
   const { gateway } = gatewayOf()
   gateway.listModels = async () => models
   const adapter = adapterOf(gateway, {
     catalogTtlMs: 0,
     ...tier,
-    contextPreference: () => 'max',
   })
   // The catalog still offers the tier: the record survives the read.
   await adapter.listModels('cursor')
-  assert.equal(tier.acceptedTier('claude-sonnet-5-5', 'max'), '200k')
+  assert.equal(tier.acceptedTier('claude-sonnet-5-5'), '200k')
   // A live read without that tier forgets it, without waiting for a turn.
   models = [
     {
@@ -801,7 +796,7 @@ test('a withdrawn tier is forgotten on catalog change and cannot reappear withou
     },
   ]
   await adapter.listModels('cursor')
-  assert.equal(tier.acceptedTier('claude-sonnet-5-5', 'max'), undefined)
+  assert.equal(tier.acceptedTier('claude-sonnet-5-5'), undefined)
   // Reappearance does not make the old acceptance effective again.
   models = CATALOG
   assert.deepEqual(
@@ -811,7 +806,7 @@ test('a withdrawn tier is forgotten on catalog change and cannot reappear withou
   )
 })
 
-test('a restart applies enabled, tier, and window from the settings file', async () => {
+test('a restart applies enabled, remembered tier, and window from the settings file', async () => {
   const path = join(
     mkdtempSync(join(tmpdir(), 'cursor-settings-')),
     'settings.json',
@@ -820,19 +815,21 @@ test('a restart applies enabled, tier, and window from the settings file', async
   await store.set({
     publishedContext: false,
     models: {
-      // Auto has no tier, so its saved manual window is observable; Claude has
-      // a saved tier, which outranks its (deliberately wrong) manual value.
-      default: { enabled: false, context: 'max', contextWindow: 300_000 },
-      'claude-sonnet-5-5': {
-        enabled: true,
-        context: '200k',
-        contextWindow: 999_999,
-      },
+      // Auto has no tier, so its saved manual window is observable; Claude is
+      // tiered, so its manual value is inert and only the tier decides.
+      default: { enabled: false, contextWindow: 300_000 },
+      'claude-sonnet-5-5': { enabled: true, contextWindow: 999_999 },
     },
+    acceptedTiers: { 'claude-sonnet-5-5': { value: '200k' } },
   })
   // Reopen from the file: the adapter must read the durable document, not the
   // writer instance that produced it.
   const reopened = new CursorSettingsStore(path)
+  const tier = memoryTierStore()
+  tier.rememberAcceptedTier(
+    'claude-sonnet-5-5',
+    reopened.acceptedTier('claude-sonnet-5-5') as string,
+  )
   const { gateway, agents } = gatewayOf([[[], { status: 'finished' }]])
   const adapter = new CursorAdapter({
     gateway,
@@ -841,10 +838,9 @@ test('a restart applies enabled, tier, and window from the settings file', async
     prewarm: false,
     catalogPersistence: memoryCatalogStore(),
     enabled: (modelId) => enabledFor(reopened.get(), undefined, modelId),
-    contextPreference: (modelId) =>
-      contextPreferenceFor(reopened.get(), undefined, modelId),
     manualWindow: (modelId) =>
       manualWindowFor(reopened.get(), undefined, modelId),
+    ...tier,
   })
   // The disabled model leaves the picker but exact resolution keeps working.
   assert.deepEqual(
@@ -854,7 +850,8 @@ test('a restart applies enabled, tier, and window from the settings file', async
   assert.deepEqual((await adapter.resolveModel('cursor', 'default')).context, {
     contextWindow: 300_000,
   })
-  // The saved tier is announced and sent on the wire.
+  // The remembered tier is announced and sent on the wire, outranking the
+  // inert manual value the settings also carry for that model.
   assert.deepEqual(
     (await adapter.resolveModel('cursor', 'claude-sonnet-5-5')).context,
     { contextWindow: 200_000 },

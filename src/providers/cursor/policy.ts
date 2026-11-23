@@ -7,17 +7,14 @@
  */
 
 import type { CursorModelSettings, CursorSettings } from '../cursor-settings.js'
-import { DEFAULT_CURSOR_CONTEXT } from './params.js'
 
 /** One model's configured baseline. */
 export interface CursorModelConfig {
   enabled?: boolean
-  context?: string
 }
 
 /** What the plugin configuration may set for the route. */
 export interface CursorConfigPolicy {
-  context?: string
   contextWindows?: Record<string, unknown>
   models?: Record<string, CursorModelConfig>
   publishedContext?: boolean
@@ -31,24 +28,6 @@ function settingFor(
   return models !== undefined && Object.hasOwn(models, modelId)
     ? models[modelId]
     : undefined
-}
-
-/**
- * The tier preference for one model; the route-wide default when the field is
- * absent everywhere.
- */
-export function contextPreferenceFor(
-  settings: CursorSettings,
-  config: CursorConfigPolicy | undefined,
-  modelId?: string,
-): string {
-  if (modelId === undefined) return config?.context ?? DEFAULT_CURSOR_CONTEXT
-  return (
-    settingFor(settings, modelId)?.context ??
-    config?.models?.[modelId]?.context ??
-    config?.context ??
-    DEFAULT_CURSOR_CONTEXT
-  )
 }
 
 /** The manual window for one model, when settings or configuration name one. */

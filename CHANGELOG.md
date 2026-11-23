@@ -1,3 +1,24 @@
+## v0.6.0 — 2026-11-23
+
+- **Cursor published capacities.** The projection now reads the document it is
+  given: an entry that declares no context window — an image, speech, or
+  transcription model — is skipped instead of failing the whole refresh. The
+  refresh had never succeeded, so every model whose catalog entry offers no tier
+  advertised the generic 200 000-token window.
+- **Manual windows outrank the published estimate.** A wrong upstream number is
+  corrected on the model itself instead of by switching the source off, and the
+  source switch now only stops the fetch and the stored projection.
+- **Breaking:** the context tier preference is gone. The route always requests
+  the largest tier a model offers and remembers the one Cursor accepted after a
+  rejection. `cursor.context` and `cursor.models[].context` no longer select a
+  tier; a profile that declares them loads and ignores them.
+- **Cursor model manager.** One compact row per model with the window the route
+  will advertise and its source, a filter, a count of enabled models, and a
+  pencil that stores a manual override. Changes save as they are made, and a
+  refused change restores the stored value and states the failure in the row.
+  The capacity source's controls moved from the card into the manager, leaving
+  the card with a one-line state.
+
 ## v0.5.0 — 2026-11-21
 
 - **Cursor context capacity.** The route resolves its advertised window from the

@@ -426,7 +426,6 @@ test('prewarm closes its agent when disposal lands before the send', async () =>
     },
     apiKey: async () => 'crsr_test',
     cwd: () => '/tmp',
-    contextPreference: () => 'max',
     keyRef: 'CURSOR_API_KEY',
   })
   runtime.prewarm('crsr_test', 'claude-sonnet-5-5')
@@ -625,7 +624,6 @@ test('a failed prewarm send closes its agent once', async () => {
     },
     apiKey: async () => 'crsr_test',
     cwd: () => '/tmp',
-    contextPreference: () => 'max',
     keyRef: 'CURSOR_API_KEY',
   })
   runtime.prewarm('crsr_test', 'claude-sonnet-5-5')
@@ -657,7 +655,6 @@ test('disposal during a pending prewarm send closes its agent once', async () =>
     },
     apiKey: async () => 'crsr_test',
     cwd: () => '/tmp',
-    contextPreference: () => 'max',
     keyRef: 'CURSOR_API_KEY',
   })
   runtime.prewarm('crsr_test', 'claude-sonnet-5-5')
@@ -1410,7 +1407,6 @@ test('a catalog refresh withdraws a learned tier from reuse', async () => {
     gateway,
     apiKey: async () => 'crsr_key',
     cwd: () => '/tmp',
-    contextPreference: () => 'max',
     keyRef: 'CURSOR_API_KEY',
     ...memoryTierStore(),
   })
@@ -2327,14 +2323,9 @@ test('a learned tier is visible immediately and survives a restart on disk', asy
   const store = new CursorSettingsStore(path)
   let writing: Promise<void> = Promise.resolve()
   const wiring = {
-    acceptedTier: (modelId: string, preference: string) =>
-      store.acceptedTier(modelId, preference),
-    rememberAcceptedTier: (
-      modelId: string,
-      value: string,
-      preference: string,
-    ) => {
-      writing = store.rememberAcceptedTier(modelId, value, preference)
+    acceptedTier: (modelId: string) => store.acceptedTier(modelId),
+    rememberAcceptedTier: (modelId: string, value: string) => {
+      writing = store.rememberAcceptedTier(modelId, value)
     },
     forgetAcceptedTier: (modelId: string) => {
       writing = store.forgetAcceptedTier(modelId)
@@ -2356,7 +2347,7 @@ test('a learned tier is visible immediately and survives a restart on disk', asy
     'the durable record decides the announced window after a restart',
   )
   assert.equal(
-    new CursorSettingsStore(path).acceptedTier('claude-sonnet-5-5', 'max'),
+    new CursorSettingsStore(path).acceptedTier('claude-sonnet-5-5'),
     '200k',
   )
 })

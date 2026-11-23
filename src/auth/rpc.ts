@@ -368,8 +368,6 @@ export interface CursorSettingsView {
   provider: 'cursor'
   /** Credential reference that holds the API key. */
   keyRef: string
-  /** Context tier preference; `max` means the largest offered. */
-  context: string
   /** Monthly ceiling in US dollars, when one is stored. */
   ceilingUSD?: number
   /** Models the route currently advertises; absent when the catalog failed. */
@@ -383,17 +381,8 @@ export interface CursorSettingsView {
 /** The model manager's payload. */
 export interface CursorModelsView {
   provider: 'cursor'
-  /** Route-wide tier preference, shown when a model has no override. */
-  context: string
   models: import('../providers/cursor/model-rows.js').CursorModelRow[]
   knownContext: CursorKnownContextView
-  /** Stored edits, so a save preserves models the current catalog no longer lists. */
-  storedModels: Record<
-    string,
-    { enabled?: boolean; context?: string; contextWindow?: number }
-  >
-  /** Whether the published-capacity source may fetch. */
-  publishedContext: boolean
 }
 
 /**

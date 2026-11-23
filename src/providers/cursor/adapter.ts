@@ -28,12 +28,7 @@ import {
 } from './catalog.js'
 import { cursorCatalogStore } from './catalog-store.js'
 import { resolveContextWindow } from './context-window.js'
-import {
-  DEFAULT_CURSOR_CONTEXT,
-  contextTierValue,
-  offeredTierValue,
-  reasoningInfo,
-} from './params.js'
+import { offeredTierValue, reasoningInfo, requestedTier } from './params.js'
 import { catalogSignature } from './catalog.js'
 import { CURSOR_ROUTE, DEFAULT_CURSOR_API_KEY_REF } from './route.js'
 import type { Image } from './prompt.js'
@@ -58,28 +53,19 @@ export interface CursorAdapterOptions {
   apiKey: () => Promise<string | undefined>
   /** Working directory for one session's agent. */
   cwd: (sessionId: string | undefined) => string
-  /** Live context tier preference for one model (default `max`). */
-  contextPreference?: (modelId?: string) => string
   /** Capacity the public catalog publishes for one model, when it describes it. */
   publishedWindow?: (modelId: string) => number | undefined
   /** Manual window for one model; settings already won over configuration. */
   manualWindow?: (modelId: string) => number | undefined
-  /** The tier Cursor accepted for this model and preference, when remembered. */
-  acceptedTier?: (modelId: string, preference: string) => string | undefined
+  /** The tier Cursor accepted for this model after a rejection, when remembered. */
+  acceptedTier?: (modelId: string) => string | undefined
   /** Remember a tier Cursor accepted after a rejection. */
-  rememberAcceptedTier?: (
-    modelId: string,
-    value: string,
-    preference: string,
-  ) => void
+  rememberAcceptedTier?: (modelId: string, value: string) => void
   /**
    * Drop a remembered tier that no longer applies. The expected record, when
    * given, protects a newer concurrent record from a stale withdrawal.
    */
-  forgetAcceptedTier?: (
-    modelId: string,
-    expected?: { value: string; preference: string },
-  ) => void
+  forgetAcceptedTier?: (modelId: string, expected?: { value: string }) => void
   /** Whether a model appears in the picker; absent means enabled. */
   enabled?: (modelId: string) => boolean
   /** Called with the ids a successful live catalog read listed. */
@@ -121,8 +107,6 @@ export class CursorAdapter extends LlmAdapter {
       gateway: options.gateway,
       apiKey: options.apiKey,
       cwd: options.cwd,
-      contextPreference: (modelId) =>
-        options.contextPreference?.(modelId) ?? DEFAULT_CURSOR_CONTEXT,
       ...(options.acceptedTier === undefined
         ? {}
         : { acceptedTier: options.acceptedTier }),
@@ -408,15 +392,9 @@ export class CursorAdapter extends LlmAdapter {
   }
 
   private windowFor(modelId: string, entry: CursorCatalogModel | undefined) {
-    const preference =
-      this.options.contextPreference?.(modelId) ?? DEFAULT_CURSOR_CONTEXT
     return resolveContextWindow({
       model: entry,
-      tier: contextTierValue(
-        entry,
-        this.options.acceptedTier?.(modelId, preference),
-        preference,
-      ),
+      tier: requestedTier(entry, this.options.acceptedTier?.(modelId)),
       publishedWindow: this.options.publishedWindow?.(modelId),
       manualWindow: this.options.manualWindow?.(modelId),
     })
@@ -594,14 +572,10 @@ export class CursorAdapter extends LlmAdapter {
   /** Forget remembered tiers whose model no longer offers that value. */
   private pruneWithdrawnTiers(models: readonly CursorCatalogModel[]): void {
     for (const model of models) {
-      const preference = this.options.contextPreference?.(model.id) ?? 'max'
-      const remembered = this.options.acceptedTier?.(model.id, preference)
+      const remembered = this.options.acceptedTier?.(model.id)
       if (remembered === undefined) continue
       if (offeredTierValue(model, remembered) !== undefined) continue
-      this.options.forgetAcceptedTier?.(model.id, {
-        value: remembered,
-        preference,
-      })
+      this.options.forgetAcceptedTier?.(model.id, { value: remembered })
     }
   }
 }

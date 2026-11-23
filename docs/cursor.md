@@ -18,8 +18,10 @@ login and keeps no `auth.json` entry.
   with the current tools.
 - Cursor's subscription quota in **Settings → Subscriptions**, the footer quota
   bar, and the usage dialog.
-- A **Manage models** dialog on the Cursor card: enablement, the requested
-  context tier, and a manual window for models nothing else describes.
+- A **Manage models** dialog on the Cursor card: enablement, each model's
+  advertised window with the source it came from, and a manual override for a
+  window nothing else describes or the public catalog gets wrong. Every change
+  saves as it is made.
 
 ## Prerequisite
 
@@ -41,29 +43,30 @@ missing-credential error on use.
   config:
     cursor:
       apiKeyRef: CURSOR_API_KEY
-      context: max
       contextWindows:
         composer-2.5: 200000
       models:
-        grok-4.7:
-          context: 500k
         auto-smart:
           enabled: false
       publishedContext: true
 ```
 
-| Option             | Default               | Meaning                                                               |
-| ------------------ | --------------------- | --------------------------------------------------------------------- |
-| `apiKeyRef`        | `CURSOR_API_KEY`      | DSH credential reference holding the key                              |
-| `context`          | `max`                 | Route-wide tier: `max` (the largest offered), `min`, or an exact tier |
-| `cwd`              | the session directory | Working directory for Cursor agents                                   |
-| `contextWindows`   | none                  | Manual advertised window per model, in tokens                         |
-| `models`           | none                  | Per-model baseline: `enabled` and `context`                           |
-| `publishedContext` | `true`                | Whether the route may read published capacities from models.dev       |
+| Option             | Default               | Meaning                                                         |
+| ------------------ | --------------------- | --------------------------------------------------------------- |
+| `apiKeyRef`        | `CURSOR_API_KEY`      | DSH credential reference holding the key                        |
+| `cwd`              | the session directory | Working directory for Cursor agents                             |
+| `contextWindows`   | none                  | Manual advertised window per model, in tokens                   |
+| `models`           | none                  | Per-model baseline: `enabled`                                   |
+| `publishedContext` | `true`                | Whether the route may read published capacities from models.dev |
 
-A rejected context tier is retried once with the next smaller offered tier and
-remembered for later runs, across restarts. Cursor's Fast tier stays off, so
-pricing and latency are the standard ones.
+The requested context tier is not configurable: the route always asks for the
+largest tier a model offers. A tier Cursor rejects is retried once with the next
+smaller offered tier, and that accepted tier is remembered for later runs,
+across restarts. The tier preference this table used to carry (`context`, and
+`context` inside `models`) no longer selects anything; a profile that still
+declares either key loads and ignores it.
+
+Cursor's Fast tier stays off, so pricing and latency are the standard ones.
 
 ## Context windows
 
@@ -71,38 +74,45 @@ DSH meters the window the route advertises: compaction pricing uses it, so a
 window smaller than the provider applies forces premature compaction and a
 larger one lets a request overflow. The route resolves it in this order:
 
-1. the capacity of the context tier the request carries (the tier Cursor
-   accepted after a rejection wins while the catalog still offers it);
-2. the capacity the public [models.dev](https://models.dev) catalog publishes
+1. the capacity of the context tier the request carries (the largest offered, or
+   the one Cursor accepted after a rejection while the catalog still offers it);
+2. a manual value for the model, stored by the dialog or set in
+   `contextWindows`;
+3. the capacity the public [models.dev](https://models.dev) catalog publishes
    for the model;
-3. a manual value for the model;
 4. 200 000 tokens.
 
+A manual value outranks the published capacity because the published number is a
+third-party estimate and the manual one is the reader's correction. Only the
+requested tier outranks both, because that is what the provider applies.
+
 Models Cursor lists without a context tier, such as `deepseek-v41-flash-1017`,
-reach step 2 and advertise the capacity the public catalog states. That number
-is a third-party estimate, not a provider guarantee. The public catalog is
-fetched out of band (on start and when the stored projection is older than 24
+reach step 3 and advertise the capacity the public catalog states. The catalog
+is fetched out of band (on start and when the stored projection is older than 24
 hours, through the host's proxy, with a 20-second timeout and a response cap),
 projected onto the ids Cursor currently lists, and stored in
-`~/.dsh/plugins/subscriptions/cursor-context-windows.json`. A withdrawn id stops
-being served immediately, a failed refresh keeps the previous projection, and no
-request waits for the network. A refresh the card starts reports whether it
-succeeded, failed, or could not run.
+`~/.dsh/plugins/subscriptions/cursor-context-windows.json`. The projection reads
+the entries it can: an entry that declares no context window — an image, speech,
+or transcription model — is skipped, so it cannot make the rest of the catalog
+unreadable. A withdrawn id stops being served immediately, a failed refresh
+keeps the previous projection, and no request waits for the network. A refresh
+started in the manager reports whether it succeeded, failed, or could not run.
 
-Turn the source off on the card, or with `publishedContext: false`, and step 2
-is skipped entirely: a stored projection is not served while the source is off.
-That is also how a wrong published number is corrected — switch the source off,
-then enter the manual value, because step 2 outranks step 3. A remembered tier
-is dropped when the catalog stops offering it or the tier preference changes, so
-it cannot come back by switching the preference back.
+Turn the source off in the manager, or with `publishedContext: false`, and step
+3 is skipped entirely: no fetch runs and a stored projection is not served.
+Correcting a wrong published number no longer needs that switch: the manager's
+pencil stores a manual value that outranks it. A remembered tier is dropped when
+the catalog stops offering it.
 
 The model catalog is stored beside it in `cursor-catalog.json`, and the
 per-model settings, remembered tiers, and the source switch live in
 `cursor-settings.json`. Settings win over the configuration for the same field.
-The **Manage models** dialog states each model's resolved window and where it
-came from; a model whose window comes from its tier or the public catalog is
-shown as read-only there. Enabling or disabling a model changes the picker only;
-a saved conversation keeps working.
+The **Manage models** dialog lists each model on one line with the window the
+route will advertise and the source it came from, and offers a manual override
+on every row whose window does not come from a tier. Enabling, disabling, and
+overriding save as the change is made; a change the route refuses restores the
+stored value and states the failure in that row. Enabling or disabling a model
+changes the picker only; a saved conversation keeps working.
 
 The advertised window matters beyond display: it is the budget DSH's compaction
 charges against, and a model switch compacts through the route that last
@@ -145,8 +155,9 @@ and remainder), and a click opens the full dialog.
   runs.
 - The public capacity source is third-party data. A model neither the catalog
   nor models.dev describes keeps the 200 000-token default unless a manual value
-  is set. A wrong upstream number cannot be overridden by the manual field while
-  the source is on; switch the source off first.
+  is set. A wrong upstream number is corrected with the manager's manual
+  override, which outranks it. The requested tier is always the largest the
+  model offers; the route steps down only when Cursor rejects it.
 
 ## Verification
 

@@ -5,10 +5,8 @@ import { createElement, act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Simulate } from 'react-dom/test-utils'
 import { CursorCard } from '../src/client/CursorCard.js'
-import {
-  CursorModelsManager,
-  type CursorModelsView,
-} from '../src/client/CursorModelsManager.js'
+import { CursorModelsManager } from '../src/client/CursorModelsManager.js'
+import type { CursorModelsView } from '../src/client/cursor-manager-derive.js'
 import { en } from '../src/client/locales.js'
 
 // React's act() needs this flag before any render outside a test renderer.
@@ -58,7 +56,6 @@ const refreshedAt = 1_765_000_000_000
 const settingsView = {
   provider: 'cursor' as const,
   keyRef: 'CURSOR_API_KEY',
-  context: 'max',
   publishedContext: true,
   models: 2,
   knownContext: { enabled: true, fetchedAt: refreshedAt },
@@ -69,10 +66,9 @@ const tieredRow = {
   name: 'Claude Sonnet 5.5',
   enabled: true,
   described: true,
-  tierOverride: '200k',
-  tierOptions: ['200k', '1m'],
-  window: { tokens: 200_000, source: 'tier' as const, tier: '200k' },
-  manualWindow: { editable: false, value: 200_000 },
+  window: { tokens: 1_000_000, source: 'tier' as const, tier: '1m' },
+  overridable: false,
+  manualValue: 1_000_000,
 }
 
 const editableRow = {
@@ -80,24 +76,29 @@ const editableRow = {
   name: 'Composer 2',
   enabled: false,
   described: true,
-  tierOptions: [] as string[],
   window: { tokens: 200_000, source: 'default' as const },
-  manualWindow: { editable: true, value: 200_000 },
+  overridable: true,
+  manualValue: 200_000,
+}
+
+const publishedRow = {
+  id: 'deepseek-v41-flash-1017',
+  name: 'DeepSeek V4.1 Flash 1017',
+  enabled: true,
+  described: false,
+  window: { tokens: 1_048_576, source: 'published' as const },
+  overridable: true,
+  manualValue: 1_048_576,
+  publishedWindow: 1_048_576,
 }
 
 function modelsView(
-  rows = [tieredRow, editableRow],
-  storedModels: CursorModelsView['storedModels'] = {
-    'claude-sonnet-5-5': { context: '200k' },
-  },
+  rows = [tieredRow, editableRow, publishedRow],
 ): CursorModelsView {
   return {
     provider: 'cursor',
-    context: 'max',
     models: rows,
     knownContext: { enabled: true, fetchedAt: refreshedAt },
-    storedModels,
-    publishedContext: true,
   }
 }
 
@@ -105,7 +106,10 @@ interface Dom {
   document: Document
   click: (element: Element | null) => Promise<void>
   setValue: (element: Element | null, value: string) => Promise<void>
+  setChecked: (element: Element | null, checked: boolean) => Promise<void>
   render: (element: ReturnType<typeof createElement>) => Promise<void>
+  /** Let a debounced write fire. */
+  wait: (ms: number) => Promise<void>
   text: () => string
 }
 
@@ -182,6 +186,24 @@ async function withDom(run: (dom: Dom) => Promise<void>): Promise<void> {
         await new Promise((resolveWait) => setTimeout(resolveWait, 20))
       })
     },
+    async setChecked(element, checked) {
+      assert.ok(element, 'the checkbox exists')
+      const input = element as HTMLInputElement
+      await act(async () => {
+        input.checked = checked
+        ;(
+          Simulate as unknown as {
+            change: (node: Element, event: unknown) => void
+          }
+        ).change(input, { target: { checked }, bubbles: true })
+        await new Promise((resolveWait) => setTimeout(resolveWait, 20))
+      })
+    },
+    async wait(ms) {
+      await act(async () => {
+        await new Promise((resolveWait) => setTimeout(resolveWait, ms))
+      })
+    },
     text() {
       return dom.document.body.textContent ?? ''
     },
@@ -209,53 +231,37 @@ function buttonByText(dom: Dom, label: string): Element | null {
   )
 }
 
-function select(dom: Dom, model: string): Element | null {
-  return dom.document.querySelector(
-    'select[aria-label="' + t('cursorModelTierFor', { model }) + '"]',
-  )
-}
-
 function input(dom: Dom, model: string): Element | null {
   return dom.document.querySelector(
     'input[aria-label="' + t('cursorModelWindowFor', { model }) + '"]',
   )
 }
 
-test('the card opens the manager and states a failed refresh with retained data', async () => {
+test('the card states the source on one line and opens the manager', async () => {
   const { rpc } = fakeRpc((endpoint) => {
     if (endpoint === 'externalStatus')
       return { ok: true, value: { cursor: { configured: true } } }
     if (endpoint === 'externalUsage')
       return { ok: true, value: { observedAt: refreshedAt, windows: [] } }
     if (endpoint === 'cursorSettings') return { ok: true, value: settingsView }
-    if (endpoint === 'cursorRefreshContext')
-      return {
-        ok: true,
-        value: {
-          enabled: true,
-          status: 'failed',
-          reason: 'models.dev answered 503',
-          fetchedAt: refreshedAt,
-        },
-      }
     if (endpoint === 'cursorModels') return { ok: true, value: modelsView() }
     return { ok: false, error: { message: 'unexpected ' + endpoint } }
   })
   await withDom(async (dom) => {
     await dom.render(createElement(CursorCard, { rpc, t }))
-    await dom.click(buttonByText(dom, en.cursorSourceRefresh))
-    assert.match(dom.text(), /models\.dev answered 503/)
-    assert.match(dom.text(), /last successful refresh/)
-    // The manager opens from the card and loads its rows.
+    // The card states the source and its age; the controls moved to the manager.
+    assert.ok(dom.text().includes(en.cursorSourceOn))
+    assert.equal(buttonByText(dom, en.cursorCapacityRefresh), null)
     await dom.click(
       dom.document.querySelector('button[aria-haspopup="dialog"]'),
     )
-    assert.match(dom.text(), new RegExp(en.cursorManageTitle))
+    assert.ok(dom.text().includes(en.cursorManageTitle))
     assert.match(dom.text(), /Claude Sonnet 5\.5/)
+    assert.ok(dom.text().includes(en.cursorCapacityTitle))
   })
 })
 
-test('clearing a tier to Auto saves the clear instead of the old value', async () => {
+test('an enablement change writes at once, with no save action', async () => {
   const { rpc, calls } = fakeRpc((endpoint) => {
     if (endpoint === 'cursorModels') return { ok: true, value: modelsView() }
     if (endpoint === 'cursorSetSettings') return { ok: true, value: {} }
@@ -270,31 +276,26 @@ test('clearing a tier to Auto saves the clear instead of the old value', async (
         onSaved: () => undefined,
       }),
     )
-    const control = select(dom, 'Claude Sonnet 5.5')
-    assert.equal((control as HTMLSelectElement).value, '200k')
-    await dom.setValue(control, '')
-    assert.equal((control as HTMLSelectElement).value, '')
-    await dom.click(buttonByText(dom, en.cursorSave))
-    const save = calls.filter((call) => call.endpoint === 'cursorSetSettings')
-    assert.equal(save.length, 1)
-    const models = (
-      save[0]?.payload.settings as { models: Record<string, unknown> }
-    ).models
-    // The stored tier is cleared, so the model has no entry at all.
-    assert.equal(models['claude-sonnet-5-5'], undefined)
+    assert.equal(buttonByText(dom, en.cursorSave), null)
+    const toggle = dom.document.querySelector(
+      'input[aria-label="' +
+        t('cursorModelEnabled', { model: 'Composer 2' }) +
+        '"]',
+    )
+    await dom.setChecked(toggle, true)
+    const writes = calls.filter((call) => call.endpoint === 'cursorSetSettings')
+    assert.equal(writes.length, 1)
+    assert.deepEqual(
+      (writes[0]?.payload.settings as { models: Record<string, unknown> })
+        .models,
+      { 'composer-2': { enabled: true } },
+    )
   })
 })
 
-test('inheritance over a YAML baseline saves a clear, not the baseline', async () => {
+test('a typed window writes after the pause and marks the row manual', async () => {
   const { rpc, calls } = fakeRpc((endpoint) => {
-    if (endpoint === 'cursorModels')
-      return {
-        ok: true,
-        value: modelsView(
-          [{ ...tieredRow, tierOverride: 'max' }, editableRow],
-          {},
-        ),
-      }
+    if (endpoint === 'cursorModels') return { ok: true, value: modelsView() }
     if (endpoint === 'cursorSetSettings') return { ok: true, value: {} }
     return { ok: false, error: { message: 'unexpected ' + endpoint } }
   })
@@ -307,20 +308,114 @@ test('inheritance over a YAML baseline saves a clear, not the baseline', async (
         onSaved: () => undefined,
       }),
     )
-    const control = select(dom, 'Claude Sonnet 5.5')
-    assert.equal((control as HTMLSelectElement).value, 'max')
-    await dom.setValue(control, '')
-    await dom.click(buttonByText(dom, en.cursorSave))
-    const save = calls.filter((call) => call.endpoint === 'cursorSetSettings')
-    assert.equal(save.length, 1)
-    const models = (
-      save[0]?.payload.settings as { models: Record<string, unknown> }
-    ).models
-    assert.equal(models['claude-sonnet-5-5'], undefined)
+    const pencil = dom.document.querySelector(
+      'button[aria-label="' +
+        t('cursorModelOverride', { model: 'DeepSeek V4.1 Flash 1017' }) +
+        '"]',
+    )
+    await dom.click(pencil)
+    await dom.setValue(input(dom, 'DeepSeek V4.1 Flash 1017'), '900000')
+    // Nothing is written while the reader is still typing.
+    assert.equal(
+      calls.filter((call) => call.endpoint === 'cursorSetSettings').length,
+      0,
+    )
+    await dom.wait(700)
+    const writes = calls.filter((call) => call.endpoint === 'cursorSetSettings')
+    assert.equal(writes.length, 1)
+    assert.deepEqual(
+      (writes[0]?.payload.settings as { models: Record<string, unknown> })
+        .models,
+      { 'deepseek-v41-flash-1017': { contextWindow: 900_000 } },
+    )
+    // The row shows the manual value and offers the return to automatic.
+    assert.match(dom.text(), /900K/)
+    assert.ok(
+      dom.document.querySelector(
+        'button[aria-label="' +
+          t('cursorModelResetOverride', { model: 'DeepSeek V4.1 Flash 1017' }) +
+          '"]',
+      ),
+    )
   })
 })
 
-test('a failed save keeps the manager open with the edited value', async () => {
+test('the return to automatic clears the stored override', async () => {
+  const { rpc, calls } = fakeRpc((endpoint) => {
+    if (endpoint === 'cursorModels') return { ok: true, value: modelsView() }
+    if (endpoint === 'cursorSetSettings') return { ok: true, value: {} }
+    return { ok: false, error: { message: 'unexpected ' + endpoint } }
+  })
+  await withDom(async (dom) => {
+    await dom.render(
+      createElement(CursorModelsManager, {
+        rpc,
+        t,
+        onClose: () => undefined,
+        onSaved: () => undefined,
+      }),
+    )
+    await dom.click(
+      dom.document.querySelector(
+        'button[aria-label="' +
+          t('cursorModelOverride', { model: 'DeepSeek V4.1 Flash 1017' }) +
+          '"]',
+      ),
+    )
+    await dom.setValue(input(dom, 'DeepSeek V4.1 Flash 1017'), '900000')
+    await dom.wait(700)
+    await dom.click(
+      dom.document.querySelector(
+        'button[aria-label="' +
+          t('cursorModelResetOverride', { model: 'DeepSeek V4.1 Flash 1017' }) +
+          '"]',
+      ),
+    )
+    const writes = calls.filter((call) => call.endpoint === 'cursorSetSettings')
+    assert.equal(writes.length, 2)
+    // The override is gone, not stored as zero.
+    assert.deepEqual(
+      (writes[1]?.payload.settings as { models: Record<string, unknown> })
+        .models,
+      {},
+    )
+    assert.match(dom.text(), /1,048,576/)
+  })
+})
+
+test('an unusable window never reaches the write and the row states why', async () => {
+  const { rpc, calls } = fakeRpc((endpoint) => {
+    if (endpoint === 'cursorModels') return { ok: true, value: modelsView() }
+    if (endpoint === 'cursorSetSettings') return { ok: true, value: {} }
+    return { ok: false, error: { message: 'unexpected ' + endpoint } }
+  })
+  await withDom(async (dom) => {
+    await dom.render(
+      createElement(CursorModelsManager, {
+        rpc,
+        t,
+        onClose: () => undefined,
+        onSaved: () => undefined,
+      }),
+    )
+    await dom.click(
+      dom.document.querySelector(
+        'button[aria-label="' +
+          t('cursorModelOverride', { model: 'Composer 2' }) +
+          '"]',
+      ),
+    )
+    await dom.setValue(input(dom, 'Composer 2'), '1.5')
+    await dom.wait(700)
+    assert.equal(
+      calls.filter((call) => call.endpoint === 'cursorSetSettings').length,
+      0,
+    )
+    assert.ok(dom.text().includes(en.cursorModelWindowInvalid))
+  })
+})
+
+test('a failed write reverts the row and states the failure in it', async () => {
   const { rpc } = fakeRpc((endpoint) => {
     if (endpoint === 'cursorModels') return { ok: true, value: modelsView() }
     if (endpoint === 'cursorSetSettings')
@@ -336,16 +431,26 @@ test('a failed save keeps the manager open with the edited value', async () => {
         onSaved: () => undefined,
       }),
     )
-    const control = input(dom, 'Composer 2')
-    await dom.setValue(control, '300000')
-    assert.equal(
-      (input(dom, 'Composer 2') as HTMLInputElement).value,
-      '300000',
-      'the typed window reached the controlled input',
-    )
-    await dom.click(buttonByText(dom, en.cursorSave))
+    const toggle = dom.document.querySelector(
+      'input[aria-label="' +
+        t('cursorModelEnabled', { model: 'Composer 2' }) +
+        '"]',
+    ) as HTMLInputElement
+    assert.equal(toggle.checked, false)
+    await dom.setChecked(toggle, true)
+    await dom.wait(50)
     assert.match(dom.text(), /write failed/)
-    assert.equal((input(dom, 'Composer 2') as HTMLInputElement).value, '300000')
+    // The row returned to what the route holds.
+    assert.equal(
+      (
+        dom.document.querySelector(
+          'input[aria-label="' +
+            t('cursorModelEnabled', { model: 'Composer 2' }) +
+            '"]',
+        ) as HTMLInputElement
+      ).checked,
+      false,
+    )
     assert.match(dom.text(), /Claude Sonnet 5\.5/)
   })
 })
@@ -373,5 +478,82 @@ test('a failed Reload keeps the rows and states the provider failure', async () 
     await dom.click(buttonByText(dom, en.cursorModelsReload))
     assert.match(dom.text(), /catalog offline/)
     assert.match(dom.text(), /Claude Sonnet 5\.5/)
+  })
+})
+
+test('the filter narrows the rows and reloading clears neither the filter nor the source', async () => {
+  const { rpc } = fakeRpc((endpoint) => {
+    if (endpoint === 'cursorModels') return { ok: true, value: modelsView() }
+    return { ok: false, error: { message: 'unexpected ' + endpoint } }
+  })
+  await withDom(async (dom) => {
+    await dom.render(
+      createElement(CursorModelsManager, {
+        rpc,
+        t,
+        onClose: () => undefined,
+        onSaved: () => undefined,
+      }),
+    )
+    const filter = dom.document.querySelector(
+      'input[aria-label="' + t('modelDefaultsFilterPlaceholder') + '"]',
+    )
+    await dom.setValue(filter, 'deepseek')
+    assert.match(dom.text(), /DeepSeek V4\.1 Flash 1017/)
+    assert.doesNotMatch(dom.text(), /Claude Sonnet 5\.5/)
+    await dom.click(buttonByText(dom, en.cursorModelsReload))
+    assert.match(dom.text(), /DeepSeek V4\.1 Flash 1017/)
+    assert.doesNotMatch(dom.text(), /Claude Sonnet 5\.5/)
+    await dom.setValue(filter, 'zzz')
+    assert.match(dom.text(), /No model matches/)
+  })
+})
+
+test('the manager refreshes the source and switches it off', async () => {
+  const { rpc, calls } = fakeRpc((endpoint) => {
+    if (endpoint === 'cursorModels') return { ok: true, value: modelsView() }
+    if (endpoint === 'cursorRefreshContext')
+      return {
+        ok: true,
+        value: {
+          enabled: true,
+          status: 'refreshed',
+          fetchedAt: refreshedAt,
+          windows: 1,
+        },
+      }
+    if (endpoint === 'cursorSetSettings') return { ok: true, value: {} }
+    return { ok: false, error: { message: 'unexpected ' + endpoint } }
+  })
+  await withDom(async (dom) => {
+    await dom.render(
+      createElement(CursorModelsManager, {
+        rpc,
+        t,
+        onClose: () => undefined,
+        onSaved: () => undefined,
+      }),
+    )
+    await dom.click(buttonByText(dom, en.cursorCapacityRefresh))
+    assert.match(dom.text(), /Capacities refreshed: 1 models described/)
+    // The rows were read again so they show the new projection.
+    assert.equal(
+      calls.filter((call) => call.endpoint === 'cursorModels').length,
+      2,
+    )
+    await dom.click(buttonByText(dom, en.cursorCapacityDisable))
+    const writes = calls.filter(
+      (call) =>
+        call.endpoint === 'cursorSetSettings' &&
+        call.payload.settings !== undefined &&
+        (call.payload.settings as { publishedContext?: boolean })
+          .publishedContext !== undefined,
+    )
+    assert.equal(writes.length, 1)
+    assert.equal(
+      (writes[0]?.payload.settings as { publishedContext: boolean })
+        .publishedContext,
+      false,
+    )
   })
 })

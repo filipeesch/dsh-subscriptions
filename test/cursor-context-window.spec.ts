@@ -40,18 +40,34 @@ test('the tier the request carries decides the window first', () => {
   )
 })
 
-test('the published capacity decides when no tier applies', () => {
+test('a manual value outranks the published capacity', () => {
+  // The published number is a third-party estimate; a value the reader typed is
+  // a correction of it, so the estimate must not outrank the correction.
   assert.deepEqual(
     resolveContextWindow({
       model: described,
       publishedWindow: deepseekPublished,
       manualWindow: 900_000,
     }),
-    { tokens: deepseekPublished, source: 'published' },
+    { tokens: 900_000, source: 'manual' },
   )
 })
 
-test('a manual value applies only when nothing more authoritative does', () => {
+test('the published capacity decides when no tier and no manual value apply', () => {
+  assert.deepEqual(
+    resolveContextWindow({
+      model: described,
+      publishedWindow: deepseekPublished,
+    }),
+    { tokens: deepseekPublished, source: 'published' },
+  )
+  assert.deepEqual(
+    resolveContextWindow({ model: described, publishedWindow: undefined }),
+    { tokens: DEFAULT_CONTEXT_WINDOW, source: 'default' },
+  )
+})
+
+test('a manual value applies only when no tier applies', () => {
   assert.deepEqual(
     resolveContextWindow({ model: described, manualWindow: 300_000 }),
     { tokens: 300_000, source: 'manual' },
@@ -69,10 +85,12 @@ test('a manual value applies only when nothing more authoritative does', () => {
   }
 })
 
-test('the advertised window follows the offered tier for a preference', () => {
+test('the advertised window follows the largest offered tier', () => {
   assert.equal(contextWindowFor(tiered), 1_000_000)
+  // The tier Cursor accepted after a rejection wins while it is offered.
   assert.equal(contextWindowFor(tiered, '200k'), 200_000)
-  assert.equal(contextWindowFor(tiered, 'min'), 50_000)
+  // A withdrawn accepted tier falls back to the largest.
+  assert.equal(contextWindowFor(tiered, '500k'), 1_000_000)
   assert.equal(
     contextWindowFor({
       parameters: [{ id: 'reasoning_effort', values: ['high'] }],

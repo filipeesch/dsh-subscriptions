@@ -40,7 +40,6 @@ test('per-model settings, the source switch, and accepted tiers validate', () =>
       models: {
         ' deepseek-v41-flash-1017 ': {
           enabled: false,
-          context: 'max',
           contextWindow: 1_000_000,
         },
       },
@@ -53,7 +52,6 @@ test('per-model settings, the source switch, and accepted tiers validate', () =>
       models: {
         'deepseek-v41-flash-1017': {
           enabled: false,
-          context: 'max',
           contextWindow: 1_000_000,
         },
       },
@@ -69,7 +67,6 @@ test('per-model settings, the source switch, and accepted tiers validate', () =>
     { models: [] },
     { models: { '': { enabled: true } } },
     { models: { m: { enabled: 'yes' } } },
-    { models: { m: { context: '' } } },
     { models: { m: { contextWindow: 0 } } },
     { models: { m: { contextWindow: 1.5 } } },
     { acceptedTiers: { m: { value: '', preference: 'max' } } },
@@ -104,16 +101,45 @@ test('the store round-trips and reports a corrupt file without failing', async (
   assert.equal(broken.corruption(), undefined)
 })
 
-test('a remembered tier is scoped to the preference that produced it', async () => {
+test('a legacy per-model tier and accepted tier still read', async () => {
+  // A document written before the route dropped the tier preference: the tier
+  // field is dropped, the accepted tier keeps its value, and nothing is
+  // reported as corrupt.
+  const legacy = validateCursorSettings({
+    models: { 'claude-sonnet-5-5': { enabled: true, context: 'min' } },
+    acceptedTiers: {
+      'claude-sonnet-5-5': { value: '200k', preference: 'min' },
+    },
+  })
+  assert.deepEqual(legacy.models, { 'claude-sonnet-5-5': { enabled: true } })
+  assert.equal(legacy.acceptedTiers?.['claude-sonnet-5-5']?.value, '200k')
+
   const { store, path } = storeAt()
-  await store.rememberAcceptedTier('claude-sonnet-5-5', '200k', 'max')
-  assert.equal(store.acceptedTier('claude-sonnet-5-5', 'max'), '200k')
-  // A changed preference retries the configured tier.
-  assert.equal(store.acceptedTier('claude-sonnet-5-5', 'min'), undefined)
-  await store.forgetAcceptedTier('claude-sonnet-5-5')
-  assert.equal(store.acceptedTier('claude-sonnet-5-5', 'max'), undefined)
+  await store.set({
+    models: { 'claude-sonnet-5-5': { enabled: false, context: 'min' } },
+    acceptedTiers: {
+      'claude-sonnet-5-5': { value: '200k', preference: 'min' },
+    },
+  })
   const reloaded = new CursorSettingsStore(path)
-  assert.equal(reloaded.acceptedTier('claude-sonnet-5-5', 'max'), undefined)
+  assert.equal(reloaded.corruption(), undefined)
+  assert.deepEqual(reloaded.modelSettings('claude-sonnet-5-5'), {
+    enabled: false,
+  })
+  assert.equal(reloaded.acceptedTier('claude-sonnet-5-5'), '200k')
+})
+
+test('a remembered tier is read without a preference and written with the rollback field', async () => {
+  const { store, path } = storeAt()
+  await store.rememberAcceptedTier('claude-sonnet-5-5', '200k')
+  assert.equal(store.acceptedTier('claude-sonnet-5-5'), '200k')
+  // The constant keeps an older build able to read the document after a
+  // rollback; nothing in this build reads it.
+  assert.match(readFileSync(path, 'utf8'), /"preference": "max"/)
+  await store.forgetAcceptedTier('claude-sonnet-5-5')
+  assert.equal(store.acceptedTier('claude-sonnet-5-5'), undefined)
+  const reloaded = new CursorSettingsStore(path)
+  assert.equal(reloaded.acceptedTier('claude-sonnet-5-5'), undefined)
 })
 
 test('the ceiling update keeps the rest of the document', async () => {
@@ -142,19 +168,19 @@ test('the ceiling update keeps the rest of the document', async () => {
 test('serialized writes keep both per-model updates', async () => {
   const { store } = storeAt()
   await Promise.all([
-    store.rememberAcceptedTier('a', '200k', 'max'),
-    store.rememberAcceptedTier('b', '1m', 'max'),
+    store.rememberAcceptedTier('a', '200k'),
+    store.rememberAcceptedTier('b', '1m'),
   ])
   const reloaded = new CursorSettingsStore(store.path)
-  assert.equal(reloaded.acceptedTier('a', 'max'), '200k')
-  assert.equal(reloaded.acceptedTier('b', 'max'), '1m')
+  assert.equal(reloaded.acceptedTier('a'), '200k')
+  assert.equal(reloaded.acceptedTier('b'), '1m')
 })
 
 test('a settings write is visible before its disk write settles', () => {
   const { store } = storeAt()
-  const pending = store.rememberAcceptedTier('claude-sonnet-5-5', '200k', 'max')
+  const pending = store.rememberAcceptedTier('claude-sonnet-5-5', '200k')
   // The runtime reports success after the same turn; resolution must see it.
-  assert.equal(store.acceptedTier('claude-sonnet-5-5', 'max'), '200k')
+  assert.equal(store.acceptedTier('claude-sonnet-5-5'), '200k')
   return pending
 })
 
@@ -163,7 +189,7 @@ test('a merge preserves concurrent ceiling, tier, and model writes', async () =>
   await Promise.all([
     store.setCeiling(2500),
     store.merge({ models: { 'composer-2': { contextWindow: 200_000 } } }),
-    store.rememberAcceptedTier('claude-sonnet-5-5', '200k', 'max'),
+    store.rememberAcceptedTier('claude-sonnet-5-5', '200k'),
     store.merge({ publishedContext: false }),
   ])
   const settings = store.get()
@@ -176,28 +202,28 @@ test('a merge preserves concurrent ceiling, tier, and model writes', async () =>
   assert.equal(reloaded.ceilingUSD(), 2500)
   assert.equal(reloaded.publishedContext(), false)
   assert.equal(reloaded.modelSettings('composer-2')?.contextWindow, 200_000)
-  assert.equal(reloaded.acceptedTier('claude-sonnet-5-5', 'max'), '200k')
+  assert.equal(reloaded.acceptedTier('claude-sonnet-5-5'), '200k')
 })
 
-test('a tier from another preference is pruned, never resurrected', async () => {
+test('a guarded removal keeps a newer record', async () => {
   const { store } = storeAt()
-  await store.rememberAcceptedTier('claude-sonnet-5-5', '200k', 'min')
-  assert.equal(store.acceptedTier('claude-sonnet-5-5', 'max'), undefined)
-  await new Promise((resolveWait) => setTimeout(resolveWait, 20))
-  // Switching back does not bring the record back.
-  assert.equal(store.acceptedTier('claude-sonnet-5-5', 'min'), undefined)
+  await store.rememberAcceptedTier('claude-sonnet-5-5', '1m')
+  // A removal naming a record this one replaced must not delete it.
+  await store.forgetAcceptedTierIf('claude-sonnet-5-5', { value: '200k' })
+  assert.equal(store.acceptedTier('claude-sonnet-5-5'), '1m')
+  await store.forgetAcceptedTierIf('claude-sonnet-5-5', { value: '1m' })
+  assert.equal(store.acceptedTier('claude-sonnet-5-5'), undefined)
 })
 
-test('pruning keeps a concurrent newer record', async () => {
+test('a removal queued behind a newer record keeps it', async () => {
   const { store } = storeAt()
-  await store.rememberAcceptedTier('claude-sonnet-5-5', '200k', 'min')
-  // Reading under another preference schedules the guarded removal.
-  assert.equal(store.acceptedTier('claude-sonnet-5-5', 'max'), undefined)
-  // A newer, different record lands before the removal runs.
-  const newer = store.rememberAcceptedTier('claude-sonnet-5-5', '1m', 'max')
-  await newer
-  await new Promise((resolveWait) => setTimeout(resolveWait, 20))
-  assert.equal(store.acceptedTier('claude-sonnet-5-5', 'max'), '1m')
+  await store.rememberAcceptedTier('claude-sonnet-5-5', '200k')
+  const stale = store.forgetAcceptedTierIf('claude-sonnet-5-5', {
+    value: '200k',
+  })
+  const newer = store.rememberAcceptedTier('claude-sonnet-5-5', '1m')
+  await Promise.all([stale, newer])
+  assert.equal(store.acceptedTier('claude-sonnet-5-5'), '1m')
 })
 
 test('an invalid merge rejects without changing the document', async () => {
@@ -235,16 +261,16 @@ test('a learned tier is visible at once but a failed write stays memory-only', a
   writeFileSync(blocker, 'not a directory')
   const path = join(blocker, 'settings.json')
   const store = new CursorSettingsStore(path)
-  const write = store.rememberAcceptedTier('claude-sonnet-5-5', '200k', 'max')
+  const write = store.rememberAcceptedTier('claude-sonnet-5-5', '200k')
   // The turn that learned it must see it without awaiting the disk.
-  assert.equal(store.acceptedTier('claude-sonnet-5-5', 'max'), '200k')
+  assert.equal(store.acceptedTier('claude-sonnet-5-5'), '200k')
   await assert.rejects(write)
   rmSync(blocker)
   mkdirSync(blocker)
   await store.setCeiling(10)
   // Still visible in memory, never written, so a restart does not resurrect it.
-  assert.equal(store.acceptedTier('claude-sonnet-5-5', 'max'), '200k')
+  assert.equal(store.acceptedTier('claude-sonnet-5-5'), '200k')
   const reloaded = new CursorSettingsStore(path)
-  assert.equal(reloaded.acceptedTier('claude-sonnet-5-5', 'max'), undefined)
+  assert.equal(reloaded.acceptedTier('claude-sonnet-5-5'), undefined)
   assert.equal(reloaded.ceilingUSD(), 10)
 })

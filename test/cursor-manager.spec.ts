@@ -3,20 +3,24 @@ import { test } from 'node:test'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import {
-  CursorModelsBody,
-  CursorModelsManager,
-  cursorModelsPatch,
+  deriveRows,
+  filterRows,
   formatWindowLabel,
-  mergedManagerState,
+  listStateFor,
   parseWindowInput,
-  tierChoices,
-  tierOptionLabel,
-  tierSelectValue,
+  rowCounts,
+  windowNote,
   windowSourceLabel,
+  withModelEdit,
+  type CursorModelDraft,
   type CursorModelRowView,
-  type CursorModelsView,
-} from '../src/client/CursorModelsManager.js'
-import { CursorSourceStatus } from '../src/client/CursorCard.js'
+} from '../src/client/cursor-manager-derive.js'
+import { CursorModelsBody } from '../src/client/CursorModelsBody.js'
+import {
+  CursorCapacitySection,
+  CursorSourceLine,
+} from '../src/client/CursorCapacitySource.js'
+import { CursorModelsManager } from '../src/client/CursorModelsManager.js'
 
 const t = ((key: string, params?: Record<string, unknown>) =>
   params?.tier === undefined ? key : key + ':' + String(params.tier)) as never
@@ -26,9 +30,9 @@ const tiered: CursorModelRowView = {
   name: 'Claude Sonnet 5.5',
   enabled: true,
   described: true,
-  tierOptions: ['200k', '1m'],
-  window: { tokens: 200_000, source: 'tier', tier: '200k' },
-  manualWindow: { editable: false, value: 200_000 },
+  window: { tokens: 1_000_000, source: 'tier', tier: '1m' },
+  overridable: false,
+  manualValue: 1_000_000,
 }
 
 const published: CursorModelRowView = {
@@ -36,31 +40,51 @@ const published: CursorModelRowView = {
   name: 'DeepSeek V4.1 Flash 1017',
   enabled: true,
   described: false,
-  tierOptions: [],
   window: { tokens: 1_048_576, source: 'published' },
-  manualWindow: { editable: false, value: 1_048_576 },
+  overridable: true,
+  manualValue: 1_048_576,
   publishedWindow: 1_048_576,
 }
 
-const editable: CursorModelRowView = {
+const fallback: CursorModelRowView = {
   id: 'composer-2',
   name: 'Composer 2',
   enabled: false,
   described: true,
-  tierOptions: [],
   window: { tokens: 200_000, source: 'default' },
-  manualWindow: { editable: true, value: 200_000 },
+  overridable: true,
+  manualValue: 200_000,
 }
 
-function viewOf(models: CursorModelRowView[]): CursorModelsView {
-  return {
-    provider: 'cursor',
-    context: 'max',
-    models,
-    knownContext: { enabled: true },
-    storedModels: {},
-    publishedContext: true,
-  }
+const noopHandlers = {
+  onToggle: () => undefined,
+  onEdit: () => undefined,
+  onReset: () => undefined,
+  onText: () => undefined,
+  onCommit: () => undefined,
+  onCancel: () => undefined,
+}
+
+function bodyOf(
+  models: CursorModelRowView[],
+  draft: CursorModelDraft = {},
+  texts: Record<string, string> = {},
+  editing?: string,
+  errors: Record<string, string> = {},
+  query = '',
+): string {
+  const all = deriveRows(models, draft, texts, editing, errors)
+  const rows = filterRows(all, query)
+  return renderToStaticMarkup(
+    createElement(CursorModelsBody, {
+      t,
+      rows,
+      listState: listStateFor(all, rows.length),
+      query,
+      disabled: false,
+      handlers: noopHandlers,
+    }),
+  )
 }
 
 test('window inputs parse strictly, format, and name their source', () => {
@@ -82,206 +106,181 @@ test('window inputs parse strictly, format, and name their source', () => {
   assert.equal(windowSourceLabel(t, 'default'), 'cursorWindowDefault')
 })
 
-test('the saved patch includes a window-only edit from an untouched row', () => {
-  const windowOnly = cursorModelsPatch({}, { 'composer-2': '300000' })
-  assert.deepEqual(windowOnly.invalid, [])
-  assert.deepEqual(windowOnly.models, {
-    'composer-2': { contextWindow: 300_000 },
+test('one edit patches one model and clearing the last field removes it', () => {
+  const once = withModelEdit({}, 'composer-2', { contextWindow: 300_000 })
+  assert.deepEqual(once, { 'composer-2': { contextWindow: 300_000 } })
+  // A second field keeps the first.
+  const twice = withModelEdit(once, 'composer-2', { enabled: false })
+  assert.deepEqual(twice, {
+    'composer-2': { contextWindow: 300_000, enabled: false },
   })
-
-  const draft = {
-    'claude-sonnet-5-5': {
-      enabled: false,
-      context: '200k',
-      contextWindow: 300_000,
-    },
-    'deepseek-v41-flash-1017': { contextWindow: 1_048_576 },
-  }
-  const saved = cursorModelsPatch(draft, {
-    'claude-sonnet-5-5': '400000',
-  })
-  assert.deepEqual(saved.invalid, [])
-  assert.deepEqual(saved.models, {
-    'claude-sonnet-5-5': {
-      enabled: false,
-      context: '200k',
-      contextWindow: 400_000,
-    },
-    'deepseek-v41-flash-1017': { contextWindow: 1_048_576 },
-  })
-  // Clearing the field removes the manual value; a blank tier stays cleared.
-  const cleared = cursorModelsPatch(
-    { 'claude-sonnet-5-5': { enabled: true, contextWindow: 300_000 } },
-    { 'claude-sonnet-5-5': '  ' },
+  // Clearing both leaves no entry, so the model reads as untouched.
+  const cleared = withModelEdit(
+    withModelEdit(twice, 'composer-2', { contextWindow: undefined }),
+    'composer-2',
+    { enabled: undefined },
   )
-  assert.deepEqual(cleared.models, { 'claude-sonnet-5-5': { enabled: true } })
-  // Unusable text blocks the save and names the model.
-  const invalid = cursorModelsPatch(
-    { 'composer-2': { contextWindow: 200_000 } },
-    { 'composer-2': '1.5' },
-  )
-  assert.deepEqual(invalid.invalid, ['composer-2'])
-  assert.deepEqual(invalid.models, {})
+  assert.deepEqual(cleared, {})
 })
 
-test('a Reload keeps pending edits and the first read seeds them', () => {
-  const first = mergedManagerState(false, undefined, viewOf([editable]))
-  assert.deepEqual(first.draft, {})
-  assert.deepEqual(first.texts, {})
-  assert.deepEqual(first.invalid, [])
-
-  const pending = {
-    draft: { 'composer-2': { contextWindow: 300_000 } },
-    texts: { 'composer-2': '300000' },
-    invalid: ['composer-2'],
-  }
-  assert.deepEqual(
-    mergedManagerState(true, pending, viewOf([editable])),
-    pending,
+test('a stored manual value wins on the row and still names what it replaced', () => {
+  const rows = deriveRows(
+    [published],
+    { 'deepseek-v41-flash-1017': { contextWindow: 900_000 } },
+    {},
+    undefined,
+    {},
   )
-
-  const seeded = mergedManagerState(false, pending, {
-    ...viewOf([editable]),
-    storedModels: { 'composer-2': { enabled: false } },
-  })
-  assert.deepEqual(seeded.draft, { 'composer-2': { enabled: false } })
-})
-
-test('tier choices name the preferences and flag only a withdrawn value', () => {
-  const choices = tierChoices({ ...tiered, tierOverride: '500k' })
-  assert.deepEqual(choices.options.at(-1), {
-    value: '500k',
-    kind: 'withdrawn',
-  })
-  // Smallest/largest are preferences, not withdrawn wire tiers.
-  assert.deepEqual(
-    choices.options.filter(
-      (choice) => choice.kind === 'min' || choice.kind === 'max',
-    ),
-    [
-      { value: 'min', kind: 'min' },
-      { value: 'max', kind: 'max' },
-    ],
-  )
-  // A configured tier the catalog still offers is matched case-insensitively.
-  assert.deepEqual(
-    tierChoices({ ...tiered, tierOverride: '1M' }).options.map(
-      (choice) => choice,
-    ),
-    [
-      { value: '200k', kind: 'tier' },
-      { value: '1m', kind: 'tier' },
-      { value: 'min', kind: 'min' },
-      { value: 'max', kind: 'max' },
-    ],
-  )
+  assert.equal(rows[0]?.tokens, 900_000)
+  assert.equal(rows[0]?.source, 'manual')
+  assert.equal(rows[0]?.replaced, 1_048_576)
   assert.equal(
-    tierOptionLabel(t, { value: 'min', kind: 'min' }),
-    'cursorModelContextMin',
+    windowNote(t, rows[0]!),
+    'cursorWindowManual · cursorWindowReplaces',
   )
-  assert.equal(
-    tierOptionLabel(t, { value: '500k', kind: 'withdrawn' }),
-    '500k · cursorModelTierWithdrawn',
+  // Removing the override returns the row to the published capacity.
+  const reverted = deriveRows([published], {}, {}, undefined, {})
+  assert.equal(reverted[0]?.source, 'published')
+  assert.equal(reverted[0]?.tokens, 1_048_576)
+})
+
+test('an enablement edit changes the row without touching its window', () => {
+  const rows = deriveRows(
+    [tiered],
+    { 'claude-sonnet-5-5': { enabled: false } },
+    {},
+    undefined,
+    {},
+  )
+  assert.equal(rows[0]?.enabled, false)
+  assert.deepEqual(
+    { tokens: rows[0]?.tokens, source: rows[0]?.source, tier: rows[0]?.tier },
+    { tokens: 1_000_000, source: 'tier', tier: '1m' },
   )
 })
 
-test('the tier select keeps an explicit clear instead of the stored value', () => {
-  const stored = { ...tiered, tierOverride: '200k' }
-  // No change: the stored value is selected.
-  assert.equal(tierSelectValue(stored, {}), '200k')
-  // Explicit clear wins, even for a stored override and a YAML baseline.
-  assert.equal(tierSelectValue(stored, { [stored.id]: { context: '' } }), '')
-  assert.equal(
-    tierSelectValue(
-      { ...stored, tierOverride: 'max' },
-      { [stored.id]: { context: '' } },
-    ),
-    '',
+test('the filter matches name or id and reports the empty case', () => {
+  const rows = deriveRows([tiered, published, fallback], {}, {}, undefined, {})
+  assert.deepEqual(
+    filterRows(rows, 'deepseek').map((row) => row.id),
+    ['deepseek-v41-flash-1017'],
   )
-  // A differently cased stored value selects the offered spelling.
-  assert.equal(tierSelectValue({ ...stored, tierOverride: '1M' }, {}), '1m')
-  // Clearing only (no other edit) still survives the patch builder.
-  const patch = cursorModelsPatch({ [stored.id]: { context: '' } }, {})
-  assert.deepEqual(patch.models, {})
+  assert.deepEqual(
+    filterRows(rows, 'CLAUDE').map((row) => row.id),
+    ['claude-sonnet-5-5'],
+  )
+  assert.equal(filterRows(rows, 'nothing').length, 0)
+  assert.equal(filterRows(rows, '').length, 3)
+  assert.equal(listStateFor(rows, 0), 'filter-empty')
+  assert.equal(listStateFor([], 0), 'provider-empty')
+  assert.equal(listStateFor(rows, 3), 'rows')
 })
 
-test('the model body renders tier, window source, and the invalid alert', () => {
-  const html = renderToStaticMarkup(
-    createElement(CursorModelsBody, {
-      t,
-      models: [tiered, published, editable],
-      draft: {},
-      texts: {},
-      invalid: ['composer-2'],
-      disabled: false,
-      onToggle: () => undefined,
-      onTier: () => undefined,
-      onWindow: () => undefined,
-    }),
-  )
+test('the counts state enablement and how many rows are on the default', () => {
+  const rows = deriveRows([tiered, published, fallback], {}, {}, undefined, {})
+  assert.deepEqual(rowCounts(rows), { enabled: 2, total: 3, fallback: 1 })
+})
+
+test('a row shows its window as a chip and offers the override only when it can', () => {
+  const html = bodyOf([tiered, published, fallback])
   assert.match(html, /Claude Sonnet 5.5/)
-  assert.match(html, /<select/)
-  assert.match(html, /200K/)
-  assert.match(html, /cursorWindowTier/)
+  assert.match(html, /1M/)
   assert.match(html, /1,048,576/)
+  // The tier row has no pencil; the other two do.
+  assert.equal(html.match(/cursorModelOverride/g)?.length, 2)
+  // The chip names its source in the accessible name and the tooltip.
+  assert.match(html, /title="cursorWindowTier:1m"/)
   assert.match(html, /cursorWindowPublished/)
   assert.match(html, /cursorModelNotDescribed/)
-  // The editable row shows an input with help and error association.
-  assert.match(html, /cursorModelWindowFor/)
-  assert.match(html, /aria-describedby="cursor-window-help-composer-2/)
-  assert.match(html, /role="alert"/)
-  assert.match(html, /aria-invalid="true"/)
 })
 
-test('an empty catalog renders the empty note', () => {
-  const html = renderToStaticMarkup(
-    createElement(CursorModelsBody, {
-      t,
-      models: [],
-      draft: {},
-      texts: {},
-      invalid: [],
-      disabled: false,
-      onToggle: () => undefined,
-      onTier: () => undefined,
-      onWindow: () => undefined,
-    }),
+test('an open field renders an input; an invalid one states the failure in the row', () => {
+  const editing = bodyOf(
+    [published],
+    {},
+    { 'deepseek-v41-flash-1017': '1.5' },
+    'deepseek-v41-flash-1017',
+    {
+      'deepseek-v41-flash-1017': 'cursorModelWindowInvalid',
+    },
   )
-  assert.match(html, /cursorModelsEmpty/)
+  assert.match(editing, /<input/)
+  assert.match(editing, /aria-invalid="true"/)
+  assert.match(editing, /role="alert"/)
+  assert.match(editing, /cursorModelWindowInvalid/)
+  assert.doesNotMatch(editing, /dsh-cursor-chip/)
 })
 
-test('the source status states on/off, freshness, and both controls', () => {
+test('a manual row offers the return to automatic', () => {
+  const html = bodyOf([published], {
+    'deepseek-v41-flash-1017': { contextWindow: 900_000 },
+  })
+  assert.match(html, /900K/)
+  assert.match(html, /cursorModelResetOverride/)
+})
+
+test('an empty catalogue and an empty filter state different notes', () => {
+  assert.match(bodyOf([]), /cursorModelsEmpty/)
+  assert.match(
+    bodyOf([tiered], {}, {}, undefined, {}, 'zzz'),
+    /modelDefaultsFilterEmpty/,
+  )
+})
+
+test('the source line states the source and its age', () => {
   const on = renderToStaticMarkup(
-    createElement(CursorSourceStatus, {
-      t,
-      enabled: true,
-      busy: false,
-      onRefresh: () => undefined,
-      onToggle: () => undefined,
-    }),
+    createElement(CursorSourceLine, { t, enabled: true, locale: 'en' }),
   )
   assert.match(on, /cursorSourceOn/)
   assert.match(on, /cursorSourceNever/)
   assert.match(on, /role="status"/)
-  assert.match(on, /cursorSourceRefresh/)
-  assert.match(on, /cursorSourceDisable/)
-  assert.doesNotMatch(on, /<button[^>]*disabled/)
-
   const off = renderToStaticMarkup(
-    createElement(CursorSourceStatus, {
+    createElement(CursorSourceLine, {
       t,
       enabled: false,
       fetchedAt: 1_700_000_000_000,
-      busy: true,
-      onRefresh: () => undefined,
-      onToggle: () => undefined,
+      locale: 'en',
     }),
   )
   assert.match(off, /cursorSourceOff/)
   assert.match(off, /cursorSourceUpdated/)
-  assert.match(off, /cursorSourceEnable/)
+})
+
+test('the capacity section states the state, the fallback count, and both controls', () => {
+  const section = (
+    enabled: boolean,
+    busy: boolean,
+    fallback: number,
+    extra: Record<string, unknown> = {},
+  ) =>
+    renderToStaticMarkup(
+      createElement(CursorCapacitySection, {
+        t,
+        enabled,
+        busy,
+        fallback,
+        total: 3,
+        onRefresh: () => undefined,
+        onToggle: () => undefined,
+        locale: 'en',
+        ...extra,
+      }),
+    )
+  const on = section(true, false, 1, { fetchedAt: 1_700_000_000_000 })
+  assert.match(on, /cursorCapacityTitle/)
+  assert.match(on, /cursorCapacityOn/)
+  assert.match(on, /cursorCapacityFallback/)
+  assert.match(on, /cursorCapacityRefresh/)
+  assert.match(on, /cursorCapacityDisable/)
+  assert.match(on, /cursorSourceUpdated/)
+
+  const off = section(false, true, 0, { error: 'cursorCapacityToggleFailed' })
+  assert.match(off, /cursorCapacityOff/)
+  assert.match(off, /cursorCapacityAllDescribed/)
+  assert.match(off, /cursorCapacityEnable/)
+  assert.match(off, /role="alert"/)
   // Refresh cannot run while the source is off.
-  assert.match(off, /<button[^>]*disabled[^>]*>cursorSourceRefresh/)
+  assert.match(off, /<button[^>]*disabled[^>]*>cursorCapacityRefresh/)
 })
 
 test('the manager dialog opens in its loading state', () => {
@@ -294,12 +293,10 @@ test('the manager dialog opens in its loading state', () => {
     }),
   )
   assert.match(html, /<dialog/)
+  assert.match(html, /dsh-cursor-manager/)
   assert.match(html, /cursorManageTitle/)
   assert.match(html, /cursorModelsLoading/)
-})
-
-test('an enablement-only edit leaves the tier on screen unchanged', () => {
-  const row = { ...tiered, tierOverride: '200k' }
-  // Toggling only enablement must not turn a stored/YAML tier into Auto.
-  assert.equal(tierSelectValue(row, { [row.id]: { enabled: false } }), '200k')
+  // Autosave replaced the explicit pair: there is no Save or Cancel control.
+  assert.doesNotMatch(html, /cursorSave/)
+  assert.doesNotMatch(html, /cursorCancel/)
 })

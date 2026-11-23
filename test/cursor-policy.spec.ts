@@ -1,25 +1,21 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
-  contextPreferenceFor,
   enabledFor,
   manualWindowFor,
   publishedContextEnabled,
 } from '../src/providers/cursor/policy.js'
-import { DEFAULT_CURSOR_CONTEXT } from '../src/providers/cursor/params.js'
 import type { CursorSettings } from '../src/providers/cursor-settings.js'
 import { Config } from '../src/index.js'
 
 test('the stored setting wins over the configured baseline', () => {
   const settings = {
-    models: { m: { enabled: false, context: '200k', contextWindow: 300_000 } },
+    models: { m: { enabled: false, contextWindow: 300_000 } },
   }
   const config = {
-    context: 'max',
-    models: { m: { enabled: true, context: '1m' } },
+    models: { m: { enabled: true } },
     contextWindows: { m: 400_000 },
   }
-  assert.equal(contextPreferenceFor(settings, config, 'm'), '200k')
   assert.equal(manualWindowFor(settings, config, 'm'), 300_000)
   assert.equal(enabledFor(settings, config, 'm'), false)
 })
@@ -27,22 +23,17 @@ test('the stored setting wins over the configured baseline', () => {
 test('the configured baseline applies when the setting is absent', () => {
   const settings = { models: {} }
   const config = {
-    context: 'min',
-    models: { m: { enabled: false, context: '1m' } },
+    models: { m: { enabled: false } },
     contextWindows: { m: 400_000 },
   }
-  assert.equal(contextPreferenceFor(settings, config, 'm'), '1m')
   assert.equal(manualWindowFor(settings, config, 'm'), 400_000)
   assert.equal(enabledFor(settings, config, 'm'), false)
-  // A model named nowhere follows the route-wide tier and stays enabled.
-  assert.equal(contextPreferenceFor(settings, config, 'other'), 'min')
+  // A model named nowhere stays enabled and has no manual window.
   assert.equal(manualWindowFor(settings, config, 'other'), undefined)
   assert.equal(enabledFor(settings, config, 'other'), true)
 })
 
 test('the route default is the last resort', () => {
-  assert.equal(contextPreferenceFor({}, undefined, 'm'), DEFAULT_CURSOR_CONTEXT)
-  assert.equal(contextPreferenceFor({}, undefined, undefined), 'max')
   assert.equal(manualWindowFor({}, undefined, 'm'), undefined)
   assert.equal(enabledFor({}, undefined, 'm'), true)
   assert.equal(publishedContextEnabled({}, undefined), true)

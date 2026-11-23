@@ -1,13 +1,12 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
-  DEFAULT_CURSOR_CONTEXT,
   isRejectedParams,
   modelParams,
   offeredContextValues,
   offersTier,
-  preferredContext,
   reasoningInfo,
+  requestedTier,
   smallerContext,
   tierTokens,
 } from '../src/providers/cursor/params.js'
@@ -34,13 +33,14 @@ const catalogModel = {
   ],
 }
 
-test('the largest offered context tier is the default', () => {
-  const context = catalogModel.parameters.find((p) => p.id === 'context')
-  assert.equal(preferredContext(context)?.value, '1m')
-  assert.equal(preferredContext(context, 'max')?.value, '1m')
-  assert.equal(preferredContext(context, '200k')?.value, '200k')
-  // An unknown preference falls back to the largest, not the smallest.
-  assert.equal(preferredContext(context, 'nonsense')?.value, '1m')
+test('the request carries the largest offered tier', () => {
+  assert.equal(requestedTier(catalogModel), '1m')
+  // The tier Cursor accepted after a rejection wins while it is still offered.
+  assert.equal(requestedTier(catalogModel, '200k'), '200k')
+  assert.equal(requestedTier(catalogModel, '200K'), '200k')
+  // A tier the catalog no longer offers falls back to the largest.
+  assert.equal(requestedTier(catalogModel, '400k'), '1m')
+  assert.equal(requestedTier({ parameters: [] }), undefined)
   assert.deepEqual(offeredContextValues(catalogModel), ['50k', '200k', '1m'])
   assert.equal(tierTokens('1m'), 1_000_000)
   assert.equal(tierTokens('300k'), 300_000)
@@ -64,15 +64,15 @@ test('a rejected tier steps down to the next smaller offered tier', () => {
 })
 
 test('effort maps to the closest advertised value and fast stays off', () => {
-  const params = modelParams(catalogModel, 'medium')
+  const params = modelParams(catalogModel, 'medium', '1m')
   assert.deepEqual(params, [
     { id: 'thinking', value: 'true' },
     { id: 'effort', value: 'medium' },
     { id: 'fast', value: 'false' },
-    { id: 'context', value: DEFAULT_CURSOR_CONTEXT === 'max' ? '1m' : '50k' },
+    { id: 'context', value: '1m' },
   ])
   // Reasoning off turns the switch off and drops to the lowest effort.
-  const off = modelParams(catalogModel, 'off')
+  const off = modelParams(catalogModel, 'off', '1m')
   assert.deepEqual(off, [
     { id: 'thinking', value: 'false' },
     { id: 'fast', value: 'false' },
@@ -80,14 +80,20 @@ test('effort maps to the closest advertised value and fast stays off', () => {
   ])
   // A rejected effort level degrades to the nearest lower one.
   assert.equal(
-    modelParams(catalogModel, 'max')?.find((p) => p.id === 'effort')?.value,
+    modelParams(catalogModel, 'max', '1m')?.find((p) => p.id === 'effort')
+      ?.value,
     'xhigh',
   )
-  // An explicit tier preference reaches the request.
+  // The accepted tier reaches the request unchanged.
   assert.equal(
     modelParams(catalogModel, 'low', '200k')?.find((p) => p.id === 'context')
       ?.value,
     '200k',
+  )
+  // A model with no tier carries no context parameter at all.
+  assert.deepEqual(
+    modelParams({ parameters: [{ id: 'fast', values: ['false'] }] }, 'low'),
+    [{ id: 'fast', value: 'false' }],
   )
 })
 
