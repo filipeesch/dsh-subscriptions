@@ -12,6 +12,7 @@ import {
   rowCounts,
   withModelEdit,
   type CursorModelDraft,
+  type CursorModelEdit,
   type CursorModelsView,
 } from './cursor-manager-derive.js'
 import { CursorModelsBody } from './CursorModelsBody.js'
@@ -31,19 +32,37 @@ interface CursorRefreshOutcome {
   windows?: number
 }
 
+/** One change waiting to be written, applied to the last acknowledged map. */
+interface CursorWriteOp {
+  id: string
+  /** The entry to store, or undefined to remove this model's entry. */
+  entry: CursorModelEdit | undefined
+}
+
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-/** Remove one key from a record, returning the same object when absent. */
+/** Remove one key from a record, returning a copy either way. */
 function without<T>(
   record: Readonly<Record<string, T>>,
   key: string,
 ): Record<string, T> {
-  if (!Object.hasOwn(record, key)) return { ...record }
   const next = { ...record }
   delete next[key]
   return next
+}
+
+/** A copy of the stored edits, so a mutation never reaches the host's payload. */
+function cloneDraft(map: CursorModelDraft): CursorModelDraft {
+  const out: CursorModelDraft = {}
+  for (const [id, entry] of Object.entries(map)) out[id] = { ...entry }
+  return out
+}
+
+/** Whether two entries describe the same stored value. */
+function sameEntry(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right)
 }
 
 /**
@@ -53,7 +72,12 @@ function without<T>(
  * from {@link deriveRows}, so a change and the value the host holds are the same
  * value. Every change is applied when the reader makes it: an enablement change
  * writes at once, a typed window writes after a short pause, and a failed write
- * restores what the route holds and states the failure in the row.
+ * restores that model and states the failure in its row.
+ *
+ * Writes are queued as changes, not as snapshots: each one is applied to the map
+ * the host last acknowledged, so a refused change cannot ride along on the next
+ * successful one. A read waits for the queue to settle, so an open Reload cannot
+ * replace the rows with a document older than the save that preceded it.
  */
 export function CursorModelsManager({
   rpc,
@@ -83,15 +107,20 @@ export function CursorModelsManager({
   const [sourceNotice, setSourceNotice] = useState<string>()
 
   const alive = useRef(true)
-  /** The browser's liveness answer for callbacks the dialog registered. */
+  /** What the reader sees: the acknowledged map plus the pending changes. */
   const draftRef = useRef<CursorModelDraft>({})
+  /** What the host has acknowledged; every write is applied to this map. */
+  const committedRef = useRef<CursorModelDraft>({})
+  const queue = useRef<CursorWriteOp[]>([])
+  const draining = useRef(false)
+  const drainDone = useRef<Promise<void>>(Promise.resolve())
   const textsRef = useRef<Record<string, string>>({})
   const errorsRef = useRef<Record<string, string>>({})
   const editingRef = useRef<string>()
   const viewRef = useRef<CursorModelsView>()
-  /** Writes are chained so the last one to land carries the latest changes. */
-  const writeChain = useRef<Promise<void>>(Promise.resolve())
   const pause = useRef<ReturnType<typeof setTimeout>>()
+  /** Set on every render so the unmount cleanup can flush without state. */
+  const flushRef = useRef<(id: string) => void>(() => undefined)
 
   useEffect(() => {
     alive.current = true
@@ -99,20 +128,112 @@ export function CursorModelsManager({
     const previous = document.activeElement
     if (typeof element.showModal === 'function') element.showModal()
     return () => {
+      // A pause the reader outran is still a change they made: write it before
+      // the page goes away, without touching state that no longer renders.
+      if (pause.current !== undefined) {
+        clearTimeout(pause.current)
+        const open = editingRef.current
+        if (open !== undefined) flushRef.current(open)
+      }
       alive.current = false
-      if (pause.current !== undefined) clearTimeout(pause.current)
       if (typeof element.close === 'function') element.close()
       if (previous instanceof HTMLElement && previous.isConnected)
         previous.focus()
     }
   }, [])
 
-  /** Seed the page from one host read; the host's rows are the truth. */
+  /** Write the open field when the dialog closes, so closing never drops it. */
+  const flushText = useCallback((id: string) => {
+    const text = textsRef.current[id]
+    if (text === undefined) return
+    const tokens = parseWindowInput(text)
+    // Unusable text is not a change; the row states why while it is open.
+    if (text.trim() !== '' && tokens === null) return
+    const next = withModelEdit(draftRef.current, id, {
+      contextWindow: tokens ?? undefined,
+    })
+    if (sameEntry(next[id], draftRef.current[id])) return
+    draftRef.current = next
+    queue.current.push({ id, entry: next[id] })
+    startDrain()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- startDrain is stable
+  }, [])
+
+  flushRef.current = flushText
+
+  /**
+   * Apply one queued change to the acknowledged map and send it.
+   *
+   * The queue drains one change at a time, in order, so each request describes
+   * the document the host will hold once it lands.
+   */
+  const startDrain = useCallback(() => {
+    if (draining.current) return
+    draining.current = true
+    drainDone.current = (async () => {
+      while (queue.current.length > 0) {
+        const op = queue.current[0] as CursorWriteOp
+        const next: CursorModelDraft = { ...committedRef.current }
+        if (op.entry === undefined) delete next[op.id]
+        else next[op.id] = op.entry
+        try {
+          await callSubscriptionsAuth(rpc, 'cursorSetSettings', {
+            settings: { models: next },
+          })
+          queue.current.shift()
+          committedRef.current = next
+          if (!alive.current) continue
+          errorsRef.current = without(errorsRef.current, op.id)
+          setErrors(errorsRef.current)
+          onSaved()
+        } catch (failure) {
+          queue.current.shift()
+          if (!alive.current) continue
+          // A newer change to the same model is already queued: it describes
+          // what the reader wants now, so leave the row alone and let it write.
+          const superseded = queue.current.some(
+            (pending) => pending.id === op.id,
+          )
+          if (!superseded) {
+            const reverted = { ...draftRef.current }
+            const acknowledged = committedRef.current[op.id]
+            if (acknowledged === undefined) delete reverted[op.id]
+            else reverted[op.id] = acknowledged
+            draftRef.current = reverted
+            setDraft(reverted)
+          }
+          const text = t('cursorModelWriteFailed', {
+            model: nameOf(op.id),
+            message: message(failure),
+          })
+          errorsRef.current = { ...errorsRef.current, [op.id]: text }
+          setErrors(errorsRef.current)
+        }
+      }
+    })().finally(() => {
+      draining.current = false
+    })
+  }, [onSaved, rpc, t])
+
+  /** Settle every queued change before a read describes the document. */
+  const idle = useCallback(async (): Promise<void> => {
+    while (draining.current) await drainDone.current
+  }, [])
+
+  /**
+   * Seed the page from one host read.
+   *
+   * The stored map is the starting point, not an empty record: a change sends
+   * the whole map back, so an empty one would drop every setting the reader did
+   * not touch — including the models this catalog no longer lists.
+   */
   const adopt = useCallback((next: CursorModelsView) => {
     viewRef.current = next
     setView(next)
-    draftRef.current = {}
-    setDraft({})
+    const stored = cloneDraft(next.storedModels)
+    draftRef.current = stored
+    committedRef.current = cloneDraft(next.storedModels)
+    setDraft(stored)
     textsRef.current = {}
     setTexts({})
     editingRef.current = undefined
@@ -127,6 +248,9 @@ export function CursorModelsManager({
       else setLoading(true)
       setPageError('')
       try {
+        // A read started now must describe the document the queued changes
+        // left behind, not the one before them.
+        await idle()
         const data = await callSubscriptionsAuth<CursorModelsView>(
           rpc,
           'cursorModels',
@@ -146,7 +270,7 @@ export function CursorModelsManager({
         }
       }
     },
-    [adopt, rpc, t],
+    [adopt, idle, rpc, t],
   )
 
   useEffect(() => {
@@ -158,57 +282,20 @@ export function CursorModelsManager({
   const nameOf = (id: string): string =>
     viewRef.current?.models.find((model) => model.id === id)?.name ?? id
 
-  const state = (): {
-    draft: CursorModelDraft
-    texts: Record<string, string>
-  } => ({
-    draft: draftRef.current,
-    texts: textsRef.current,
-  })
-
-  const write = useCallback(
-    (next: CursorModelDraft, previous: CursorModelDraft, id: string) => {
-      writeChain.current = writeChain.current.then(async () => {
-        try {
-          await callSubscriptionsAuth(rpc, 'cursorSetSettings', {
-            settings: { models: next },
-          })
-          if (!alive.current) return
-          errorsRef.current = without(errorsRef.current, id)
-          setErrors(errorsRef.current)
-          onSaved()
-        } catch (failure) {
-          if (!alive.current) return
-          // The row returns to what the route holds: a screen that keeps a
-          // value the route rejected describes a window the host never meters.
-          draftRef.current = previous
-          setDraft(previous)
-          const text = t('cursorModelWriteFailed', {
-            model: nameOf(id),
-            message: message(failure),
-          })
-          errorsRef.current = { ...errorsRef.current, [id]: text }
-          setErrors(errorsRef.current)
-        }
-      })
-    },
-    [onSaved, rpc, t],
-  )
-
   const commit = useCallback(
     (next: CursorModelDraft, id: string) => {
-      const previous = draftRef.current
-      if (JSON.stringify(next) === JSON.stringify(previous)) return
+      if (sameEntry(next[id], draftRef.current[id])) return
       draftRef.current = next
       setDraft(next)
-      write(next, previous, id)
+      queue.current.push({ id, entry: next[id] })
+      startDrain()
     },
-    [write],
+    [startDrain],
   )
 
   const toggle = useCallback(
     (id: string, enabled: boolean) => {
-      commit(withModelEdit(state().draft, id, { enabled }), id)
+      commit(withModelEdit(draftRef.current, id, { enabled }), id)
     },
     [commit],
   )
@@ -219,7 +306,10 @@ export function CursorModelsManager({
       setTexts(textsRef.current)
       errorsRef.current = without(errorsRef.current, id)
       setErrors(errorsRef.current)
-      commit(withModelEdit(state().draft, id, { contextWindow: undefined }), id)
+      commit(
+        withModelEdit(draftRef.current, id, { contextWindow: undefined }),
+        id,
+      )
     },
     [commit],
   )
@@ -261,7 +351,7 @@ export function CursorModelsManager({
       errorsRef.current = without(errorsRef.current, id)
       setErrors(errorsRef.current)
       commit(
-        withModelEdit(state().draft, id, {
+        withModelEdit(draftRef.current, id, {
           contextWindow: tokens ?? undefined,
         }),
         id,
@@ -279,6 +369,13 @@ export function CursorModelsManager({
     },
     [commitText],
   )
+
+  /** Close the dialog without dropping a window the reader just typed. */
+  const close = useCallback(() => {
+    const id = editingRef.current
+    if (id !== undefined) flushText(id)
+    onClose()
+  }, [flushText, onClose])
 
   const refreshSource = useCallback(async () => {
     setSourceBusy(true)
@@ -407,7 +504,7 @@ export function CursorModelsManager({
           <h2 id={title} style={{ margin: 0 }}>
             {t('cursorManageTitle')}
           </h2>
-          <button type="button" autoFocus onClick={onClose}>
+          <button type="button" autoFocus onClick={close}>
             {t('imageClose')}
           </button>
         </header>

@@ -21,12 +21,13 @@ export interface CursorModelRowView {
   enabled: boolean
   /** Whether the catalog publishes any parameter or variant for it. */
   described: boolean
-  /** The window the route advertises and the source that decided it. */
+  /**
+   * The window that applies without a stored override, and the source that
+   * decided it.
+   */
   window: { tokens: number; source: CursorWindowSource; tier?: string }
   /** Whether the row offers a manual override. */
   overridable: boolean
-  /** The manual field's value when the reader opens it. */
-  manualValue: number
   /** Capacity the public catalog publishes, when it describes the model. */
   publishedWindow?: number
 }
@@ -36,6 +37,8 @@ export interface CursorModelsView {
   provider: 'cursor'
   models: CursorModelRowView[]
   knownContext: { enabled: boolean; fetchedAt?: number }
+  /** Every stored per-model setting; a change sends this map back. */
+  storedModels: CursorModelDraft
 }
 
 /** The stored edit for one model; an absent field is left alone. */
@@ -44,7 +47,7 @@ export interface CursorModelEdit {
   contextWindow?: number | undefined
 }
 
-/** The edits the page holds, keyed by model id. */
+/** The stored edits, keyed by model id. */
 export type CursorModelDraft = Record<string, CursorModelEdit>
 
 /** One row as the body renders it: the host's row after the reader's edits. */
@@ -78,10 +81,11 @@ export interface CursorRowCounts {
 
 /**
  * One row's window after the reader's edits: a stored manual value wins over
- * what the host resolved, so a saved override shows its own number and still
- * names what it replaced.
+ * the automatic one, so a saved override shows its own number and still names
+ * what it replaced. A row the tier decides ignores a stored value, because the
+ * provider applies the tier.
  * @param row - the host's row.
- * @param draft - the edits the page holds.
+ * @param draft - the stored edits the page holds.
  * @returns the window to show and the source it came from.
  */
 function editedWindow(
@@ -93,7 +97,7 @@ function editedWindow(
   tier?: string
   replaced?: number
 } {
-  const manual = draft[row.id]?.contextWindow
+  const manual = row.overridable ? draft[row.id]?.contextWindow : undefined
   if (manual === undefined) {
     return {
       tokens: row.window.tokens,
@@ -115,7 +119,7 @@ function editedWindow(
 /**
  * Build the rows the body renders.
  * @param models - the host's rows.
- * @param draft - the edits the page holds, already applied optimistically.
+ * @param draft - the stored edits the page holds, applied optimistically.
  * @param texts - the raw text of an open manual field, keyed by model id.
  * @param editing - the model whose field is open, when one is.
  * @param errors - the failure each row states, keyed by model id.
@@ -131,7 +135,6 @@ export function deriveRows(
   return models.map((model) => {
     const window = editedWindow(model, draft)
     const edit = draft[model.id]
-    const manual = window.source === 'manual'
     const error = errors[model.id]
     return {
       id: model.id,
@@ -141,10 +144,9 @@ export function deriveRows(
       ...window,
       overridable: model.overridable,
       // Opening the field starts from the value in effect, so a reader who
-      // overrides a published capacity starts from the number they can see.
+      // overrides a capacity starts from the number they can see.
       editing: editing === model.id,
-      text:
-        texts[model.id] ?? String(manual ? window.tokens : model.manualValue),
+      text: texts[model.id] ?? String(window.tokens),
       ...(error === undefined ? {} : { error }),
     }
   })

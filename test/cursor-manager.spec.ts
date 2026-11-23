@@ -32,7 +32,6 @@ const tiered: CursorModelRowView = {
   described: true,
   window: { tokens: 1_000_000, source: 'tier', tier: '1m' },
   overridable: false,
-  manualValue: 1_000_000,
 }
 
 const published: CursorModelRowView = {
@@ -42,7 +41,6 @@ const published: CursorModelRowView = {
   described: false,
   window: { tokens: 1_048_576, source: 'published' },
   overridable: true,
-  manualValue: 1_048_576,
   publishedWindow: 1_048_576,
 }
 
@@ -53,7 +51,6 @@ const fallback: CursorModelRowView = {
   described: true,
   window: { tokens: 200_000, source: 'default' },
   overridable: true,
-  manualValue: 200_000,
 }
 
 const noopHandlers = {
@@ -138,10 +135,22 @@ test('a stored manual value wins on the row and still names what it replaced', (
     windowNote(t, rows[0]!),
     'cursorWindowManual · cursorWindowReplaces',
   )
-  // Removing the override returns the row to the published capacity.
+  // Removing the stored value returns the row to the published capacity.
   const reverted = deriveRows([published], {}, {}, undefined, {})
   assert.equal(reverted[0]?.source, 'published')
   assert.equal(reverted[0]?.tokens, 1_048_576)
+})
+
+test('a tiered row ignores a stored window because the tier applies', () => {
+  const rows = deriveRows(
+    [tiered],
+    { 'claude-sonnet-5-5': { contextWindow: 300_000 } },
+    {},
+    undefined,
+    {},
+  )
+  assert.equal(rows[0]?.tokens, 1_000_000)
+  assert.equal(rows[0]?.source, 'tier')
 })
 
 test('an enablement edit changes the row without touching its window', () => {
@@ -186,10 +195,13 @@ test('a row shows its window as a chip and offers the override only when it can'
   assert.match(html, /Claude Sonnet 5.5/)
   assert.match(html, /1M/)
   assert.match(html, /1,048,576/)
-  // The tier row has no pencil; the other two do.
-  assert.equal(html.match(/cursorModelOverride/g)?.length, 2)
-  // The chip names its source in the accessible name and the tooltip.
+  // The tier row has no pencil; the other two do. Each button names itself
+  // twice: the accessible name and the hover title.
+  assert.equal(html.match(/aria-label="cursorModelOverride/g)?.length, 2)
+  // The chip names its source in the tooltip and in text a reader hears: an
+  // aria-label on a static span is not reliably exposed.
   assert.match(html, /title="cursorWindowTier:1m"/)
+  assert.match(html, /dsh-cursor-sr"> \(cursorWindowTier:1m\)/)
   assert.match(html, /cursorWindowPublished/)
   assert.match(html, /cursorModelNotDescribed/)
 })
@@ -206,7 +218,9 @@ test('an open field renders an input; an invalid one states the failure in the r
   )
   assert.match(editing, /<input/)
   assert.match(editing, /aria-invalid="true"/)
-  assert.match(editing, /role="alert"/)
+  // The failure is the field's description, not just a neighbouring paragraph.
+  assert.match(editing, /aria-describedby="cursor-model-error-/)
+  assert.match(editing, /role="alert" id="cursor-model-error-/)
   assert.match(editing, /cursorModelWindowInvalid/)
   assert.doesNotMatch(editing, /dsh-cursor-chip/)
 })
@@ -296,7 +310,6 @@ test('the manager dialog opens in its loading state', () => {
   assert.match(html, /dsh-cursor-manager/)
   assert.match(html, /cursorManageTitle/)
   assert.match(html, /cursorModelsLoading/)
-  // Autosave replaced the explicit pair: there is no Save or Cancel control.
-  assert.doesNotMatch(html, /cursorSave/)
-  assert.doesNotMatch(html, /cursorCancel/)
+  // Autosave replaced the explicit pair: there is no Save or Cancel button.
+  assert.equal(html.match(/<button[^>]*>\s*(Save|Cancel)\s*</g), null)
 })

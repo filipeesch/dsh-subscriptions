@@ -30,7 +30,6 @@ test('rows carry the resolved window, its source, and the override state', () =>
   assert.equal(rows[0]?.publishedWindow, 1_048_576)
   // The published value can be corrected, so the row offers the override.
   assert.equal(rows[0]?.overridable, true)
-  assert.equal(rows[0]?.manualValue, 1_048_576)
 })
 
 test('a tiered model offers no override because the tier decides', () => {
@@ -49,7 +48,7 @@ test('a tiered model offers no override because the tier decides', () => {
   assert.equal(rows[0]?.described, true)
 })
 
-test('settings win per field and the manual field edits the rest', () => {
+test('settings win on enablement and the stored window stays with the page', () => {
   const rows = buildCursorModelRows({
     models: [described, bare],
     settings: {
@@ -63,12 +62,13 @@ test('settings win per field and the manual field edits the rest', () => {
   })
   const deepseek = rows.find((row) => row.id === 'deepseek-v41-flash-1017')
   assert.equal(deepseek?.enabled, false)
-  assert.deepEqual(deepseek?.window, { tokens: 300_000, source: 'manual' })
+  // The page owns the stored overrides, so a row states the window that
+  // survives when the page clears one: here, the generic default.
+  assert.deepEqual(deepseek?.window, { tokens: 200_000, source: 'default' })
   assert.equal(deepseek?.overridable, true)
-  assert.equal(deepseek?.manualValue, 300_000)
   const composer = rows.find((row) => row.id === 'composer-2')
   assert.equal(composer?.described, false)
-  assert.deepEqual(composer?.window, { tokens: 200_000, source: 'manual' })
+  assert.deepEqual(composer?.window, { tokens: 200_000, source: 'default' })
 })
 
 test('a remembered tier is what the row reports after a rejection', () => {
@@ -87,16 +87,28 @@ test('a remembered tier is what the row reports after a rejection', () => {
   })
 })
 
-test('a manual value corrects a published capacity on the same row', () => {
+test('the configured baseline is the window a row falls back to', () => {
   const rows = buildCursorModelRows({
     models: [described],
-    settings: {
-      models: { 'deepseek-v41-flash-1017': { contextWindow: 900_000 } },
-    },
-    config: undefined,
+    settings: {},
+    config: { contextWindows: { 'deepseek-v41-flash-1017': 900_000 } },
     publishedWindow: () => 1_048_576,
   })
+  // A profile's baseline outranks the published capacity, and the page stores
+  // its overrides on top of it.
   assert.deepEqual(rows[0]?.window, { tokens: 900_000, source: 'manual' })
-  // The row still states what it replaced, so the reader can undo the override.
   assert.equal(rows[0]?.publishedWindow, 1_048_576)
+})
+
+test('an invalid configured entry is ignored rather than stored', () => {
+  const rows = buildCursorModelRows({
+    models: [described],
+    settings: {},
+    config: { contextWindows: { 'deepseek-v41-flash-1017': 0 } },
+    publishedWindow: () => 1_048_576,
+  })
+  assert.deepEqual(rows[0]?.window, {
+    tokens: 1_048_576,
+    source: 'published',
+  })
 })

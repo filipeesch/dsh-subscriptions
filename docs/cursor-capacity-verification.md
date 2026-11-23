@@ -89,6 +89,24 @@ flex item of the row and squeezed the model name, so the row now wraps its error
 onto its own line. The captures do not prove the mounted dialog's focus
 behavior, its scroll behavior, or a refresh inside a running host.
 
+## What the review round changed
+
+The first review reproduced a regression in the new manager and this round fixed
+it. The page seeds its map from the stored document the read carries, so the
+first autosave keeps every model it did not touch — including one the catalog no
+longer lists — and a reset can clear an override that came from the document.
+Writes are queued as changes applied to the last acknowledged map, so a refused
+change never rides along on the next successful one, and a read settles the
+queue before it fetches, so a Reload cannot describe a document older than the
+save that preceded it. Closing the dialog writes a window the reader just typed.
+
+The accepted-tier record is normalized on every validation, so a save over a
+document that predates the compatibility field still writes a document an older
+build can read. The chip carries its source as text a screen reader reads, not
+as an `aria-label` on a static span, and the invalid field points at its own
+error. The orphaned save and cancel strings are gone from both dictionaries, and
+the card's capture no longer shows a failure state the card cannot render.
+
 ## Not verified here
 
 - The dialog inside a running DSH with a real Cursor account: pressing **Refresh

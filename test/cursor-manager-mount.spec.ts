@@ -88,18 +88,59 @@ const publishedRow = {
   described: false,
   window: { tokens: 1_048_576, source: 'published' as const },
   overridable: true,
-  manualValue: 1_048_576,
   publishedWindow: 1_048_576,
 }
 
+/** The stored document a fixture read carries: another row's setting plus one
+ * the catalog no longer lists, both of which a write must keep. */
+const storedDocument = {
+  'claude-sonnet-5-5': { enabled: true },
+  'legacy-model': { contextWindow: 300_000 },
+} as Record<string, { enabled?: boolean; contextWindow?: number }>
+
 function modelsView(
   rows = [tieredRow, editableRow, publishedRow],
+  stored: Record<
+    string,
+    { enabled?: boolean; contextWindow?: number }
+  > = storedDocument,
 ): CursorModelsView {
   return {
     provider: 'cursor',
-    models: rows,
+    // A real host resolves enablement from the document it stored.
+    models: rows.map((row) => ({
+      ...row,
+      enabled: stored[row.id]?.enabled ?? row.enabled,
+    })),
     knownContext: { enabled: true, fetchedAt: refreshedAt },
+    storedModels: stored,
   }
+}
+
+/**
+ * A fake host whose settings document mutates, so a spec can prove the payload
+ * the page sends is the document a real store then serves back. A recorder that
+ * returns a frozen fixture cannot tell a complete map from one that dropped
+ * every other model.
+ */
+function storeRpc() {
+  let stored = { ...storedDocument }
+  const handler = (
+    endpoint: string,
+    payload: Record<string, unknown>,
+  ): Ok | Bad => {
+    if (endpoint === 'cursorModels')
+      return { ok: true, value: modelsView(undefined, stored) }
+    if (endpoint === 'cursorSetSettings') {
+      const next = (payload.settings as { models?: typeof stored } | undefined)
+        ?.models
+      if (next !== undefined) stored = next
+      return { ok: true, value: {} }
+    }
+    return { ok: false, error: { message: 'unexpected ' + endpoint } }
+  }
+  const { rpc, calls } = fakeRpc(handler)
+  return { rpc, calls, stored: () => stored }
 }
 
 interface Dom {
@@ -276,7 +317,9 @@ test('an enablement change writes at once, with no save action', async () => {
         onSaved: () => undefined,
       }),
     )
-    assert.equal(buttonByText(dom, en.cursorSave), null)
+    // Autosave replaced the explicit pair: the populated dialog offers neither.
+    assert.equal(buttonByText(dom, 'Save'), null)
+    assert.equal(buttonByText(dom, 'Cancel'), null)
     const toggle = dom.document.querySelector(
       'input[aria-label="' +
         t('cursorModelEnabled', { model: 'Composer 2' }) +
@@ -285,11 +328,250 @@ test('an enablement change writes at once, with no save action', async () => {
     await dom.setChecked(toggle, true)
     const writes = calls.filter((call) => call.endpoint === 'cursorSetSettings')
     assert.equal(writes.length, 1)
+    // The whole stored document travels with the change: one model's edit must
+    // not drop another model's setting, nor one the catalog no longer lists.
     assert.deepEqual(
       (writes[0]?.payload.settings as { models: Record<string, unknown> })
         .models,
-      { 'composer-2': { enabled: true } },
+      {
+        'claude-sonnet-5-5': { enabled: true },
+        'legacy-model': { contextWindow: 300_000 },
+        'composer-2': { enabled: true },
+      },
     )
+  })
+})
+
+test('a change keeps the stored document and a reload reads it back', async () => {
+  const { rpc, stored } = storeRpc()
+  await withDom(async (dom) => {
+    await dom.render(
+      createElement(CursorModelsManager, {
+        rpc,
+        t,
+        onClose: () => undefined,
+        onSaved: () => undefined,
+      }),
+    )
+    await dom.setChecked(
+      dom.document.querySelector(
+        'input[aria-label="' +
+          t('cursorModelEnabled', { model: 'Composer 2' }) +
+          '"]',
+      ),
+      true,
+    )
+    await dom.wait(50)
+    // The fake store now holds what a real store would: every earlier entry
+    // plus the change.
+    assert.deepEqual(stored(), {
+      'claude-sonnet-5-5': { enabled: true },
+      'legacy-model': { contextWindow: 300_000 },
+      'composer-2': { enabled: true },
+    })
+    await dom.click(buttonByText(dom, en.cursorModelsReload))
+    assert.equal(
+      (
+        dom.document.querySelector(
+          'input[aria-label="' +
+            t('cursorModelEnabled', { model: 'Composer 2' }) +
+            '"]',
+        ) as HTMLInputElement
+      ).checked,
+      true,
+    )
+  })
+})
+
+test('the return to automatic clears an override the document already had', async () => {
+  const { rpc, calls } = fakeRpc((endpoint) => {
+    if (endpoint === 'cursorModels')
+      return {
+        ok: true,
+        value: modelsView(undefined, {
+          ...storedDocument,
+          'deepseek-v41-flash-1017': { contextWindow: 900_000 },
+        }),
+      }
+    if (endpoint === 'cursorSetSettings') return { ok: true, value: {} }
+    return { ok: false, error: { message: 'unexpected ' + endpoint } }
+  })
+  await withDom(async (dom) => {
+    await dom.render(
+      createElement(CursorModelsManager, {
+        rpc,
+        t,
+        onClose: () => undefined,
+        onSaved: () => undefined,
+      }),
+    )
+    // The stored override is what the row shows, so it can be cleared at once.
+    assert.match(dom.text(), /900K/)
+    await dom.click(
+      dom.document.querySelector(
+        'button[aria-label="' +
+          t('cursorModelResetOverride', { model: 'DeepSeek V4.1 Flash 1017' }) +
+          '"]',
+      ),
+    )
+    const writes = calls.filter((call) => call.endpoint === 'cursorSetSettings')
+    assert.equal(writes.length, 1)
+    assert.deepEqual(
+      (writes[0]?.payload.settings as { models: Record<string, unknown> })
+        .models,
+      storedDocument,
+    )
+    assert.match(dom.text(), /1,048,576/)
+    assert.doesNotMatch(dom.text(), /900K/)
+  })
+})
+
+test('a failed change is not carried by the write queued behind it', async () => {
+  const sent: Record<string, unknown>[] = []
+  let writes = 0
+  const rpc = {
+    async call(
+      _channel: string,
+      endpoint: string,
+      payload: Record<string, unknown>,
+    ) {
+      const name = endpoint.replace('subscriptions-auth.', '')
+      if (name === 'cursorModels') return { ok: true, value: modelsView() }
+      if (name === 'cursorSetSettings') {
+        sent.push(
+          (payload.settings as { models: Record<string, unknown> }).models,
+        )
+        writes += 1
+        if (writes === 1) {
+          // Hold the first write so the second change queues behind it.
+          await new Promise((resolveWait) => setTimeout(resolveWait, 120))
+          return { ok: false, error: { message: 'write failed' } }
+        }
+        return { ok: true, value: {} }
+      }
+      return { ok: false, error: { message: 'unexpected ' + name } }
+    },
+  } as never
+  await withDom(async (dom) => {
+    await dom.render(
+      createElement(CursorModelsManager, {
+        rpc,
+        t,
+        onClose: () => undefined,
+        onSaved: () => undefined,
+      }),
+    )
+    const composer = () =>
+      dom.document.querySelector(
+        'input[aria-label="' +
+          t('cursorModelEnabled', { model: 'Composer 2' }) +
+          '"]',
+      ) as HTMLInputElement
+    const claude = () =>
+      dom.document.querySelector(
+        'input[aria-label="' +
+          t('cursorModelEnabled', { model: 'Claude Sonnet 5.5' }) +
+          '"]',
+      ) as HTMLInputElement
+    await dom.setChecked(composer(), true)
+    await dom.setChecked(claude(), false)
+    await dom.wait(400)
+    // The refused change returned to the stored value...
+    assert.equal(composer().checked, false)
+    assert.match(dom.text(), /write failed/)
+    // ...without undoing the change queued behind it.
+    assert.equal(claude().checked, false)
+    assert.equal(sent.length, 2)
+    // The second request describes the acknowledged document plus its own
+    // change: the refused composer edit is not retried behind the reader's back.
+    assert.deepEqual(sent[1], {
+      'claude-sonnet-5-5': { enabled: false },
+      'legacy-model': { contextWindow: 300_000 },
+    })
+  })
+})
+
+test('closing the dialog writes a window the reader just typed', async () => {
+  const { rpc, calls } = fakeRpc((endpoint) => {
+    if (endpoint === 'cursorModels') return { ok: true, value: modelsView() }
+    if (endpoint === 'cursorSetSettings') return { ok: true, value: {} }
+    return { ok: false, error: { message: 'unexpected ' + endpoint } }
+  })
+  await withDom(async (dom) => {
+    await dom.render(
+      createElement(CursorModelsManager, {
+        rpc,
+        t,
+        onClose: () => undefined,
+        onSaved: () => undefined,
+      }),
+    )
+    await dom.click(
+      dom.document.querySelector(
+        'button[aria-label="' +
+          t('cursorModelOverride', { model: 'Composer 2' }) +
+          '"]',
+      ),
+    )
+    await dom.setValue(input(dom, 'Composer 2'), '700000')
+    // Close before the pause elapses: the change is still the reader's.
+    await dom.click(buttonByText(dom, en.imageClose))
+    await dom.wait(50)
+    const writes = calls.filter((call) => call.endpoint === 'cursorSetSettings')
+    assert.equal(writes.length, 1)
+    assert.deepEqual(
+      (writes[0]?.payload.settings as { models: Record<string, unknown> })
+        .models,
+      { ...storedDocument, 'composer-2': { contextWindow: 700_000 } },
+    )
+  })
+})
+
+test('a reload waits for the write before it reads the document', async () => {
+  const order: string[] = []
+  let held: (() => void) | undefined
+  const rpc = {
+    async call(_channel: string, endpoint: string) {
+      const name = endpoint.replace('subscriptions-auth.', '')
+      if (name === 'cursorModels') {
+        order.push('read')
+        return { ok: true, value: modelsView() }
+      }
+      if (name === 'cursorSetSettings') {
+        order.push('write')
+        await new Promise<void>((resolveWait) => {
+          held = resolveWait
+        })
+        order.push('write-done')
+        return { ok: true, value: {} }
+      }
+      return { ok: false, error: { message: 'unexpected ' + name } }
+    },
+  } as never
+  await withDom(async (dom) => {
+    await dom.render(
+      createElement(CursorModelsManager, {
+        rpc,
+        t,
+        onClose: () => undefined,
+        onSaved: () => undefined,
+      }),
+    )
+    order.length = 0
+    await dom.setChecked(
+      dom.document.querySelector(
+        'input[aria-label="' +
+          t('cursorModelEnabled', { model: 'Composer 2' }) +
+          '"]',
+      ),
+      true,
+    )
+    // Reload while the write is still in flight.
+    await dom.click(buttonByText(dom, en.cursorModelsReload))
+    assert.deepEqual(order, ['write'], 'the read waits for the write to land')
+    held?.()
+    await dom.wait(80)
+    assert.deepEqual(order, ['write', 'write-done', 'read'])
   })
 })
 
@@ -326,7 +608,10 @@ test('a typed window writes after the pause and marks the row manual', async () 
     assert.deepEqual(
       (writes[0]?.payload.settings as { models: Record<string, unknown> })
         .models,
-      { 'deepseek-v41-flash-1017': { contextWindow: 900_000 } },
+      {
+        ...storedDocument,
+        'deepseek-v41-flash-1017': { contextWindow: 900_000 },
+      },
     )
     // The row shows the manual value and offers the return to automatic.
     assert.match(dom.text(), /900K/)
@@ -373,11 +658,12 @@ test('the return to automatic clears the stored override', async () => {
     )
     const writes = calls.filter((call) => call.endpoint === 'cursorSetSettings')
     assert.equal(writes.length, 2)
-    // The override is gone, not stored as zero.
+    // The override is gone, not stored as zero, and the rest of the document
+    // is back to what the host already held.
     assert.deepEqual(
       (writes[1]?.payload.settings as { models: Record<string, unknown> })
         .models,
-      {},
+      storedDocument,
     )
     assert.match(dom.text(), /1,048,576/)
   })

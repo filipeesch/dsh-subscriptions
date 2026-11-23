@@ -26,4 +26,8 @@ export const cursorManagerCss = [
   '.dsh-cursor-manager .dsh-cursor-section { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: 8px; border: 0.5px solid var(--dsw-alias-border-l2); }',
   '.dsh-cursor-manager .dsh-cursor-section-actions { display: flex; gap: 8px; flex-wrap: wrap; }',
   '.dsh-cursor-manager .dsh-cursor-list { max-height: 340px; overflow-y: auto; min-height: 0; }',
+  '.dsh-cursor-manager .dsh-cursor-sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }',
+  /* A narrow dialog stacks the controls under the name: the id and the catalog
+     note otherwise squeeze the name into a column a few characters wide. */
+  '@media (max-width: 560px) { .dsh-cursor-manager .dsh-cursor-model { flex-direction: column; align-items: stretch; gap: 6px; } .dsh-cursor-manager .dsh-cursor-model-head { flex: 1 1 auto; } .dsh-cursor-manager .dsh-cursor-model-controls { justify-content: flex-end; } }',
 ].join('\n')

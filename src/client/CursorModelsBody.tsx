@@ -83,6 +83,8 @@ export function CursorModelRow({
 }) {
   const note = windowNote(t, row)
   const windowName = t('cursorModelWindowFor', { model: row.name })
+  const errorId = 'cursor-model-error-' + row.id
+  const invalid = row.editing && row.error !== undefined
   return (
     <li
       className={
@@ -114,8 +116,9 @@ export function CursorModelRow({
               autoFocus
               value={row.text}
               disabled={disabled}
-              aria-invalid={row.error !== undefined}
+              aria-invalid={invalid}
               aria-label={windowName}
+              aria-describedby={invalid ? errorId : undefined}
               onChange={(event) => handlers.onText(row.id, event.target.value)}
               onBlur={() => handlers.onCommit(row.id)}
               onKeyDown={(event) => {
@@ -126,19 +129,12 @@ export function CursorModelRow({
           </>
         ) : (
           <>
-            <span
-              className="dsh-cursor-chip"
-              title={note}
-              aria-label={
-                windowName +
-                ': ' +
-                formatWindowLabel(row.tokens) +
-                ' (' +
-                note +
-                ')'
-              }
-            >
+            {/* The source is real text, not an aria-label on a static span:
+                a screen reader then reads the value and where it came from,
+                and the title carries the same sentence for a pointer. */}
+            <span className="dsh-cursor-chip" title={note}>
               {formatWindowLabel(row.tokens)}
+              <span className="dsh-cursor-sr"> ({note})</span>
             </span>
             {row.overridable && (
               <button
@@ -146,6 +142,7 @@ export function CursorModelRow({
                 className="dsh-cursor-icon"
                 disabled={disabled}
                 aria-label={t('cursorModelOverride', { model: row.name })}
+                title={t('cursorModelOverride', { model: row.name })}
                 onClick={() => handlers.onEdit(row.id)}
               >
                 <PencilIcon />
@@ -157,6 +154,7 @@ export function CursorModelRow({
                 className="dsh-cursor-icon"
                 disabled={disabled}
                 aria-label={t('cursorModelResetOverride', { model: row.name })}
+                title={t('cursorModelResetOverride', { model: row.name })}
                 onClick={() => handlers.onReset(row.id)}
               >
                 <ResetIcon />
@@ -166,7 +164,7 @@ export function CursorModelRow({
         )}
       </div>
       {row.error !== undefined && (
-        <p role="alert" className="dsh-cursor-model-error">
+        <p role="alert" id={errorId} className="dsh-cursor-model-error">
           {row.error}
         </p>
       )}

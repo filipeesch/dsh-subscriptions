@@ -153,9 +153,13 @@ keeps one status line and the button that opens the manager.
 
 Each change writes the whole `models` map through the existing
 `cursorSetSettings` call: the store already replaces that field wholesale, and a
-per-model patch would add a second write semantic for the same result. A toggle
-writes immediately; a typed window writes 500 ms after typing stops, so a word
-is one write and not eight.
+per-model patch would add a second write semantic for the same result. The page
+therefore holds that map: it seeds it from the stored document the read carries,
+patches one entry per change, and sends it back, so an edit of one model cannot
+drop another model's setting or one the catalog no longer lists. A toggle writes
+immediately; a typed window writes 500 ms after typing stops, so a word is one
+write and not eight. A failed write restores that one entry, so a change queued
+behind it survives.
 
 Alternatives rejected:
 

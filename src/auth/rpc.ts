@@ -383,6 +383,12 @@ export interface CursorModelsView {
   provider: 'cursor'
   models: import('../providers/cursor/model-rows.js').CursorModelRow[]
   knownContext: CursorKnownContextView
+  /**
+   * The stored per-model settings. A change writes the whole map, so the page
+   * holds it: sending only the edited entry would drop every other model's
+   * setting, including the ones the catalog no longer lists.
+   */
+  storedModels: Record<string, { enabled?: boolean; contextWindow?: number }>
 }
 
 /**

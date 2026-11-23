@@ -113,6 +113,14 @@ test('a legacy per-model tier and accepted tier still read', async () => {
   })
   assert.deepEqual(legacy.models, { 'claude-sonnet-5-5': { enabled: true } })
   assert.equal(legacy.acceptedTiers?.['claude-sonnet-5-5']?.value, '200k')
+  // A record with no preference is normalized, so the next save writes a
+  // document an older build can still validate.
+  assert.deepEqual(
+    validateCursorSettings({
+      acceptedTiers: { 'claude-sonnet-5-5': { value: '200k' } },
+    }).acceptedTiers,
+    { 'claude-sonnet-5-5': { value: '200k', preference: 'max' } },
+  )
 
   const { store, path } = storeAt()
   await store.set({
@@ -127,6 +135,26 @@ test('a legacy per-model tier and accepted tier still read', async () => {
     enabled: false,
   })
   assert.equal(reloaded.acceptedTier('claude-sonnet-5-5'), '200k')
+})
+
+test('an unrelated save writes the compatibility field onto a legacy record', async () => {
+  const { path } = storeAt()
+  writeFileSync(
+    path,
+    JSON.stringify({
+      acceptedTiers: { 'claude-sonnet-5-5': { value: '200k' } },
+    }),
+  )
+  const loaded = new CursorSettingsStore(path)
+  assert.equal(loaded.corruption(), undefined)
+  assert.equal(loaded.acceptedTier('claude-sonnet-5-5'), '200k')
+  await loaded.setCeiling(25)
+  const written = JSON.parse(readFileSync(path, 'utf8')) as {
+    acceptedTiers?: Record<string, { value: string; preference?: string }>
+  }
+  assert.deepEqual(written.acceptedTiers, {
+    'claude-sonnet-5-5': { value: '200k', preference: 'max' },
+  })
 })
 
 test('a remembered tier is read without a preference and written with the rollback field', async () => {

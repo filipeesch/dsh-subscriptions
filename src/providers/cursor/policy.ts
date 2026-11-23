@@ -30,20 +30,35 @@ function settingFor(
     : undefined
 }
 
-/** The manual window for one model, when settings or configuration name one. */
-export function manualWindowFor(
-  settings: CursorSettings,
+/**
+ * The configured window for one model, when the profile names a usable one.
+ *
+ * It is the baseline the stored setting overrides, and the manager's rows start
+ * from it: the page owns the stored overrides, so a row states the value that
+ * applies when the page stores none.
+ */
+export function configuredWindowFor(
   config: CursorConfigPolicy | undefined,
   modelId: string,
 ): number | undefined {
-  const value =
-    settingFor(settings, modelId)?.contextWindow ??
-    config?.contextWindows?.[modelId]
+  const value = config?.contextWindows?.[modelId]
   // An individual invalid entry is ignored; the resolver falls through to the
   // next source rather than rounding a typo into a different window.
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
     ? value
     : undefined
+}
+
+/** The manual window for one model: the stored value, else the configured one. */
+export function manualWindowFor(
+  settings: CursorSettings,
+  config: CursorConfigPolicy | undefined,
+  modelId: string,
+): number | undefined {
+  return (
+    settingFor(settings, modelId)?.contextWindow ??
+    configuredWindowFor(config, modelId)
+  )
 }
 
 /** Whether a model appears in the picker; absent everywhere means enabled. */

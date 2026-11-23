@@ -169,5 +169,6 @@ send one prompt with a tool call from the composer.
 See the
 [decision record](../.agents/notes/implemented/provider/2026-11-21-cursor-key-route.md)
 for the endpoint probes and the alternatives, and the
-[capacity decision](../.agents/notes/implemented/provider/2026-11-21-cursor-context-capacity.md)
-for why the window comes from three sources.
+[capacity and manager decision](../.agents/notes/implemented/provider/2026-11-23-cursor-capacities-and-manager.md)
+for why the window resolves in this order and why a manual value outranks the
+published one.

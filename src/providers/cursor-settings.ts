@@ -148,16 +148,18 @@ export function validateCursorSettings(input: unknown): CursorSettings {
       const id = rawId.trim()
       if (id.length === 0) fail('model ids must be non-empty')
       const tier = recordOf(rawValue, `acceptedTiers[${id}]`)
+      // The field is always emitted, even for a document that predates it: the
+      // validator's output is what the store writes, so a later save would
+      // otherwise persist a record an older build rejects and resets.
       const parsed: CursorAcceptedTier = {
         value: nonEmptyString(tier.value, `acceptedTiers[${id}].value`),
-      }
-      // A document written by an older build carries the preference; the route
-      // no longer reads it, but reading it back keeps the field in the document.
-      if (tier.preference !== undefined) {
-        parsed.preference = nonEmptyString(
-          tier.preference,
-          `acceptedTiers[${id}].preference`,
-        )
+        preference:
+          tier.preference === undefined
+            ? ACCEPTED_TIER_COMPAT_PREFERENCE
+            : nonEmptyString(
+                tier.preference,
+                `acceptedTiers[${id}].preference`,
+              ),
       }
       out[id] = parsed
     }

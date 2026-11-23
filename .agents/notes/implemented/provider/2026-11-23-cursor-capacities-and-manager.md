@@ -107,10 +107,13 @@ entry. Dropping the tier preference means a profile that pinned a smaller tier
 loses the pin; the automatic step-down covers a rejection, and the profile key
 is ignored rather than rejected. Autosave writes the whole `models` map per
 change, so two surfaces writing settings at once stay last-writer-wins, as they
-already were. The accepted-tier record keeps a field nothing reads, which is the
-price of a readable document after a rollback. The manager's split keeps the
-rows, the presentation, and the writes separately testable, and the capacity
-section leaving the card means the card no longer states a refresh failure.
+already were; the page seeds that map from the stored document the read carries,
+so one model's change cannot drop another model's setting, and a refused write
+restores only its own entry. The accepted-tier record keeps a field nothing
+reads, which is the price of a readable document after a rollback. The manager's
+split keeps the rows, the presentation, and the writes separately testable, and
+the capacity section leaving the card means the card no longer states a refresh
+failure.
 
 ## Evidence boundary
 

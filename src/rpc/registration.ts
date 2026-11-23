@@ -502,6 +502,9 @@ export function assembleRpc(deps: RpcDeps): void {
           publishedWindow: cursorPublishedWindow,
         }),
         knownContext: cursorKnownContext(),
+        // The page patches this map and sends it back, so it carries every
+        // stored entry, including the models the catalog no longer lists.
+        storedModels: settings.models ?? {},
       }
     },
     async setSettings(patch) {

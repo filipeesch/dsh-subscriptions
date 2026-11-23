@@ -43,7 +43,6 @@ const hosts = [
     described: true,
     window: { tokens: 1_000_000, source: 'tier', tier: '1m' },
     overridable: false,
-    manualValue: 1_000_000,
   },
   {
     id: 'grok-4.7',
@@ -52,7 +51,6 @@ const hosts = [
     described: true,
     window: { tokens: 500_000, source: 'tier', tier: '500k' },
     overridable: false,
-    manualValue: 500_000,
   },
   {
     id: 'deepseek-v41-flash-1017',
@@ -61,7 +59,6 @@ const hosts = [
     described: false,
     window: { tokens: 1_048_576, source: 'published' },
     overridable: true,
-    manualValue: 1_048_576,
     publishedWindow: 1_048_576,
   },
   {
@@ -71,7 +68,6 @@ const hosts = [
     described: false,
     window: { tokens: 1_048_573, source: 'published' },
     overridable: true,
-    manualValue: 1_048_573,
     publishedWindow: 1_048_573,
   },
   {
@@ -81,9 +77,19 @@ const hosts = [
     described: true,
     window: { tokens: 200_000, source: 'default' },
     overridable: true,
-    manualValue: 200_000,
   },
 ]
+
+/** The same models as a read with the capacity source off: no published value. */
+const withoutPublishedRows = hosts.map((row) =>
+  row.window.source === 'published'
+    ? {
+        ...row,
+        window: { tokens: 200_000, source: 'default' },
+        publishedWindow: undefined,
+      }
+    : row,
+)
 
 const theme = `:root {
   --dsw-alias-bg-layer-1: #ffffff;
@@ -143,8 +149,12 @@ function page(bodyHtml) {
   )
 }
 
-/** The card's one status line, on its own and beside a failure notice. */
-function card(t, { enabled, fetchedAt, locale, error, retained }) {
+/**
+ * The card's one status line, which is all the card says about capacities now.
+ * A refresh failure belongs to the manager, so the card has no failure state to
+ * capture.
+ */
+function card(t, { enabled, fetchedAt, locale }) {
   const line = renderToStaticMarkup(
     createElement(CursorSourceLine, {
       t,
@@ -153,21 +163,6 @@ function card(t, { enabled, fetchedAt, locale, error, retained }) {
       ...(locale === undefined ? {} : { locale }),
     }),
   )
-  const failure =
-    error === undefined
-      ? ''
-      : renderToStaticMarkup(
-          createElement(
-            'p',
-            { role: 'alert' },
-            t(
-              retained === true
-                ? 'cursorSourceRefreshFailedRetained'
-                : 'cursorSourceRefreshFailedNoCache',
-              { message: error },
-            ),
-          ),
-        )
   return (
     '<section class="dsh-cursor-card"><h2>' +
     t('cursorTitle') +
@@ -179,7 +174,6 @@ function card(t, { enabled, fetchedAt, locale, error, retained }) {
     t('cursorKeyRef', { ref: 'CURSOR_API_KEY' }) +
     '</p>' +
     line +
-    failure +
     '<div><button type="button" style="font-weight:600">' +
     t('cursorManage') +
     '</button></div>' +
@@ -191,6 +185,7 @@ function card(t, { enabled, fetchedAt, locale, error, retained }) {
 function manager(
   t,
   {
+    rows: hostRows = hosts,
     draft = {},
     texts = {},
     editing,
@@ -202,7 +197,7 @@ function manager(
     sourceNotice,
   },
 ) {
-  const all = deriveRows(hosts, draft, texts, editing, errors)
+  const all = deriveRows(hostRows, draft, texts, editing, errors)
   const rows = filterRows(all, query)
   const body = renderToStaticMarkup(
     createElement(CursorModelsBody, {
@@ -246,7 +241,9 @@ function manager(
     '<p class="dsh-subscription-hint">' +
     t('cursorManageHint') +
     '</p>' +
-    '<div class="dsh-cursor-toolbar"><input placeholder="' +
+    '<div class="dsh-cursor-toolbar"><input value="' +
+    query +
+    '" placeholder="' +
     t('modelDefaultsFilterPlaceholder') +
     '" aria-label="' +
     t('modelDefaultsFilterPlaceholder') +
@@ -305,27 +302,13 @@ capture(
   'card-source-on-en',
   page(card(enT, { enabled: true, fetchedAt: refreshed, locale: 'en-US' })),
   760,
-  300,
+  260,
 )
 capture(
   'card-source-off-en',
   page(card(enT, { enabled: false, locale: 'en-US' })),
   760,
-  300,
-)
-capture(
-  'card-source-failed-en',
-  page(
-    card(enT, {
-      enabled: true,
-      fetchedAt: refreshed,
-      error: 'models.dev returned a document this projection cannot read',
-      retained: true,
-      locale: 'en-US',
-    }),
-  ),
-  760,
-  340,
+  260,
 )
 capture('manager-en', page(manager(enT, { fetchedAt: refreshed })), 760, 700)
 capture(
@@ -333,6 +316,7 @@ capture(
   page(
     manager(enT, {
       fetchedAt: refreshed,
+      // The page holds the stored override, exactly as the dialog seeds it.
       draft: { 'deepseek-v41-flash-1017': { contextWindow: 900_000 } },
     }),
   ),
@@ -377,7 +361,12 @@ capture(
   'manager-source-off-en',
   page(
     manager(enT, {
+      // With the source off the read describes no published capacity, so those
+      // rows fall back to the default: the capture shows the state the app can
+      // actually produce.
+      rows: withoutPublishedRows,
       enabled: false,
+      fetchedAt: refreshed,
       sourceNotice: enT('cursorCapacityDisabledRefresh'),
     }),
   ),
@@ -408,6 +397,6 @@ capture(
   'card-source-zh-narrow',
   page(card(zhT, { enabled: false, locale: 'zh-CN' })),
   500,
-  340,
+  320,
   'zh-CN',
 )
