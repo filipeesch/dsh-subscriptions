@@ -978,6 +978,122 @@ test('a read cannot drop the text a reader is still typing', async () => {
   })
 })
 
+test('Escape waits for a pending write and holds a failure', async () => {
+  let release: (() => void) | undefined
+  const rpc = {
+    async call(_channel: string, endpoint: string) {
+      const name = endpoint.replace('subscriptions-auth.', '')
+      if (name === 'cursorModels') return { ok: true, value: modelsView() }
+      if (name === 'cursorSetSettings') {
+        await new Promise<void>((resolveWait) => {
+          release = resolveWait
+        })
+        return { ok: false, error: { message: 'write failed' } }
+      }
+      return { ok: false, error: { message: 'unexpected ' + name } }
+    },
+  } as never
+  let closed = 0
+  await withDom(async (dom) => {
+    await dom.render(
+      createElement(CursorModelsManager, {
+        rpc,
+        t,
+        onClose: () => {
+          closed += 1
+        },
+        onSaved: () => undefined,
+      }),
+    )
+    await dom.setChecked(
+      dom.document.querySelector(
+        'input[aria-label="' +
+          t('cursorModelEnabled', { model: 'Composer 2' }) +
+          '"]',
+      ),
+      true,
+    )
+    // Escape while the checkbox save is still in flight.
+    const dialog = dom.document.querySelector('dialog') as HTMLDialogElement
+    await act(async () => {
+      const cancel = new Event('cancel', { cancelable: true })
+      dialog.dispatchEvent(cancel)
+      // The manager prevents the browser's own dismissal to wait for the write.
+      assert.equal(cancel.defaultPrevented, true)
+      await new Promise((resolveWait) => setTimeout(resolveWait, 20))
+    })
+    assert.equal(closed, 0, 'the dialog waits for the write')
+    release?.()
+    await dom.wait(80)
+    assert.equal(closed, 0, 'the refused write keeps the dialog open')
+    assert.match(dom.text(), /write failed/)
+  })
+})
+
+test('an older read cannot restore a stale source state', async () => {
+  let sourceOn = true
+  let reads = 0
+  let release: (() => void) | undefined
+  const rpc = {
+    async call(
+      _channel: string,
+      endpoint: string,
+      payload: Record<string, unknown>,
+    ) {
+      const name = endpoint.replace('subscriptions-auth.', '')
+      if (name === 'cursorModels') {
+        reads += 1
+        // The response describes the state when the request was made, so a
+        // held early read answers with the source still on.
+        const snapshot = sourceOn
+        if (reads === 2) {
+          await new Promise<void>((resolveWait) => {
+            release = resolveWait
+          })
+        }
+        return {
+          ok: true,
+          value: {
+            ...modelsView(),
+            knownContext: { enabled: snapshot, fetchedAt: refreshedAt },
+          },
+        }
+      }
+      if (name === 'cursorSetSettings') {
+        const settings = payload.settings as { publishedContext?: boolean }
+        if (settings.publishedContext !== undefined)
+          sourceOn = settings.publishedContext
+        return { ok: true, value: {} }
+      }
+      return { ok: false, error: { message: 'unexpected ' + name } }
+    },
+  } as never
+  await withDom(async (dom) => {
+    await dom.render(
+      createElement(CursorModelsManager, {
+        rpc,
+        t,
+        onClose: () => undefined,
+        onSaved: () => undefined,
+      }),
+    )
+    // The reload hangs with the source on.
+    await dom.click(buttonByText(dom, en.cursorModelsReload))
+    // The source is switched off in the meantime; that read answers first.
+    await dom.click(buttonByText(dom, en.cursorCapacityDisable))
+    await dom.wait(60)
+    assert.match(dom.text(), new RegExp(en.cursorCapacityOff.slice(0, 20)))
+    release?.()
+    await dom.wait(80)
+    // The older response must not turn the source back on in the dialog.
+    assert.match(dom.text(), new RegExp(en.cursorCapacityOff.slice(0, 20)))
+    assert.doesNotMatch(
+      dom.text(),
+      new RegExp(en.cursorCapacityOn.slice(0, 20)),
+    )
+  })
+})
+
 test('a typed window writes after the pause and marks the row manual', async () => {
   const { rpc, calls } = fakeRpc((endpoint) => {
     if (endpoint === 'cursorModels') return { ok: true, value: modelsView() }

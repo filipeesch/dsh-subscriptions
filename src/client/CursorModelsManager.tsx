@@ -133,6 +133,8 @@ export function CursorModelsManager({
   const queue = useRef<CursorWriteOp[]>([])
   /** Incremented by every acknowledgement, so a read can tell it was overtaken. */
   const generation = useRef(0)
+  /** Incremented by every read, so an older response cannot replace a newer one. */
+  const readSequence = useRef(0)
   const draining = useRef(false)
   const drainDone = useRef<Promise<void>>(Promise.resolve())
   const textsRef = useRef<Record<string, string>>({})
@@ -286,6 +288,7 @@ export function CursorModelsManager({
 
   const load = useCallback(
     async (force: boolean, attempt = 0): Promise<void> => {
+      const sequence = ++readSequence.current
       if (force) setReloading(true)
       else setLoading(true)
       setPageError('')
@@ -300,6 +303,9 @@ export function CursorModelsManager({
           force ? { force: true } : {},
         )
         if (!alive.current) return
+        // A read the dialog started later describes a newer state — the
+        // capacity source, for one — so this response is already out of date.
+        if (sequence !== readSequence.current) return
         // A change made while this read was in flight is newer than the
         // document it describes. Adopting that document would show the older
         // rows, and the next write would be built from the older map; read
@@ -554,9 +560,9 @@ export function CursorModelsManager({
       aria-describedby={description}
       onClose={onClose}
       onCancel={(event) => {
-        // Escape must not drop a field the reader is still editing; route it
-        // through the same flush and failure-hold as the Close button.
-        if (editingRef.current === undefined) return
+        // Escape takes the same path as Close: it must not drop a field the
+        // reader is still editing, nor dismiss the dialog over a write that is
+        // still in flight and may be refused.
         event.preventDefault()
         close()
       }}

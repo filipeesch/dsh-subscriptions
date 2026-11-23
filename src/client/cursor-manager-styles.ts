@@ -25,13 +25,12 @@ export const cursorManagerCss = [
   '.dsh-cursor-manager .dsh-cursor-model-error { flex: 1 0 100%; margin: 0; }',
   '.dsh-cursor-manager .dsh-cursor-section { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: 8px; border: 0.5px solid var(--dsw-alias-border-l2); }',
   '.dsh-cursor-manager .dsh-cursor-section-actions { display: flex; gap: 8px; flex-wrap: wrap; }',
-  '.dsh-cursor-manager .dsh-cursor-list { max-height: 340px; overflow-y: auto; min-height: 0; }',
+  // A reserved gutter keeps the scroll affordance visible when the list is
+  // taller than the dialog; macOS overlay scrollbars otherwise hide it.
+  '.dsh-cursor-manager .dsh-cursor-list { max-height: 340px; overflow-y: auto; min-height: 0; scrollbar-gutter: stable; padding-right: 6px; }',
   '.dsh-cursor-manager .dsh-cursor-chip-tag { margin-left: 6px; padding-left: 6px; border-left: 0.5px solid var(--dsw-alias-border-l2); color: var(--dsw-alias-label-tertiary); }',
   '.dsh-cursor-manager .dsh-cursor-sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }',
-  /* A narrow dialog stacks the controls under the name: the id and the catalog
-     note otherwise squeeze the name into a column a few characters wide. */
-  /* A narrow dialog puts the id and the catalog note under the name, and keeps
-     the capacity next to its controls, so no column is squeezed to a few
-     characters. */
+  /* A narrow dialog stacks the metadata under the name and keeps the capacity
+     with its actions, so no column is squeezed to a few characters. */
   '@media (max-width: 560px) { .dsh-cursor-manager .dsh-cursor-model { flex-direction: column; align-items: stretch; gap: 6px; } .dsh-cursor-manager .dsh-cursor-model-head { flex: 1 1 auto; flex-wrap: wrap; } .dsh-cursor-manager .dsh-cursor-model-head > .dsh-cursor-model-id { flex: 1 1 100%; } .dsh-cursor-manager .dsh-cursor-model-controls { justify-content: flex-end; } }',
 ].join('\n')
