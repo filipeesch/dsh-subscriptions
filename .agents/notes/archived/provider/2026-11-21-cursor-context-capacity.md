@@ -1,6 +1,6 @@
 # Agent Note: Cursor's advertised context capacity
 
-Status: implemented
+Status: archived — [Cursor context capacities and the model manager](../../implemented/provider/2026-11-23-cursor-capacities-and-manager.md)
 
 ## Problem
 

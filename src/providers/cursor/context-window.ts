@@ -4,15 +4,18 @@
  * The host meters this number: DSH prices compaction from it, so announcing a
  * window smaller than the provider applies forces premature compaction, and a
  * larger one lets a request overflow. Resolution therefore follows what the
- * provider will actually use: the tier the request carries, then the capacity
- * the public catalog publishes, then a manual per-model value, then the
+ * provider will actually use: the tier the request carries, then a manual
+ * per-model value, then the capacity the public catalog publishes, then the
  * documented default.
+ *
+ * A manual value outranks the published capacity because the published number
+ * is a third-party estimate and the manual one is the reader's correction; only
+ * the requested tier outranks both, because that is what the provider applies.
  */
 
 import {
-  DEFAULT_CURSOR_CONTEXT,
-  contextTierValue,
-  offersTier,
+  offeredTierValue,
+  requestedTier as requestedTierFor,
   tierTokens,
 } from './params.js'
 
@@ -20,7 +23,7 @@ import {
 export const DEFAULT_CONTEXT_WINDOW = 200_000
 
 /** Which source decided the advertised window. */
-export type ContextWindowSource = 'tier' | 'published' | 'manual' | 'default'
+export type ContextWindowSource = 'tier' | 'manual' | 'published' | 'default'
 
 /** One resolved window and the fact it came from. */
 export interface ContextWindowResolution {
@@ -49,7 +52,7 @@ function usableTokens(value: number | undefined): value is number {
 
 /**
  * Resolve the advertised window for one model.
- * @param input - catalog entry, request tier, published capacity, and manual value.
+ * @param input - catalog entry, request tier, manual value, and published capacity.
  * @returns the window in tokens plus the source that decided it.
  */
 export function resolveContextWindow(
@@ -57,40 +60,41 @@ export function resolveContextWindow(
 ): ContextWindowResolution {
   const { model, tier, publishedWindow, manualWindow } = input
   const tierValue = tier?.trim()
-  if (tierValue && offersTier(model, tierValue)) {
+  if (tierValue && offeredTierValue(model, tierValue) !== undefined) {
     const tokens = tierTokens(tierValue)
     if (tokens !== undefined) return { tokens, source: 'tier', tier: tierValue }
   }
-  if (usableTokens(publishedWindow)) {
-    return { tokens: publishedWindow, source: 'published' }
-  }
   if (usableTokens(manualWindow)) {
     return { tokens: manualWindow, source: 'manual' }
+  }
+  if (usableTokens(publishedWindow)) {
+    return { tokens: publishedWindow, source: 'published' }
   }
   return { tokens: DEFAULT_CONTEXT_WINDOW, source: 'default' }
 }
 
 /**
- * The tier a model requests for one preference, or undefined when it offers
- * none.
+ * The tier a model requests: the accepted one while the catalog offers it, else
+ * the largest offered.
  * @param model - the catalog entry.
- * @param preference - the configured tier preference.
- * @returns the offered value the request carries.
+ * @param accepted - a tier Cursor accepted after a rejection, when remembered.
+ * @returns the offered value the request carries, or undefined for a model with
+ *   no tiers.
  */
 export function requestedTier(
   model: { cursorParameters?: unknown; parameters?: unknown } | undefined,
-  preference = DEFAULT_CURSOR_CONTEXT,
+  accepted?: string,
 ): string | undefined {
-  return contextTierValue(model, undefined, preference)
+  return requestedTierFor(model, accepted)
 }
 
-/** Context window the route advertises for one model and one preference. */
+/** Context window the route advertises for one model. */
 export function contextWindowFor(
   model: { cursorParameters?: unknown; parameters?: unknown } | undefined,
-  contextPreference = DEFAULT_CURSOR_CONTEXT,
+  accepted?: string,
 ): number {
   return resolveContextWindow({
     model,
-    tier: requestedTier(model, contextPreference),
+    tier: requestedTier(model, accepted),
   }).tokens
 }

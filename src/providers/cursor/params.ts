@@ -15,9 +15,6 @@ import {
   type CursorParamDef,
 } from './catalog.js'
 
-/** Context tier used when configuration names none: the largest offered. */
-export const DEFAULT_CURSOR_CONTEXT = 'max'
-
 /** Rank of the effort spellings Cursor uses, least to greatest. */
 const LEVEL_RANK: Record<string, number> = {
   none: 0,
@@ -63,55 +60,27 @@ export function offeredContextValues(
 }
 
 /**
- * The offered context tier a preference names. `max` (the default) selects the
- * largest tier; `min` the smallest; an exact tier such as `300k` selects
- * itself; an unknown value falls back to the largest, because the largest is
- * what a reader expects from an unset preference.
- */
-export function preferredContext(
-  def: CursorParamDef | undefined,
-  preference = DEFAULT_CURSOR_CONTEXT,
-): { value: string; tokens: number } | undefined {
-  const all = tiers(def)
-  if (all.length === 0) return undefined
-  const want = preference.trim().toLowerCase()
-  if (want === 'max') return all[all.length - 1]
-  if (want === 'min') return all[0]
-  return (
-    all.find((tier) => tier.value.toLowerCase() === want) ?? all[all.length - 1]
-  )
-}
-
-/**
  * The tier to request for one model.
  *
- * A value the provider already accepted for this model wins while the catalog
- * still offers it; otherwise a preference of `max` (largest), `min`
- * (smallest), or an offered value such as `300k` selects the tier. Undefined
+ * The value Cursor already accepted for this model wins while the catalog still
+ * offers it; otherwise the request carries the largest offered tier. Undefined
  * for a model that offers no tiers.
  *
  * @param model - the catalog entry.
  * @param accepted - a tier the provider accepted after a rejection.
- * @param preference - the configured tier preference.
  * @returns the offered tier value to send, or undefined.
  */
-export function contextTierValue(
+export function requestedTier(
   model: { cursorParameters?: unknown; parameters?: unknown } | undefined,
-  accepted: string | undefined,
-  preference = DEFAULT_CURSOR_CONTEXT,
+  accepted?: string,
 ): string | undefined {
   const offered = offeredContextValues(model)
   if (offered.length === 0) return undefined
-  const acceptedValue =
-    accepted === undefined ? undefined : offeredTierValue(model, accepted)
-  if (acceptedValue !== undefined) return acceptedValue
-  const wanted = preference.trim().toLowerCase()
-  if (wanted === 'max') return offered[offered.length - 1]
-  if (wanted === 'min') return offered[0]
-  return (
-    offered.find((tier) => tier.toLowerCase() === wanted) ??
-    offered[offered.length - 1]
-  )
+  if (accepted !== undefined) {
+    const acceptedValue = offeredTierValue(model, accepted)
+    if (acceptedValue !== undefined) return acceptedValue
+  }
+  return offered[offered.length - 1]
 }
 
 /**
@@ -197,12 +166,13 @@ export const ON = 'on'
  *
  * @param model - the catalog entry the request names.
  * @param reasoning - DSH's selected effort, or `off`.
- * @param contextPreference - the tier preference this model resolves.
+ * @param tier - the offered context tier the request carries, from
+ *   {@link requestedTier}; absent for a model that offers none.
  */
 export function modelParams(
   model: { cursorParameters?: unknown; parameters?: unknown } | undefined,
   reasoning: string | undefined,
-  contextPreference = DEFAULT_CURSOR_CONTEXT,
+  tier?: string | undefined,
 ): CursorParam[] | undefined {
   const defs = defsOf(model)
   const params: CursorParam[] = []
@@ -229,8 +199,7 @@ export function modelParams(
     params.push({ id: fast.id, value: 'false' })
   }
 
-  const context = preferredContext(find(defs, 'context'), contextPreference)
-  if (context) params.push({ id: 'context', value: context.value })
+  if (tier !== undefined) params.push({ id: 'context', value: tier })
 
   return params.length > 0 ? params : undefined
 }

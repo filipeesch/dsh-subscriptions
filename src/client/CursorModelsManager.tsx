@@ -1,394 +1,103 @@
-import { useEffect, useId, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import type { SubscriptionsSectionInjected } from './SubscriptionsSection.js'
 import { callSubscriptionsAuth } from './subscriptions-rpc.js'
-import { subscriptionCardStyles as styles } from './subscription-card-styles.js'
+import { cursorManagerCss } from './cursor-manager-styles.js'
 import { providerSettingsCss } from './provider-settings-styles.js'
+import {
+  deriveRows,
+  filterRows,
+  listStateFor,
+  parseWindowInput,
+  rowCounts,
+  withModelEdit,
+  type CursorModelDraft,
+  type CursorModelEdit,
+  type CursorModelsView,
+} from './cursor-manager-derive.js'
+import { CursorModelsBody } from './CursorModelsBody.js'
+import { CursorCapacitySection } from './CursorCapacitySource.js'
 
 type Translate = SubscriptionsSectionInjected['t']
 
-/** One model as the host resolves it for the manager. */
-export interface CursorModelRowView {
-  id: string
-  name: string
+/** How long a typed window waits before it is written. */
+export const WRITE_PAUSE_MS = 500
+
+/** What one manual refresh reported. */
+interface CursorRefreshOutcome {
   enabled: boolean
-  described: boolean
-  tierOverride?: string
-  tierOptions: string[]
-  window: {
-    tokens: number
-    source: 'tier' | 'published' | 'manual' | 'default'
-    tier?: string
-  }
-  manualWindow: { editable: boolean; value: number }
-  publishedWindow?: number
-}
-
-/** The stored edit for one model. */
-export interface CursorModelEdit {
-  enabled?: boolean | undefined
-  context?: string | undefined
-  contextWindow?: number | undefined
-}
-
-/** Stored edits keyed by model id. */
-export type CursorModelDraft = Record<string, CursorModelEdit>
-
-/** Everything the manager renders. */
-export interface CursorModelsView {
-  provider: 'cursor'
-  context: string
-  models: CursorModelRowView[]
-  knownContext: { enabled: boolean; fetchedAt?: number }
-  storedModels: CursorModelDraft
-  publishedContext: boolean
-}
-
-/** The manager's pending edits, kept across a catalog Reload. */
-export interface CursorManagerEdits {
-  draft: CursorModelDraft
-  texts: Record<string, string>
-  invalid: string[]
+  status: 'refreshed' | 'failed' | 'unavailable'
+  fetchedAt?: number
+  reason?: string
+  windows?: number
 }
 
 /**
- * Edits after one catalog read. A Reload keeps what the user typed; the first
- * read seeds the draft from the stored document.
+ * One change waiting to be written, applied to the last acknowledged map.
+ *
+ * A change carries the fields it touched, not the row's whole entry: a queued
+ * edit must not retry a field whose earlier write the host refused.
  */
-export function mergedManagerState(
-  force: boolean,
-  previous: CursorManagerEdits | undefined,
-  data: CursorModelsView,
-): CursorManagerEdits {
-  if (force && previous !== undefined) return previous
-  return { draft: { ...data.storedModels }, texts: {}, invalid: [] }
+interface CursorWriteOp {
+  id: string
+  patch: CursorModelEdit
 }
 
-/**
- * Parse a typed window into tokens. Only digits with optional grouping
- * separators are accepted, so a typo (`1m`, `1.5`, `-300000`) is refused
- * instead of coerced into a different number. An empty field clears the value.
- */
-export function parseWindowInput(text: string): number | null {
-  const trimmed = text.trim()
-  if (trimmed === '') return null
-  if (!/^(?:\d+|\d{1,3}(?:[ ,]\d{3})+)$/.test(trimmed)) return null
-  const value = Number(trimmed.replace(/[ ,]/g, ''))
-  return Number.isSafeInteger(value) && value > 0 ? value : null
-}
-
-/** Exact multiples read as 1M or 300K; any other count keeps its digits. */
-export function formatWindowLabel(tokens: number): string {
-  if (tokens > 0 && tokens % 1_000_000 === 0) return tokens / 1_000_000 + 'M'
-  if (tokens > 0 && tokens % 1_000 === 0) return tokens / 1_000 + 'K'
-  return String(tokens).replace(/\B(?=(\d{3})+(?!\d))/g, ',')
-}
-
-/** The sentence naming where a resolved window came from. */
-export function windowSourceLabel(
-  t: Translate,
-  source: CursorModelRowView['window']['source'],
-  tier?: string,
-): string {
-  if (source === 'tier')
-    return t('cursorWindowTier', { tier: tier ?? '' }).trim()
-  if (source === 'published') return t('cursorWindowPublished')
-  if (source === 'manual') return t('cursorWindowManual')
-  return t('cursorWindowDefault')
-}
-
-/**
- * Build the models patch from every edited id: the union of draft entries and
- * typed window fields, so a window-only edit is never dropped.
- * @param draft - stored edits plus the user's edits.
- * @param texts - raw window input per model; absent means untouched.
- * @returns the patch and any model whose typed window is invalid.
- */
-export function cursorModelsPatch(
-  draft: CursorModelDraft,
-  texts: Record<string, string>,
-): { models: CursorModelDraft; invalid: string[] } {
-  const models: CursorModelDraft = {}
-  const invalid: string[] = []
-  const ids = new Set([...Object.keys(draft), ...Object.keys(texts)])
-  for (const id of ids) {
-    const entry = draft[id] ?? {}
-    const edit: CursorModelEdit = {}
-    if (entry.enabled !== undefined) edit.enabled = entry.enabled
-    if (entry.context !== undefined && entry.context !== '')
-      edit.context = entry.context
-    const text = texts[id]
-    if (text === undefined) {
-      if (entry.contextWindow !== undefined)
-        edit.contextWindow = entry.contextWindow
-    } else if (text.trim() !== '') {
-      const tokens = parseWindowInput(text)
-      if (tokens === null) invalid.push(id)
-      else edit.contextWindow = tokens
-    }
-    if (Object.keys(edit).length > 0) models[id] = edit
+/** Apply one field patch to a map's entry for a model. */
+function applyPatch(
+  map: CursorModelDraft,
+  id: string,
+  patch: CursorModelEdit,
+): void {
+  const entry: CursorModelEdit = { ...(map[id] ?? {}) }
+  for (const [field, value] of Object.entries(patch)) {
+    if (value === undefined) delete entry[field as keyof CursorModelEdit]
+    else (entry as Record<string, unknown>)[field] = value
   }
-  return { models, invalid }
-}
-
-/** What the presentational half needs. */
-export interface CursorModelsBodyProps {
-  t: Translate
-  models: readonly CursorModelRowView[]
-  draft: CursorModelDraft
-  texts: Record<string, string>
-  invalid: readonly string[]
-  disabled: boolean
-  onToggle: (id: string, enabled: boolean) => void
-  onTier: (id: string, value: string | undefined) => void
-  onWindow: (id: string, text: string) => void
-}
-
-/** One row's tier choices, including preferences and a withdrawn tier value. */
-export interface TierChoice {
-  value: string
-  kind: 'tier' | 'min' | 'max' | 'withdrawn'
-}
-
-export function tierChoices(row: CursorModelRowView): {
-  options: TierChoice[]
-} {
-  const options: TierChoice[] = row.tierOptions.map((value) => ({
-    value,
-    kind: 'tier',
-  }))
-  // The context preference can be smallest/largest regardless of the wire
-  // tiers the model offers; those are choices, not withdrawn values.
-  for (const kind of ['min', 'max'] as const) {
-    if (!options.some((option) => option.value === kind)) {
-      options.push({ value: kind, kind })
-    }
-  }
-  const override = row.tierOverride
-  if (
-    override !== undefined &&
-    normalizeTierChoice(row, override) === undefined
-  ) {
-    options.push({ value: override, kind: 'withdrawn' })
-  }
-  return { options }
-}
-
-/**
- * The exact offered spelling (or preference) a stored value means. Matching is
- * case-insensitive, the same rule the runtime applies, so a stored `1M` selects
- * the offered `1m` instead of appearing withdrawn.
- */
-export function normalizeTierChoice(
-  row: CursorModelRowView,
-  value: string,
-): string | undefined {
-  const wanted = value.trim().toLowerCase()
-  if (wanted === 'min' || wanted === 'max') return wanted
-  return row.tierOptions.find((tier) => tier.toLowerCase() === wanted)
-}
-
-/** The select's value: a pending edit wins, else the stored/config preference. */
-export function tierSelectValue(
-  row: CursorModelRowView,
-  draft: CursorModelDraft,
-): string {
-  const edit = draft[row.id]
-  // Only an explicit context field overrides the baseline; an enablement-only
-  // edit leaves the tier the route would actually use on screen.
-  if (edit?.context !== undefined) {
-    // An empty string is an explicit clear: Save inherits the baseline again.
-    if (edit.context === '') return ''
-    return normalizeTierChoice(row, edit.context) ?? edit.context
-  }
-  const override = row.tierOverride
-  if (override === undefined) return ''
-  return normalizeTierChoice(row, override) ?? override
-}
-
-/** The option's label; the two preferences are named, not shown as wire values. */
-export function tierOptionLabel(t: Translate, choice: TierChoice): string {
-  if (choice.kind === 'min') return t('cursorModelContextMin')
-  if (choice.kind === 'max') return t('cursorModelContextMax')
-  if (choice.kind === 'withdrawn') {
-    return choice.value + ' · ' + t('cursorModelTierWithdrawn')
-  }
-  return choice.value
-}
-
-function rowIds(id: string): { help: string; error: string } {
-  return {
-    help: 'cursor-window-help-' + id,
-    error: 'cursor-window-error-' + id,
-  }
-}
-
-/**
- * The manager's presentational half: one row per listed model with enablement,
- * the offered tier, and the window in effect or an editable manual value.
- */
-export function CursorModelsBody(props: CursorModelsBodyProps) {
-  const { t, models, draft, texts, invalid, disabled } = props
-  if (models.length === 0)
-    return <p className="dsh-subscription-hint">{t('cursorModelsEmpty')}</p>
-  return (
-    <div style={{ display: 'grid', gap: 8 }}>
-      {models.map((row) => {
-        const edit = draft[row.id]
-        const contextProblem = invalid.includes(row.id)
-        const ids = rowIds(row.id)
-        const choices = tierChoices(row)
-        return (
-          <div
-            key={row.id}
-            style={{
-              borderBottom: '0.5px solid var(--dsw-alias-border-l2)',
-              padding: '8px 2px',
-              display: 'grid',
-              gap: 8,
-              minWidth: 0,
-            }}
-          >
-            <label
-              style={{
-                display: 'flex',
-                flexWrap: 'wrap',
-                alignItems: 'baseline',
-                gap: '2px 6px',
-                overflowWrap: 'anywhere',
-                minWidth: 0,
-              }}
-            >
-              <input
-                type="checkbox"
-                checked={edit?.enabled ?? row.enabled}
-                disabled={disabled}
-                aria-label={t('cursorModelEnabled', { model: row.name })}
-                onChange={(event) =>
-                  props.onToggle(row.id, event.target.checked)
-                }
-              />{' '}
-              {row.name} <span style={styles.status}>{row.id}</span>
-              {!row.described && (
-                <span style={styles.status}>
-                  {' '}
-                  · {t('cursorModelNotDescribed')}
-                </span>
-              )}
-            </label>
-            <div
-              style={{
-                display: 'flex',
-                flexWrap: 'wrap',
-                gap: 8,
-                alignItems: 'center',
-                minWidth: 0,
-              }}
-            >
-              {(row.described ||
-                row.tierOptions.length > 0 ||
-                row.tierOverride !== undefined) &&
-                choices.options.length > 0 && (
-                  <label
-                    style={{
-                      display: 'flex',
-                      gap: 4,
-                      alignItems: 'center',
-                      minWidth: 0,
-                    }}
-                  >
-                    {t('cursorModelTier')}
-                    <select
-                      aria-label={t('cursorModelTierFor', { model: row.name })}
-                      value={tierSelectValue(row, draft)}
-                      disabled={disabled}
-                      style={{ maxWidth: '100%', minWidth: 0 }}
-                      onChange={(event) =>
-                        // An empty choice is an explicit clear, kept in the draft
-                        // so the control cannot fall back to the stored value.
-                        props.onTier(row.id, event.target.value)
-                      }
-                    >
-                      <option value="">{t('cursorModelAuto')}</option>
-                      {choices.options.map((choice) => (
-                        <option key={choice.value} value={choice.value}>
-                          {tierOptionLabel(t, choice)}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                )}
-              {row.manualWindow.editable ? (
-                <label
-                  style={{
-                    display: 'flex',
-                    gap: 4,
-                    alignItems: 'center',
-                    minWidth: 0,
-                    flex: '1 1 220px',
-                    flexWrap: 'wrap',
-                  }}
-                >
-                  {t('cursorModelWindow')}
-                  <input
-                    style={{
-                      flex: '0 0 130px',
-                      minWidth: 110,
-                      maxWidth: 200,
-                    }}
-                    inputMode="numeric"
-                    aria-invalid={contextProblem}
-                    aria-describedby={
-                      contextProblem ? ids.help + ' ' + ids.error : ids.help
-                    }
-                    aria-label={t('cursorModelWindowFor', { model: row.name })}
-                    value={
-                      texts[row.id] ??
-                      String(edit?.contextWindow ?? row.manualWindow.value)
-                    }
-                    disabled={disabled}
-                    onChange={(event) =>
-                      props.onWindow(row.id, event.target.value)
-                    }
-                  />
-                  <span
-                    id={ids.help}
-                    style={{ ...styles.status, flexBasis: '100%' }}
-                  >
-                    {t('cursorModelWindowHint')}
-                  </span>
-                </label>
-              ) : (
-                <span>
-                  {t('cursorModelWindow')}{' '}
-                  {formatWindowLabel(row.window.tokens)} (
-                  {windowSourceLabel(t, row.window.source, row.window.tier)})
-                </span>
-              )}
-              {row.manualWindow.editable && (
-                <span style={styles.status}>
-                  {formatWindowLabel(row.window.tokens)} (
-                  {windowSourceLabel(t, row.window.source, row.window.tier)})
-                </span>
-              )}
-            </div>
-            {contextProblem && (
-              <p role="alert" id={ids.error}>
-                {t('cursorWindowInvalid', { model: row.name })}
-              </p>
-            )}
-          </div>
-        )
-      })}
-    </div>
-  )
+  if (Object.keys(entry).length > 0) map[id] = entry
+  else delete map[id]
 }
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-/** The manager dialog; one Save writes the whole models map. */
+/** Remove one key from a record, returning a copy either way. */
+function without<T>(
+  record: Readonly<Record<string, T>>,
+  key: string,
+): Record<string, T> {
+  const next = { ...record }
+  delete next[key]
+  return next
+}
+
+/** A copy of the stored edits, so a mutation never reaches the host's payload. */
+function cloneDraft(map: CursorModelDraft): CursorModelDraft {
+  const out: CursorModelDraft = {}
+  for (const [id, entry] of Object.entries(map)) out[id] = { ...entry }
+  return out
+}
+
+/** Whether two entries describe the same stored value. */
+function sameEntry(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
+/**
+ * The model manager dialog.
+ *
+ * It owns the catalog read, the edits, and the writes; the rows it renders come
+ * from {@link deriveRows}, so a change and the value the host holds are the same
+ * value. Every change is applied when the reader makes it: an enablement change
+ * writes at once, a typed window writes after a short pause, and a failed write
+ * restores that model and states the failure in its row.
+ *
+ * Writes are queued as changes, not as snapshots: each one is applied to the map
+ * the host last acknowledged, so a refused change cannot ride along on the next
+ * successful one. A read waits for the queue to settle, so an open Reload cannot
+ * replace the rows with a document older than the save that preceded it.
+ */
 export function CursorModelsManager({
   rpc,
   t,
@@ -404,18 +113,37 @@ export function CursorModelsManager({
   const title = useId()
   const description = useId()
   const [view, setView] = useState<CursorModelsView>()
-  const [edits, setEdits] = useState<CursorManagerEdits>({
-    draft: {},
-    texts: {},
-    invalid: [],
-  })
+  const [draft, setDraft] = useState<CursorModelDraft>({})
+  const [texts, setTexts] = useState<Record<string, string>>({})
+  const [editing, setEditing] = useState<string>()
+  const [errors, setErrors] = useState<Record<string, string>>({})
+  const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(true)
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState('')
-  const [saveError, setSaveError] = useState('')
-  const [reloadError, setReloadError] = useState('')
+  const [reloading, setReloading] = useState(false)
+  const [pageError, setPageError] = useState('')
+  const [sourceBusy, setSourceBusy] = useState(false)
+  const [sourceError, setSourceError] = useState<string>()
+  const [sourceNotice, setSourceNotice] = useState<string>()
+
   const alive = useRef(true)
-  const saveLock = useRef(false)
+  /** What the reader sees: the acknowledged map plus the pending changes. */
+  const draftRef = useRef<CursorModelDraft>({})
+  /** What the host has acknowledged; every write is applied to this map. */
+  const committedRef = useRef<CursorModelDraft>({})
+  const queue = useRef<CursorWriteOp[]>([])
+  /** Incremented by every acknowledgement, so a read can tell it was overtaken. */
+  const generation = useRef(0)
+  /** Incremented by every read, so an older response cannot replace a newer one. */
+  const readSequence = useRef(0)
+  const draining = useRef(false)
+  const drainDone = useRef<Promise<void>>(Promise.resolve())
+  const textsRef = useRef<Record<string, string>>({})
+  const errorsRef = useRef<Record<string, string>>({})
+  const editingRef = useRef<string>()
+  const viewRef = useRef<CursorModelsView>()
+  const pause = useRef<ReturnType<typeof setTimeout>>()
+  /** Set on every render so the unmount cleanup can flush without state. */
+  const flushRef = useRef<(id: string) => void>(() => undefined)
 
   useEffect(() => {
     alive.current = true
@@ -423,6 +151,13 @@ export function CursorModelsManager({
     const previous = document.activeElement
     if (typeof element.showModal === 'function') element.showModal()
     return () => {
+      // A pause the reader outran is still a change they made: write it before
+      // the page goes away, without touching state that no longer renders.
+      if (pause.current !== undefined) {
+        clearTimeout(pause.current)
+        const open = editingRef.current
+        if (open !== undefined) flushRef.current(open)
+      }
       alive.current = false
       if (typeof element.close === 'function') element.close()
       if (previous instanceof HTMLElement && previous.isConnected)
@@ -430,100 +165,420 @@ export function CursorModelsManager({
     }
   }, [])
 
-  useEffect(() => {
-    if (edits.invalid.length === 0) return
-    dialog.current
-      ?.querySelector<HTMLInputElement>('input[aria-invalid="true"]')
-      ?.focus()
-  }, [edits.invalid])
+  /** Write the open field when the dialog closes, so closing never drops it. */
+  const flushText = useCallback((id: string) => {
+    const text = textsRef.current[id]
+    if (text === undefined) return
+    const tokens = parseWindowInput(text)
+    // Unusable text is not a change; the row states why while it is open.
+    if (text.trim() !== '' && tokens === null) return
+    const patch: CursorModelEdit = { contextWindow: tokens ?? undefined }
+    const next = withModelEdit(draftRef.current, id, patch)
+    if (sameEntry(next[id], draftRef.current[id])) return
+    draftRef.current = next
+    queue.current.push({ id, patch })
+    startDrain()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- startDrain is stable
+  }, [])
 
-  async function load(force: boolean) {
-    setLoading(true)
-    setError('')
-    setReloadError('')
-    try {
-      const data = await callSubscriptionsAuth<CursorModelsView>(
-        rpc,
-        'cursorModels',
-        force ? { force: true } : {},
-      )
-      if (!alive.current) return
-      setView(data)
-      setEdits((current) => mergedManagerState(force, current, data))
-    } catch (failure) {
-      if (!alive.current) return
-      const text = t('cursorModelsLoadFailed', { message: message(failure) })
-      // A failed Reload keeps the rows on screen and states the failure.
-      if (force && view !== undefined) setReloadError(text)
-      else setError(text)
-    } finally {
-      if (alive.current) setLoading(false)
-    }
-  }
+  flushRef.current = flushText
+
+  /**
+   * Apply one queued change to the acknowledged map and send it.
+   *
+   * The queue drains one change at a time, in order, so each request describes
+   * the document the host will hold once it lands.
+   */
+  const startDrain = useCallback(() => {
+    if (draining.current) return
+    draining.current = true
+    drainDone.current = (async () => {
+      while (queue.current.length > 0) {
+        const op = queue.current[0] as CursorWriteOp
+        // The base is the acknowledged map at send time, so a read that landed
+        // while this change waited is part of what this write preserves.
+        const next = cloneDraft(committedRef.current)
+        applyPatch(next, op.id, op.patch)
+        try {
+          await callSubscriptionsAuth(rpc, 'cursorSetSettings', {
+            settings: { models: next },
+          })
+          queue.current.shift()
+          committedRef.current = next
+          generation.current += 1
+          if (!alive.current) continue
+          errorsRef.current = without(errorsRef.current, op.id)
+          setErrors(errorsRef.current)
+          onSaved()
+        } catch (failure) {
+          queue.current.shift()
+          if (!alive.current) continue
+          // A newer change to the same field is already queued: it describes
+          // what the reader wants now, so leave that field alone and let it
+          // write. Only the fields this change touched go back.
+          const fields = Object.keys(op.patch) as (keyof CursorModelEdit)[]
+          const superseded = queue.current.some(
+            (pending) =>
+              pending.id === op.id &&
+              fields.some((field) => Object.hasOwn(pending.patch, field)),
+          )
+          if (!superseded) {
+            const reverted = cloneDraft(draftRef.current)
+            for (const field of fields) {
+              const acknowledged = committedRef.current[op.id]?.[field]
+              if (acknowledged === undefined) {
+                const entry = reverted[op.id]
+                if (entry !== undefined) {
+                  delete entry[field]
+                  if (Object.keys(entry).length === 0) delete reverted[op.id]
+                }
+              } else {
+                reverted[op.id] = {
+                  ...(reverted[op.id] ?? {}),
+                  [field]: acknowledged,
+                }
+              }
+            }
+            draftRef.current = reverted
+            setDraft(reverted)
+          }
+          const text = t('cursorModelWriteFailed', {
+            model: nameOf(op.id),
+            message: message(failure),
+          })
+          errorsRef.current = { ...errorsRef.current, [op.id]: text }
+          setErrors(errorsRef.current)
+        }
+      }
+    })().finally(() => {
+      draining.current = false
+    })
+  }, [onSaved, rpc, t])
+
+  /** Settle every queued change before a read describes the document. */
+  const idle = useCallback(async (): Promise<void> => {
+    while (draining.current) await drainDone.current
+  }, [])
+
+  /**
+   * Seed the page from one host read.
+   *
+   * The stored map is the starting point, not an empty record: a change sends
+   * the whole map back, so an empty one would drop every setting the reader did
+   * not touch — including the models this catalog no longer lists.
+   */
+  const adopt = useCallback((next: CursorModelsView) => {
+    viewRef.current = next
+    setView(next)
+    const stored = cloneDraft(next.storedModels)
+    draftRef.current = stored
+    committedRef.current = cloneDraft(next.storedModels)
+    setDraft(stored)
+    // A field the reader is still editing is theirs, not the document's: a read
+    // that lands mid-typing must not drop the text they have not committed.
+    const open = editingRef.current
+    const typing = open === undefined ? undefined : textsRef.current[open]
+    textsRef.current =
+      open === undefined || typing === undefined ? {} : { [open]: typing }
+    setTexts(textsRef.current)
+    setEditing(open === undefined ? undefined : open)
+    errorsRef.current = {}
+    setErrors({})
+  }, [])
+
+  const load = useCallback(
+    async (force: boolean, attempt = 0): Promise<void> => {
+      const sequence = ++readSequence.current
+      if (force) setReloading(true)
+      else setLoading(true)
+      setPageError('')
+      try {
+        // A read started now must describe the document the queued changes
+        // left behind, not the one before them.
+        await idle()
+        const before = generation.current
+        const data = await callSubscriptionsAuth<CursorModelsView>(
+          rpc,
+          'cursorModels',
+          force ? { force: true } : {},
+        )
+        if (!alive.current) return
+        // A read the dialog started later describes a newer state — the
+        // capacity source, for one — so this response is already out of date.
+        if (sequence !== readSequence.current) return
+        // A change made while this read was in flight is newer than the
+        // document it describes. Adopting that document would show the older
+        // rows, and the next write would be built from the older map; read
+        // again instead, a bounded number of times.
+        const overtaken =
+          generation.current !== before ||
+          draining.current ||
+          queue.current.length > 0
+        if (overtaken) {
+          // Never adopt a document a newer write overtook, not even when the
+          // retries run out: the rows on screen came from the last consistent
+          // read, and an older map would feed the next write. The reader can
+          // ask again once the writes have settled.
+          if (attempt < 3) return load(force, attempt + 1)
+          return
+        }
+        adopt(data)
+      } catch (failure) {
+        // A superseded read states nothing: a newer read already describes the
+        // state this failure would report as broken.
+        if (!alive.current || sequence !== readSequence.current) return
+        const text = t('cursorModelsLoadFailed', { message: message(failure) })
+        // A failed reload keeps the rows on screen and states the failure.
+        setPageError(text)
+      } finally {
+        // Only the newest read clears the busy flags; a superseded one would
+        // otherwise stop the indicator for the read still in flight.
+        if (alive.current && sequence === readSequence.current) {
+          setLoading(false)
+          setReloading(false)
+        }
+      }
+    },
+    [adopt, idle, rpc, t],
+  )
 
   useEffect(() => {
     void load(false)
-    // The dialog fetches once; Reload is the explicit refresh.
+    // The dialog reads once on open; Reload is the explicit refresh.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fetch on mount
   }, [])
 
-  function edit(id: string, patch: CursorModelEdit): void {
-    setEdits((current) => {
-      const draft = { ...current.draft }
-      const entry = { ...(draft[id] ?? {}), ...patch }
-      for (const key of Object.keys(entry) as (keyof CursorModelEdit)[]) {
-        // An empty context is an explicit clear and stays in the draft.
-        if (entry[key] === undefined) delete entry[key]
-      }
-      if (Object.keys(entry).length > 0) draft[id] = entry
-      else delete draft[id]
-      return { ...current, draft }
-    })
-  }
+  const nameOf = (id: string): string =>
+    viewRef.current?.models.find((model) => model.id === id)?.name ?? id
 
-  async function save(): Promise<void> {
-    if (saveLock.current) return
-    const built = cursorModelsPatch(edits.draft, edits.texts)
-    setEdits((current) => ({ ...current, invalid: built.invalid }))
-    if (built.invalid.length > 0) return
-    saveLock.current = true
-    setSaving(true)
-    setSaveError('')
-    try {
-      await callSubscriptionsAuth(rpc, 'cursorSetSettings', {
-        settings: { models: built.models },
-      })
-      if (alive.current) {
-        onSaved()
-        onClose()
+  /** Apply one field change to the reader's view and queue it for the host. */
+  const commit = useCallback(
+    (id: string, patch: CursorModelEdit) => {
+      const next = withModelEdit(draftRef.current, id, patch)
+      if (sameEntry(next[id], draftRef.current[id])) return
+      draftRef.current = next
+      setDraft(next)
+      queue.current.push({ id, patch })
+      startDrain()
+    },
+    [startDrain],
+  )
+
+  const toggle = useCallback(
+    (id: string, enabled: boolean) => {
+      commit(id, { enabled })
+    },
+    [commit],
+  )
+
+  const reset = useCallback(
+    (id: string) => {
+      textsRef.current = without(textsRef.current, id)
+      setTexts(textsRef.current)
+      errorsRef.current = without(errorsRef.current, id)
+      setErrors(errorsRef.current)
+      commit(id, { contextWindow: undefined })
+    },
+    [commit],
+  )
+
+  const open = useCallback((id: string) => {
+    editingRef.current = id
+    setEditing(id)
+  }, [])
+
+  const cancel = useCallback(() => {
+    const id = editingRef.current
+    if (id === undefined) return
+    textsRef.current = without(textsRef.current, id)
+    setTexts(textsRef.current)
+    errorsRef.current = without(errorsRef.current, id)
+    setErrors(errorsRef.current)
+    editingRef.current = undefined
+    setEditing(undefined)
+  }, [])
+
+  /** Write the open field: an empty one clears the override. */
+  const commitText = useCallback(
+    (id: string) => {
+      if (editingRef.current !== id) return
+      const typed = textsRef.current[id]
+      // Opening the field and leaving it without typing is not a change: an
+      // absent text must not read as "clear the stored override".
+      if (typed === undefined) {
+        editingRef.current = undefined
+        setEditing(undefined)
+        return
       }
-    } catch (failure) {
-      if (alive.current)
-        setSaveError(t('cursorModelsSaveFailed', { message: message(failure) }))
-    } finally {
-      saveLock.current = false
-      if (alive.current) setSaving(false)
+      const text = typed
+      const tokens = parseWindowInput(text)
+      if (text.trim() !== '' && tokens === null) {
+        errorsRef.current = {
+          ...errorsRef.current,
+          [id]: t('cursorModelWindowInvalid', { model: nameOf(id) }),
+        }
+        setErrors(errorsRef.current)
+        return
+      }
+      editingRef.current = undefined
+      setEditing(undefined)
+      textsRef.current = without(textsRef.current, id)
+      setTexts(textsRef.current)
+      errorsRef.current = without(errorsRef.current, id)
+      setErrors(errorsRef.current)
+      commit(id, { contextWindow: tokens ?? undefined })
+    },
+    [commit, t],
+  )
+
+  const changeText = useCallback(
+    (id: string, text: string) => {
+      textsRef.current = { ...textsRef.current, [id]: text }
+      setTexts(textsRef.current)
+      if (pause.current !== undefined) clearTimeout(pause.current)
+      pause.current = setTimeout(() => commitText(id), WRITE_PAUSE_MS)
+    },
+    [commitText],
+  )
+
+  /**
+   * Close the dialog without dropping a window the reader just typed.
+   *
+   * A flushed change is written before the dialog goes away, and a refused one
+   * keeps it open so the row can state the failure: closing over a failed save
+   * would hide the only place that says the window was not stored.
+   */
+  const close = useCallback(() => {
+    const open = editingRef.current
+    // Every write in flight or queued when the reader closes may still be
+    // refused, so each one holds the dialog rather than closing over its error.
+    const watching = queue.current.map((op) => op.id)
+    if (open !== undefined) watching.push(open)
+    if (open === undefined && !draining.current && queue.current.length === 0) {
+      onClose()
+      return
     }
-  }
+    if (open !== undefined) flushText(open)
+    void idle().then(() => {
+      if (!alive.current) return
+      const failed = watching.some((id) => errorsRef.current[id] !== undefined)
+      if (!failed) onClose()
+    })
+  }, [flushText, idle, onClose])
+
+  const refreshSource = useCallback(async () => {
+    setSourceBusy(true)
+    setSourceError(undefined)
+    setSourceNotice(undefined)
+    try {
+      const outcome = await callSubscriptionsAuth<CursorRefreshOutcome>(
+        rpc,
+        'cursorRefreshContext',
+        {},
+      )
+      if (!alive.current) return
+      if (outcome.status === 'refreshed') {
+        setSourceNotice(
+          t('cursorCapacityRefreshed', { count: outcome.windows ?? 0 }),
+        )
+        // The windows the rows show come from the new projection.
+        await load(false)
+        onSaved()
+        return
+      }
+      if (outcome.status === 'failed') {
+        setSourceError(
+          t(
+            outcome.fetchedAt === undefined
+              ? 'cursorSourceRefreshFailedNoCache'
+              : 'cursorSourceRefreshFailedRetained',
+            { message: outcome.reason ?? '' },
+          ),
+        )
+        return
+      }
+      setSourceNotice(
+        outcome.reason === 'disabled'
+          ? t('cursorCapacityDisabledRefresh')
+          : t('cursorCapacityNoModels'),
+      )
+    } catch (failure) {
+      if (!alive.current) return
+      setSourceError(
+        t(
+          viewRef.current?.knownContext.fetchedAt === undefined
+            ? 'cursorSourceRefreshFailedNoCache'
+            : 'cursorSourceRefreshFailedRetained',
+          { message: message(failure) },
+        ),
+      )
+    } finally {
+      if (alive.current) setSourceBusy(false)
+    }
+  }, [load, onSaved, rpc, t])
+
+  const setSource = useCallback(
+    async (enabled: boolean) => {
+      setSourceBusy(true)
+      setSourceError(undefined)
+      setSourceNotice(undefined)
+      try {
+        await callSubscriptionsAuth(rpc, 'cursorSetSettings', {
+          settings: { publishedContext: enabled },
+        })
+        if (!alive.current) return
+        // A switched source serves or withholds capacities at once.
+        await load(false)
+        onSaved()
+      } catch (failure) {
+        if (!alive.current) return
+        setSourceError(
+          t('cursorCapacityToggleFailed', { message: message(failure) }),
+        )
+      } finally {
+        if (alive.current) setSourceBusy(false)
+      }
+    },
+    [load, onSaved, rpc, t],
+  )
+
+  const rows =
+    view === undefined
+      ? []
+      : deriveRows(view.models, draft, texts, editing, errors)
+  const shown = filterRows(rows, query)
+  const counts = rowCounts(rows)
+  const summary =
+    rows.length === 0
+      ? undefined
+      : t('cursorModelsSummary', {
+          enabled: counts.enabled,
+          total: counts.total,
+        })
 
   return (
     <dialog
-      className="dsh-subscription-manager"
+      className="dsh-subscription-manager dsh-cursor-manager"
       ref={dialog}
       aria-labelledby={title}
       aria-describedby={description}
-      onCancel={(event) => {
-        if (saving) event.preventDefault()
-      }}
       onClose={onClose}
+      onCancel={(event) => {
+        // Escape takes the same path as Close: it must not drop a field the
+        // reader is still editing, nor dismiss the dialog over a write that is
+        // still in flight and may be refused.
+        event.preventDefault()
+        close()
+      }}
       style={{
-        width: 'min(640px, calc(100vw - 32px))',
+        width: 'min(720px, calc(100vw - 32px))',
         maxWidth: 'calc(100vw - 32px)',
         maxHeight: 'calc(100dvh - 32px)',
         overflow: 'hidden',
       }}
     >
       <style>{providerSettingsCss}</style>
+      <style>{cursorManagerCss}</style>
       <div
         style={{
           display: 'flex',
@@ -545,15 +600,14 @@ export function CursorModelsManager({
           <h2 id={title} style={{ margin: 0 }}>
             {t('cursorManageTitle')}
           </h2>
-          <button type="button" autoFocus disabled={saving} onClick={onClose}>
+          <button type="button" autoFocus onClick={close}>
             {t('imageClose')}
           </button>
         </header>
         <p id={description} className="dsh-subscription-hint">
           {t('cursorManageHint')}
         </p>
-        {error !== '' && <p role="alert">{error}</p>}
-        {reloadError !== '' && <p role="alert">{reloadError}</p>}
+        {pageError !== '' && <p role="alert">{pageError}</p>}
         {loading && view === undefined && (
           <p role="status" className="dsh-subscription-hint">
             {t('cursorModelsLoading')}
@@ -561,51 +615,63 @@ export function CursorModelsManager({
         )}
         {view !== undefined && (
           <>
-            <div style={{ overflowY: 'auto', flex: '1 1 auto', minHeight: 0 }}>
+            <div className="dsh-cursor-toolbar">
+              <input
+                value={query}
+                placeholder={t('modelDefaultsFilterPlaceholder')}
+                aria-label={t('modelDefaultsFilterPlaceholder')}
+                onChange={(event) => setQuery(event.target.value)}
+              />
+              <button
+                type="button"
+                disabled={reloading}
+                onClick={() => {
+                  void load(true)
+                }}
+              >
+                {reloading
+                  ? t('cursorModelsReloading')
+                  : t('cursorModelsReload')}
+              </button>
+            </div>
+            {summary !== undefined && (
+              <p className="dsh-cursor-summary">{summary}</p>
+            )}
+            <div className="dsh-cursor-list">
               <CursorModelsBody
                 t={t}
-                models={view.models}
-                draft={edits.draft}
-                texts={edits.texts}
-                invalid={edits.invalid}
-                disabled={saving}
-                onToggle={(id, enabled) => edit(id, { enabled })}
-                onTier={(id, context) => edit(id, { context })}
-                onWindow={(id, text) =>
-                  setEdits((current) => ({
-                    ...current,
-                    texts: { ...current.texts, [id]: text },
-                  }))
-                }
+                rows={shown}
+                listState={listStateFor(rows, shown.length)}
+                query={query}
+                disabled={false}
+                handlers={{
+                  onToggle: toggle,
+                  onEdit: open,
+                  onReset: reset,
+                  onText: changeText,
+                  onCommit: commitText,
+                  onCancel: cancel,
+                }}
               />
             </div>
-            {saveError !== '' && <p role="alert">{saveError}</p>}
-            <div
-              style={{
-                display: 'flex',
-                flexWrap: 'wrap',
-                gap: 8,
-                justifyContent: 'flex-end',
+            <CursorCapacitySection
+              t={t}
+              enabled={view.knownContext.enabled}
+              {...(view.knownContext.fetchedAt === undefined
+                ? {}
+                : { fetchedAt: view.knownContext.fetchedAt })}
+              busy={sourceBusy}
+              fallback={counts.fallback}
+              total={counts.total}
+              {...(sourceError === undefined ? {} : { error: sourceError })}
+              {...(sourceNotice === undefined ? {} : { notice: sourceNotice })}
+              onRefresh={() => {
+                void refreshSource()
               }}
-            >
-              <button
-                type="button"
-                disabled={loading || saving}
-                onClick={() => void load(true)}
-              >
-                {loading ? t('cursorModelsReloading') : t('cursorModelsReload')}
-              </button>
-              <button type="button" disabled={saving} onClick={onClose}>
-                {t('cursorCancel')}
-              </button>
-              <button
-                type="button"
-                disabled={saving}
-                onClick={() => void save()}
-              >
-                {saving ? t('cursorSaving') : t('cursorSave')}
-              </button>
-            </div>
+              onToggle={(enabled) => {
+                void setSource(enabled)
+              }}
+            />
           </>
         )}
         {view === undefined && !loading && (

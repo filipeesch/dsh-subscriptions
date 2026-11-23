@@ -3,9 +3,9 @@
  *
  * The API key never appears here; the plugin config names its credential
  * reference. Stored values are the monthly ceiling an account without a
- * disclosed limit can set, per-model settings (enablement, context tier, manual
- * window), the context tier Cursor accepted per model after a rejection, and
- * whether the published-capacity source may fetch.
+ * disclosed limit can set, per-model settings (enablement and manual window),
+ * the context tier Cursor accepted per model after a rejection, and whether the
+ * published-capacity source may fetch.
  */
 
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
@@ -19,18 +19,29 @@ import {
 export interface CursorModelSettings {
   /** Whether the model appears in the picker; absent means enabled. */
   enabled?: boolean
-  /** Context tier preference for this model: max, min, or an offered value. */
-  context?: string
-  /** Manual advertised window in tokens; a last resort behind the tier and published capacity. */
+  /** Manual advertised window in tokens; it outranks the published capacity. */
   contextWindow?: number
 }
 
-/** A tier Cursor accepted after rejecting the chosen one. */
+/** A tier Cursor accepted after rejecting the largest offered one. */
 export interface CursorAcceptedTier {
   value: string
-  /** The preference that produced the rejection; a changed preference retries. */
-  preference: string
+  /**
+   * Written but never read. An older build requires this field, so keeping it
+   * lets a rollback read the document instead of discarding every setting it
+   * carries. {@link ACCEPTED_TIER_COMPAT_PREFERENCE} is the value written.
+   */
+  preference?: string
 }
+
+/**
+ * The preference value stored beside an accepted tier.
+ *
+ * The route no longer has a tier preference: it always asks for the largest
+ * offered tier. The field survives only for the rollback described on
+ * {@link CursorAcceptedTier}.
+ */
+export const ACCEPTED_TIER_COMPAT_PREFERENCE = 'max'
 
 /** Stored Cursor settings; every field is optional. */
 export interface CursorSettings {
@@ -120,9 +131,6 @@ export function validateCursorSettings(input: unknown): CursorSettings {
           fail(`models[${id}].enabled must be a boolean`)
         parsed.enabled = model.enabled
       }
-      if (model.context !== undefined) {
-        parsed.context = nonEmptyString(model.context, `models[${id}].context`)
-      }
       if (model.contextWindow !== undefined) {
         parsed.contextWindow = positiveInteger(
           model.contextWindow,
@@ -140,13 +148,20 @@ export function validateCursorSettings(input: unknown): CursorSettings {
       const id = rawId.trim()
       if (id.length === 0) fail('model ids must be non-empty')
       const tier = recordOf(rawValue, `acceptedTiers[${id}]`)
-      out[id] = {
+      // The field is always emitted, even for a document that predates it: the
+      // validator's output is what the store writes, so a later save would
+      // otherwise persist a record an older build rejects and resets.
+      const parsed: CursorAcceptedTier = {
         value: nonEmptyString(tier.value, `acceptedTiers[${id}].value`),
-        preference: nonEmptyString(
-          tier.preference,
-          `acceptedTiers[${id}].preference`,
-        ),
+        preference:
+          tier.preference === undefined
+            ? ACCEPTED_TIER_COMPAT_PREFERENCE
+            : nonEmptyString(
+                tier.preference,
+                `acceptedTiers[${id}].preference`,
+              ),
       }
+      out[id] = parsed
     }
     settings.acceptedTiers = out
   }
@@ -217,25 +232,16 @@ export class CursorSettingsStore {
   }
 
   /**
-   * The tier Cursor accepted for one model, while the preference that produced
-   * the rejection still applies.
+   * The tier Cursor accepted for one model after a rejection, when one is
+   * remembered. Whether the catalog still offers it is the caller's question:
+   * the store has no catalog.
    */
-  acceptedTier(modelId: string, preference: string): string | undefined {
+  acceptedTier(modelId: string): string | undefined {
     const pending = this.pendingTiers.get(modelId)
-    if (pending !== undefined) {
-      if (pending.preference === preference) return pending.value
-      // The preference changed: the overlay for the old one no longer applies.
-      this.pendingTiers.delete(modelId)
-    }
+    if (pending !== undefined) return pending.value
     const tiers = this.current.acceptedTiers
     if (tiers === undefined || !Object.hasOwn(tiers, modelId)) return undefined
-    const entry = tiers[modelId] as CursorAcceptedTier
-    if (entry.preference === preference) return entry.value
-    // A record for another preference must not resurrect when the preference
-    // changes back, so prune it. The guarded removal keeps a concurrent,
-    // newer record alive.
-    void this.forgetAcceptedTierIf(modelId, entry).catch(() => undefined)
-    return undefined
+    return (tiers[modelId] as CursorAcceptedTier).value
   }
 
   /**
@@ -243,12 +249,11 @@ export class CursorSettingsStore {
    * visible to the running turn at once through a memory overlay, while the
    * document itself only changes after the write succeeds.
    */
-  rememberAcceptedTier(
-    modelId: string,
-    value: string,
-    preference: string,
-  ): Promise<void> {
-    const record: CursorAcceptedTier = { value, preference }
+  rememberAcceptedTier(modelId: string, value: string): Promise<void> {
+    const record: CursorAcceptedTier = {
+      value,
+      preference: ACCEPTED_TIER_COMPAT_PREFERENCE,
+    }
     this.pendingTiers.set(modelId, record)
     const write = this.update((current) => ({
       ...current,
@@ -288,25 +293,15 @@ export class CursorSettingsStore {
    */
   forgetAcceptedTierIf(
     modelId: string,
-    expected: CursorAcceptedTier,
+    expected: { value: string },
   ): Promise<void> {
     const pending = this.pendingTiers.get(modelId)
-    if (
-      pending !== undefined &&
-      pending.value === expected.value &&
-      pending.preference === expected.preference
-    ) {
+    if (pending !== undefined && pending.value === expected.value) {
       this.pendingTiers.delete(modelId)
     }
     return this.update((current) => {
       const entry = current.acceptedTiers?.[modelId]
-      if (
-        entry === undefined ||
-        entry.value !== expected.value ||
-        entry.preference !== expected.preference
-      ) {
-        return current
-      }
+      if (entry === undefined || entry.value !== expected.value) return current
       const next = { ...(current.acceptedTiers ?? {}) }
       delete next[modelId]
       return { ...current, acceptedTiers: next }

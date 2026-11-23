@@ -31,7 +31,6 @@ import { buildCursorModelRows } from '../providers/cursor/model-rows.js'
 import type { CursorCatalogModel } from '../providers/cursor/catalog.js'
 import type { PublishedRefreshOutcome } from '../providers/cursor/published-context.js'
 import type { CursorConfigPolicy } from '../providers/cursor/policy.js'
-import { contextPreferenceFor } from '../providers/cursor/policy.js'
 import {
   createCredentialResolver,
   registerKeyRoute,
@@ -169,7 +168,6 @@ export interface RpcDeps {
   SubscriptionsAuthController: typeof AuthControllerClass
   cursorSettings: CursorSettingsStore
   cursorApiKeyRef: () => string
-  cursorContext: () => string
   /** Models the route advertises; a refresh may load the catalog. */
   cursorModelCount: (refresh?: boolean) => Promise<number | undefined>
   /** Raw catalog for the manager rows; a refresh forces a live read. */
@@ -225,7 +223,6 @@ export function assembleRpc(deps: RpcDeps): void {
     SubscriptionsAuthController,
     cursorSettings,
     cursorApiKeyRef,
-    cursorContext,
     cursorModelCount,
     cursorCatalog,
     cursorConfig,
@@ -477,7 +474,6 @@ export function assembleRpc(deps: RpcDeps): void {
       return {
         provider: 'cursor',
         keyRef: cursorApiKeyRef(),
-        context: cursorContext(),
         publishedContext: cursorKnownContext().enabled,
         knownContext: cursorKnownContext(),
         ...(stored.monthlyCeilingUSD === undefined
@@ -499,7 +495,6 @@ export function assembleRpc(deps: RpcDeps): void {
       const config = cursorConfig()
       return {
         provider: 'cursor',
-        context: contextPreferenceFor(settings, config, undefined),
         models: buildCursorModelRows({
           models: catalog,
           settings,
@@ -507,8 +502,9 @@ export function assembleRpc(deps: RpcDeps): void {
           publishedWindow: cursorPublishedWindow,
         }),
         knownContext: cursorKnownContext(),
+        // The page patches this map and sends it back, so it carries every
+        // stored entry, including the models the catalog no longer lists.
         storedModels: settings.models ?? {},
-        publishedContext: cursorKnownContext().enabled,
       }
     },
     async setSettings(patch) {

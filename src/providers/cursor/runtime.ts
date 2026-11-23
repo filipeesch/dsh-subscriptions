@@ -29,7 +29,6 @@ import {
   type CursorParam,
 } from './catalog.js'
 import {
-  contextTierValue,
   isRejectedParams,
   modelParams,
   offeredContextValues,
@@ -370,16 +369,10 @@ export interface CursorRuntimeOptions {
   apiKey: () => Promise<string | undefined>
   /** Working directory for agents of one session. */
   cwd: (sessionId: string | undefined) => string
-  /** Context tier preference for one model (`max` by default). */
-  contextPreference: (modelId: string) => string
-  /** The tier Cursor accepted for this model and preference, when one is remembered. */
-  acceptedTier?: (modelId: string, preference: string) => string | undefined
+  /** The tier Cursor accepted for this model, when one is remembered. */
+  acceptedTier?: (modelId: string) => string | undefined
   /** Remember a tier Cursor accepted after a rejection. */
-  rememberAcceptedTier?: (
-    modelId: string,
-    value: string,
-    preference: string,
-  ) => void
+  rememberAcceptedTier?: (modelId: string, value: string) => void
   /** Drop a remembered tier that no longer applies. */
   forgetAcceptedTier?: (modelId: string) => void
   /** Credential reference named in a missing-key diagnostic. */
@@ -657,18 +650,12 @@ export class CursorRuntime {
     }
     const modelId = resolveModelId(options.model.id)
 
-    const preference = this.options.contextPreference(modelId)
-    const requestedParams = modelParams(
-      options.model,
-      options.reasoning,
-      preference,
-    )
-    // One effective tier decides both the request and the agent's request key.
-    // A remembered tier belongs to this preference and is usable only while the
-    // catalog still offers it; a changed preference or a withdrawn tier falls
-    // back to the configured one and is forgotten.
+    // One effective tier decides both the request and the agent's request key:
+    // the tier Cursor already accepted for this model while the catalog still
+    // offers it, else the largest offered. A withdrawn remembered tier is
+    // forgotten here, on the model's next turn.
     const offered = offeredContextValues(options.model)
-    const remembered = this.options.acceptedTier?.(modelId, preference)
+    const remembered = this.options.acceptedTier?.(modelId)
     const accepted =
       remembered === undefined
         ? undefined
@@ -677,20 +664,8 @@ export class CursorRuntime {
       this.options.forgetAcceptedTier?.(modelId)
     }
     const requestTier =
-      accepted ??
-      (offered.length > 0
-        ? contextTierValue(options.model, undefined, preference)
-        : undefined)
-    let params = requestedParams
-    if (params !== undefined && requestTier !== undefined) {
-      params = params.some((param) => param.id === 'context')
-        ? params.map((param) =>
-            param.id === 'context'
-              ? { id: param.id, value: requestTier }
-              : param,
-          )
-        : [...params, { id: 'context', value: requestTier }]
-    }
+      accepted ?? (offered.length > 0 ? offered[offered.length - 1] : undefined)
+    const params = modelParams(options.model, options.reasoning, requestTier)
     const credentialId = hash(apiKey)
 
     const transcriptTokens = () =>
@@ -779,7 +754,7 @@ export class CursorRuntime {
       for (const candidate of candidates) {
         if (candidate.modelId !== modelId) continue
         if (candidate.credentialId !== credentialId) continue
-        if (!onlyContextDiffers(requestedParams, candidate.params)) continue
+        if (!onlyContextDiffers(params, candidate.params)) continue
         if (!candidate.pending.some((call) => call.handed)) continue
         const candidatePlan = planIncrement(candidate, messages)
         if (candidatePlan.kind === 'results') {
@@ -985,7 +960,7 @@ export class CursorRuntime {
           // on the configured tier must not undo it.
           const tier = session.params?.find((param) => param.id === 'context')
           if (tier && session.fellBack) {
-            this.options.rememberAcceptedTier?.(modelId, tier.value, preference)
+            this.options.rememberAcceptedTier?.(modelId, tier.value)
           }
           reply.usage = runUsage(
             result?.usage,

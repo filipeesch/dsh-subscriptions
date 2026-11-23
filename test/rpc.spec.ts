@@ -372,9 +372,12 @@ test('the Cursor card reads settings and validates the ceiling payload', async (
   const initial = await handler('cursorSettings', {}, signal)
   assert.equal(initial.ok, true)
   if (initial.ok) {
-    const value = initial.value as { keyRef: string; context: string }
+    const value = initial.value as {
+      keyRef: string
+      knownContext: { enabled: boolean }
+    }
     assert.equal(value.keyRef, 'CURSOR_API_KEY')
-    assert.equal(value.context, 'max')
+    assert.equal(value.knownContext.enabled, true)
   }
   // A malformed payload is refused instead of clearing the stored value.
   for (const payload of [
@@ -418,12 +421,10 @@ test('the Cursor model manager reads rows and validates its writes', async () =>
   if (models.ok) {
     const value = models.value as {
       provider: string
-      context: string
       models: unknown[]
       knownContext: { enabled: boolean }
     }
     assert.equal(value.provider, 'cursor')
-    assert.equal(value.context, 'max')
     assert.deepEqual(value.models, [])
     assert.equal(value.knownContext.enabled, true)
   }

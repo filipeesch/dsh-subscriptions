@@ -7,17 +7,14 @@
  */
 
 import type { CursorModelSettings, CursorSettings } from '../cursor-settings.js'
-import { DEFAULT_CURSOR_CONTEXT } from './params.js'
 
 /** One model's configured baseline. */
 export interface CursorModelConfig {
   enabled?: boolean
-  context?: string
 }
 
 /** What the plugin configuration may set for the route. */
 export interface CursorConfigPolicy {
-  context?: string
   contextWindows?: Record<string, unknown>
   models?: Record<string, CursorModelConfig>
   publishedContext?: boolean
@@ -34,37 +31,34 @@ function settingFor(
 }
 
 /**
- * The tier preference for one model; the route-wide default when the field is
- * absent everywhere.
+ * The configured window for one model, when the profile names a usable one.
+ *
+ * It is the baseline the stored setting overrides, and the manager's rows start
+ * from it: the page owns the stored overrides, so a row states the value that
+ * applies when the page stores none.
  */
-export function contextPreferenceFor(
-  settings: CursorSettings,
-  config: CursorConfigPolicy | undefined,
-  modelId?: string,
-): string {
-  if (modelId === undefined) return config?.context ?? DEFAULT_CURSOR_CONTEXT
-  return (
-    settingFor(settings, modelId)?.context ??
-    config?.models?.[modelId]?.context ??
-    config?.context ??
-    DEFAULT_CURSOR_CONTEXT
-  )
-}
-
-/** The manual window for one model, when settings or configuration name one. */
-export function manualWindowFor(
-  settings: CursorSettings,
+export function configuredWindowFor(
   config: CursorConfigPolicy | undefined,
   modelId: string,
 ): number | undefined {
-  const value =
-    settingFor(settings, modelId)?.contextWindow ??
-    config?.contextWindows?.[modelId]
+  const value = config?.contextWindows?.[modelId]
   // An individual invalid entry is ignored; the resolver falls through to the
   // next source rather than rounding a typo into a different window.
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
     ? value
     : undefined
+}
+
+/** The manual window for one model: the stored value, else the configured one. */
+export function manualWindowFor(
+  settings: CursorSettings,
+  config: CursorConfigPolicy | undefined,
+  modelId: string,
+): number | undefined {
+  return (
+    settingFor(settings, modelId)?.contextWindow ??
+    configuredWindowFor(config, modelId)
+  )
 }
 
 /** Whether a model appears in the picker; absent everywhere means enabled. */

@@ -15,8 +15,11 @@ reported quota in **Settings → Subscriptions**.
   These routes use account sign-in, without provider API keys.
 - **Cursor key route:** Add the `cursor` route with a `CURSOR_API_KEY`
   credential. Cursor's models join the picker, one agent runs per conversation,
-  and the card reports the subscription's money or percentage quota. The route
-  ships no stored catalog and no OAuth login. See [Cursor](docs/cursor.md).
+  and the card reports the subscription's money or percentage quota. Each
+  model's advertised context window comes from its tier, a manual override, or
+  the public models.dev catalog, and the card's **Manage models** dialog states
+  which. The route ships no stored catalog and no OAuth login. See
+  [Cursor](docs/cursor.md).
 - **Ollama Cloud key route:** Add the `ollama-cloud` route with an
   `OLLAMA_API_KEY` credential. The route ships no model catalog: configure it on
   the Settings → Subscriptions card, which fetches the cloud list, ticks the
