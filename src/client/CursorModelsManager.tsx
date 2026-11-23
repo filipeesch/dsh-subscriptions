@@ -32,11 +32,30 @@ interface CursorRefreshOutcome {
   windows?: number
 }
 
-/** One change waiting to be written, applied to the last acknowledged map. */
+/**
+ * One change waiting to be written, applied to the last acknowledged map.
+ *
+ * A change carries the fields it touched, not the row's whole entry: a queued
+ * edit must not retry a field whose earlier write the host refused.
+ */
 interface CursorWriteOp {
   id: string
-  /** The entry to store, or undefined to remove this model's entry. */
-  entry: CursorModelEdit | undefined
+  patch: CursorModelEdit
+}
+
+/** Apply one field patch to a map's entry for a model. */
+function applyPatch(
+  map: CursorModelDraft,
+  id: string,
+  patch: CursorModelEdit,
+): void {
+  const entry: CursorModelEdit = { ...(map[id] ?? {}) }
+  for (const [field, value] of Object.entries(patch)) {
+    if (value === undefined) delete entry[field as keyof CursorModelEdit]
+    else (entry as Record<string, unknown>)[field] = value
+  }
+  if (Object.keys(entry).length > 0) map[id] = entry
+  else delete map[id]
 }
 
 function message(error: unknown): string {
@@ -112,6 +131,8 @@ export function CursorModelsManager({
   /** What the host has acknowledged; every write is applied to this map. */
   const committedRef = useRef<CursorModelDraft>({})
   const queue = useRef<CursorWriteOp[]>([])
+  /** Incremented by every acknowledgement, so a read can tell it was overtaken. */
+  const generation = useRef(0)
   const draining = useRef(false)
   const drainDone = useRef<Promise<void>>(Promise.resolve())
   const textsRef = useRef<Record<string, string>>({})
@@ -149,12 +170,11 @@ export function CursorModelsManager({
     const tokens = parseWindowInput(text)
     // Unusable text is not a change; the row states why while it is open.
     if (text.trim() !== '' && tokens === null) return
-    const next = withModelEdit(draftRef.current, id, {
-      contextWindow: tokens ?? undefined,
-    })
+    const patch: CursorModelEdit = { contextWindow: tokens ?? undefined }
+    const next = withModelEdit(draftRef.current, id, patch)
     if (sameEntry(next[id], draftRef.current[id])) return
     draftRef.current = next
-    queue.current.push({ id, entry: next[id] })
+    queue.current.push({ id, patch })
     startDrain()
     // eslint-disable-next-line react-hooks/exhaustive-deps -- startDrain is stable
   }, [])
@@ -173,15 +193,17 @@ export function CursorModelsManager({
     drainDone.current = (async () => {
       while (queue.current.length > 0) {
         const op = queue.current[0] as CursorWriteOp
-        const next: CursorModelDraft = { ...committedRef.current }
-        if (op.entry === undefined) delete next[op.id]
-        else next[op.id] = op.entry
+        // The base is the acknowledged map at send time, so a read that landed
+        // while this change waited is part of what this write preserves.
+        const next = cloneDraft(committedRef.current)
+        applyPatch(next, op.id, op.patch)
         try {
           await callSubscriptionsAuth(rpc, 'cursorSetSettings', {
             settings: { models: next },
           })
           queue.current.shift()
           committedRef.current = next
+          generation.current += 1
           if (!alive.current) continue
           errorsRef.current = without(errorsRef.current, op.id)
           setErrors(errorsRef.current)
@@ -189,16 +211,32 @@ export function CursorModelsManager({
         } catch (failure) {
           queue.current.shift()
           if (!alive.current) continue
-          // A newer change to the same model is already queued: it describes
-          // what the reader wants now, so leave the row alone and let it write.
+          // A newer change to the same field is already queued: it describes
+          // what the reader wants now, so leave that field alone and let it
+          // write. Only the fields this change touched go back.
+          const fields = Object.keys(op.patch) as (keyof CursorModelEdit)[]
           const superseded = queue.current.some(
-            (pending) => pending.id === op.id,
+            (pending) =>
+              pending.id === op.id &&
+              fields.some((field) => Object.hasOwn(pending.patch, field)),
           )
           if (!superseded) {
-            const reverted = { ...draftRef.current }
-            const acknowledged = committedRef.current[op.id]
-            if (acknowledged === undefined) delete reverted[op.id]
-            else reverted[op.id] = acknowledged
+            const reverted = cloneDraft(draftRef.current)
+            for (const field of fields) {
+              const acknowledged = committedRef.current[op.id]?.[field]
+              if (acknowledged === undefined) {
+                const entry = reverted[op.id]
+                if (entry !== undefined) {
+                  delete entry[field]
+                  if (Object.keys(entry).length === 0) delete reverted[op.id]
+                }
+              } else {
+                reverted[op.id] = {
+                  ...(reverted[op.id] ?? {}),
+                  [field]: acknowledged,
+                }
+              }
+            }
             draftRef.current = reverted
             setDraft(reverted)
           }
@@ -243,7 +281,7 @@ export function CursorModelsManager({
   }, [])
 
   const load = useCallback(
-    async (force: boolean) => {
+    async (force: boolean, attempt = 0): Promise<void> => {
       if (force) setReloading(true)
       else setLoading(true)
       setPageError('')
@@ -251,12 +289,22 @@ export function CursorModelsManager({
         // A read started now must describe the document the queued changes
         // left behind, not the one before them.
         await idle()
+        const before = generation.current
         const data = await callSubscriptionsAuth<CursorModelsView>(
           rpc,
           'cursorModels',
           force ? { force: true } : {},
         )
         if (!alive.current) return
+        // A change made while this read was in flight is newer than the
+        // document it describes. Adopting that document would show the older
+        // rows, and the next write would be built from the older map; read
+        // again instead, a bounded number of times.
+        const overtaken =
+          generation.current !== before ||
+          draining.current ||
+          queue.current.length > 0
+        if (overtaken && attempt < 3) return load(force, attempt + 1)
         adopt(data)
       } catch (failure) {
         if (!alive.current) return
@@ -282,12 +330,14 @@ export function CursorModelsManager({
   const nameOf = (id: string): string =>
     viewRef.current?.models.find((model) => model.id === id)?.name ?? id
 
+  /** Apply one field change to the reader's view and queue it for the host. */
   const commit = useCallback(
-    (next: CursorModelDraft, id: string) => {
+    (id: string, patch: CursorModelEdit) => {
+      const next = withModelEdit(draftRef.current, id, patch)
       if (sameEntry(next[id], draftRef.current[id])) return
       draftRef.current = next
       setDraft(next)
-      queue.current.push({ id, entry: next[id] })
+      queue.current.push({ id, patch })
       startDrain()
     },
     [startDrain],
@@ -295,7 +345,7 @@ export function CursorModelsManager({
 
   const toggle = useCallback(
     (id: string, enabled: boolean) => {
-      commit(withModelEdit(draftRef.current, id, { enabled }), id)
+      commit(id, { enabled })
     },
     [commit],
   )
@@ -306,10 +356,7 @@ export function CursorModelsManager({
       setTexts(textsRef.current)
       errorsRef.current = without(errorsRef.current, id)
       setErrors(errorsRef.current)
-      commit(
-        withModelEdit(draftRef.current, id, { contextWindow: undefined }),
-        id,
-      )
+      commit(id, { contextWindow: undefined })
     },
     [commit],
   )
@@ -334,7 +381,15 @@ export function CursorModelsManager({
   const commitText = useCallback(
     (id: string) => {
       if (editingRef.current !== id) return
-      const text = textsRef.current[id] ?? ''
+      const typed = textsRef.current[id]
+      // Opening the field and leaving it without typing is not a change: an
+      // absent text must not read as "clear the stored override".
+      if (typed === undefined) {
+        editingRef.current = undefined
+        setEditing(undefined)
+        return
+      }
+      const text = typed
       const tokens = parseWindowInput(text)
       if (text.trim() !== '' && tokens === null) {
         errorsRef.current = {
@@ -350,12 +405,7 @@ export function CursorModelsManager({
       setTexts(textsRef.current)
       errorsRef.current = without(errorsRef.current, id)
       setErrors(errorsRef.current)
-      commit(
-        withModelEdit(draftRef.current, id, {
-          contextWindow: tokens ?? undefined,
-        }),
-        id,
-      )
+      commit(id, { contextWindow: tokens ?? undefined })
     },
     [commit, t],
   )
@@ -370,12 +420,26 @@ export function CursorModelsManager({
     [commitText],
   )
 
-  /** Close the dialog without dropping a window the reader just typed. */
+  /**
+   * Close the dialog without dropping a window the reader just typed.
+   *
+   * A flushed change is written before the dialog goes away, and a refused one
+   * keeps it open so the row can state the failure: closing over a failed save
+   * would hide the only place that says the window was not stored.
+   */
   const close = useCallback(() => {
-    const id = editingRef.current
-    if (id !== undefined) flushText(id)
-    onClose()
-  }, [flushText, onClose])
+    const open = editingRef.current
+    if (open === undefined && !draining.current && queue.current.length === 0) {
+      onClose()
+      return
+    }
+    if (open !== undefined) flushText(open)
+    void idle().then(() => {
+      if (!alive.current) return
+      const failed = open !== undefined && errorsRef.current[open] !== undefined
+      if (!failed) onClose()
+    })
+  }, [flushText, idle, onClose])
 
   const refreshSource = useCallback(async () => {
     setSourceBusy(true)
@@ -474,6 +538,13 @@ export function CursorModelsManager({
       aria-labelledby={title}
       aria-describedby={description}
       onClose={onClose}
+      onCancel={(event) => {
+        // Escape must not drop a field the reader is still editing; route it
+        // through the same flush and failure-hold as the Close button.
+        if (editingRef.current === undefined) return
+        event.preventDefault()
+        close()
+      }}
       style={{
         width: 'min(720px, calc(100vw - 32px))',
         maxWidth: 'calc(100vw - 32px)',

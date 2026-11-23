@@ -79,10 +79,13 @@ No deprecation shim is needed.
 
 `scripts/manual/cursor-screens.mjs` renders the shipped presentational
 components against fixture data into `.cache/cursor-screens` (gitignored):
-`card-source-on-en`, `card-source-off-en`, `card-source-failed-en`,
-`manager-en`, `manager-manual-override-en`, `manager-editing-en`,
-`manager-failed-write-en`, `manager-filter-empty-en`, `manager-source-off-en`,
-`manager-source-failed-en`, `manager-zh-narrow`, and `card-source-zh-narrow`.
+`card-source-on-en`, `card-source-off-en`, `manager-en`,
+`manager-manual-override-en`, `manager-editing-en`, `manager-failed-write-en`,
+`manager-filter-empty-en`, `manager-source-off-en`, `manager-source-failed-en`,
+`manager-zh-narrow`, and `card-source-zh-narrow`. Each one is a state the app
+can produce: the card has no failure state any more, the source-off capture uses
+rows without a published capacity, and the filter-input capture carries its
+query.
 
 The failed-write capture is what changed the row layout: the failure text was a
 flex item of the row and squeezed the model name, so the row now wraps its error
@@ -95,10 +98,13 @@ The first review reproduced a regression in the new manager and this round fixed
 it. The page seeds its map from the stored document the read carries, so the
 first autosave keeps every model it did not touch — including one the catalog no
 longer lists — and a reset can clear an override that came from the document.
-Writes are queued as changes applied to the last acknowledged map, so a refused
-change never rides along on the next successful one, and a read settles the
-queue before it fetches, so a Reload cannot describe a document older than the
-save that preceded it. Closing the dialog writes a window the reader just typed.
+Writes are queued as field-level changes applied to the last acknowledged map,
+so a refused field is not retried by the change queued behind it, on that model
+or another. A read settles the queue before it fetches, and a response that a
+newer write overtook is discarded and read again, so a saved change cannot be
+rolled back by a reload that started earlier. Closing the dialog writes a window
+the reader just typed, and a refused write keeps the dialog open so the row can
+state it. Opening a field and leaving it without typing is not a change.
 
 The accepted-tier record is normalized on every validation, so a save over a
 document that predates the compatibility field still writes a document an older

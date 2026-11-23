@@ -134,6 +134,11 @@ export function CursorModelRow({
                 and the title carries the same sentence for a pointer. */}
             <span className="dsh-cursor-chip" title={note}>
               {formatWindowLabel(row.tokens)}
+              {row.source === 'manual' && (
+                <span className="dsh-cursor-chip-tag">
+                  {t('cursorWindowManualShort')}
+                </span>
+              )}
               <span className="dsh-cursor-sr"> ({note})</span>
             </span>
             {row.overridable && (

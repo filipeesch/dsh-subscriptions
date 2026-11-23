@@ -148,6 +148,7 @@ interface Dom {
   click: (element: Element | null) => Promise<void>
   setValue: (element: Element | null, value: string) => Promise<void>
   setChecked: (element: Element | null, checked: boolean) => Promise<void>
+  blur: (element: Element | null) => Promise<void>
   render: (element: ReturnType<typeof createElement>) => Promise<void>
   /** Let a debounced write fire. */
   wait: (ms: number) => Promise<void>
@@ -237,6 +238,15 @@ async function withDom(run: (dom: Dom) => Promise<void>): Promise<void> {
             change: (node: Element, event: unknown) => void
           }
         ).change(input, { target: { checked }, bubbles: true })
+        await new Promise((resolveWait) => setTimeout(resolveWait, 20))
+      })
+    },
+    async blur(element) {
+      assert.ok(element, 'the field exists')
+      await act(async () => {
+        element.dispatchEvent(
+          new jsdom.window.FocusEvent('focusout', { bubbles: true }),
+        )
         await new Promise((resolveWait) => setTimeout(resolveWait, 20))
       })
     },
@@ -572,6 +582,247 @@ test('a reload waits for the write before it reads the document', async () => {
     held?.()
     await dom.wait(80)
     assert.deepEqual(order, ['write', 'write-done', 'read'])
+  })
+})
+
+test('a failed field is not retried by a later change to the same model', async () => {
+  const sent: Record<string, unknown>[] = []
+  let writes = 0
+  const rpc = {
+    async call(
+      _channel: string,
+      endpoint: string,
+      payload: Record<string, unknown>,
+    ) {
+      const name = endpoint.replace('subscriptions-auth.', '')
+      if (name === 'cursorModels')
+        return {
+          ok: true,
+          value: modelsView(undefined, {
+            ...storedDocument,
+            'deepseek-v41-flash-1017': { contextWindow: 900_000 },
+          }),
+        }
+      if (name === 'cursorSetSettings') {
+        sent.push(
+          (payload.settings as { models: Record<string, unknown> }).models,
+        )
+        writes += 1
+        if (writes === 1) {
+          await new Promise((resolveWait) => setTimeout(resolveWait, 120))
+          return { ok: false, error: { message: 'write failed' } }
+        }
+        return { ok: true, value: {} }
+      }
+      return { ok: false, error: { message: 'unexpected ' + name } }
+    },
+  } as never
+  await withDom(async (dom) => {
+    await dom.render(
+      createElement(CursorModelsManager, {
+        rpc,
+        t,
+        onClose: () => undefined,
+        onSaved: () => undefined,
+      }),
+    )
+    const toggle = () =>
+      dom.document.querySelector(
+        'input[aria-label="' +
+          t('cursorModelEnabled', { model: 'DeepSeek V4.1 Flash 1017' }) +
+          '"]',
+      ) as HTMLInputElement
+    await dom.setChecked(toggle(), false)
+    // Same row, different field, queued behind the write that will fail.
+    await dom.click(
+      dom.document.querySelector(
+        'button[aria-label="' +
+          t('cursorModelResetOverride', { model: 'DeepSeek V4.1 Flash 1017' }) +
+          '"]',
+      ),
+    )
+    await dom.wait(400)
+    assert.equal(sent.length, 2)
+    // The refused enablement is not carried by the change queued behind it: the
+    // reset clears the stored window from the entry the host still holds, and
+    // the entry disappears because nothing else was acknowledged for it.
+    assert.deepEqual(sent[1], {
+      'claude-sonnet-5-5': { enabled: true },
+      'legacy-model': { contextWindow: 300_000 },
+    })
+  })
+})
+
+test('opening a field and leaving it without typing keeps the override', async () => {
+  const { rpc, calls } = fakeRpc((endpoint) => {
+    if (endpoint === 'cursorModels')
+      return {
+        ok: true,
+        value: modelsView(undefined, {
+          ...storedDocument,
+          'deepseek-v41-flash-1017': { contextWindow: 900_000 },
+        }),
+      }
+    if (endpoint === 'cursorSetSettings') return { ok: true, value: {} }
+    return { ok: false, error: { message: 'unexpected ' + endpoint } }
+  })
+  await withDom(async (dom) => {
+    await dom.render(
+      createElement(CursorModelsManager, {
+        rpc,
+        t,
+        onClose: () => undefined,
+        onSaved: () => undefined,
+      }),
+    )
+    await dom.click(
+      dom.document.querySelector(
+        'button[aria-label="' +
+          t('cursorModelResetOverride', { model: 'DeepSeek V4.1 Flash 1017' }) +
+          '"]',
+      ),
+    )
+    await dom.wait(50)
+    // The reset writes once and the row returns to the published value.
+    assert.equal(
+      calls.filter((call) => call.endpoint === 'cursorSetSettings').length,
+      1,
+    )
+    // Now open the field for a model with a stored override and blur it away.
+    await dom.click(
+      dom.document.querySelector(
+        'button[aria-label="' +
+          t('cursorModelOverride', { model: 'DeepSeek V4.1 Flash 1017' }) +
+          '"]',
+      ),
+    )
+    await dom.blur(input(dom, 'DeepSeek V4.1 Flash 1017'))
+    assert.equal(
+      calls.filter((call) => call.endpoint === 'cursorSetSettings').length,
+      1,
+      'an untouched field is not a change',
+    )
+  })
+})
+
+test('a read overtaken by a change starts over with the saved document', async () => {
+  let stored = { ...storedDocument }
+  let reads = 0
+  let release: (() => void) | undefined
+  const rpc = {
+    async call(
+      _channel: string,
+      endpoint: string,
+      payload: Record<string, unknown>,
+    ) {
+      const name = endpoint.replace('subscriptions-auth.', '')
+      if (name === 'cursorModels') {
+        reads += 1
+        // The second read hangs until the test lets it answer, so a change can
+        // land while it is in flight.
+        if (reads === 2) {
+          await new Promise<void>((resolveWait) => {
+            release = resolveWait
+          })
+        }
+        return { ok: true, value: modelsView(undefined, stored) }
+      }
+      if (name === 'cursorSetSettings') {
+        const next = (payload.settings as { models?: typeof stored }).models
+        if (next !== undefined) stored = { ...next }
+        return { ok: true, value: {} }
+      }
+      return { ok: false, error: { message: 'unexpected ' + name } }
+    },
+  } as never
+  await withDom(async (dom) => {
+    await dom.render(
+      createElement(CursorModelsManager, {
+        rpc,
+        t,
+        onClose: () => undefined,
+        onSaved: () => undefined,
+      }),
+    )
+    const composer = () =>
+      dom.document.querySelector(
+        'input[aria-label="' +
+          t('cursorModelEnabled', { model: 'Composer 2' }) +
+          '"]',
+      ) as HTMLInputElement
+    await dom.click(buttonByText(dom, en.cursorModelsReload))
+    await dom.setChecked(composer(), true)
+    await dom.wait(50)
+    release?.()
+    await dom.wait(120)
+    // The overtaken read was repeated, and the repeated one describes the saved
+    // document instead of the one that predated the change.
+    assert.ok(reads >= 3, 'the overtaken read was repeated')
+    assert.equal(composer().checked, true)
+    // What the page wrote is what the repeated read describes.
+    assert.deepEqual(stored, {
+      'claude-sonnet-5-5': { enabled: true },
+      'legacy-model': { contextWindow: 300_000 },
+      'composer-2': { enabled: true },
+    })
+  })
+})
+
+test('a close whose write is refused keeps the dialog and states it', async () => {
+  const { rpc } = fakeRpc((endpoint) => {
+    if (endpoint === 'cursorModels') return { ok: true, value: modelsView() }
+    if (endpoint === 'cursorSetSettings')
+      return { ok: false, error: { message: 'write failed' } }
+    return { ok: false, error: { message: 'unexpected ' + endpoint } }
+  })
+  let closed = 0
+  await withDom(async (dom) => {
+    await dom.render(
+      createElement(CursorModelsManager, {
+        rpc,
+        t,
+        onClose: () => {
+          closed += 1
+        },
+        onSaved: () => undefined,
+      }),
+    )
+    await dom.click(
+      dom.document.querySelector(
+        'button[aria-label="' +
+          t('cursorModelOverride', { model: 'Composer 2' }) +
+          '"]',
+      ),
+    )
+    await dom.setValue(input(dom, 'Composer 2'), '700000')
+    await dom.click(buttonByText(dom, en.imageClose))
+    await dom.wait(120)
+    // The refused write is not hidden behind a closed dialog.
+    assert.equal(closed, 0)
+    assert.match(dom.text(), /write failed/)
+  })
+})
+
+test('a second close with nothing pending closes the dialog', async () => {
+  const { rpc } = fakeRpc((endpoint) => {
+    if (endpoint === 'cursorModels') return { ok: true, value: modelsView() }
+    return { ok: false, error: { message: 'unexpected ' + endpoint } }
+  })
+  let closed = 0
+  await withDom(async (dom) => {
+    await dom.render(
+      createElement(CursorModelsManager, {
+        rpc,
+        t,
+        onClose: () => {
+          closed += 1
+        },
+        onSaved: () => undefined,
+      }),
+    )
+    await dom.click(buttonByText(dom, en.imageClose))
+    await dom.wait(50)
+    assert.equal(closed, 1)
   })
 })
 
