@@ -272,10 +272,14 @@ export function CursorModelsManager({
     draftRef.current = stored
     committedRef.current = cloneDraft(next.storedModels)
     setDraft(stored)
-    textsRef.current = {}
-    setTexts({})
-    editingRef.current = undefined
-    setEditing(undefined)
+    // A field the reader is still editing is theirs, not the document's: a read
+    // that lands mid-typing must not drop the text they have not committed.
+    const open = editingRef.current
+    const typing = open === undefined ? undefined : textsRef.current[open]
+    textsRef.current =
+      open === undefined || typing === undefined ? {} : { [open]: typing }
+    setTexts(textsRef.current)
+    setEditing(open === undefined ? undefined : open)
     errorsRef.current = {}
     setErrors({})
   }, [])
@@ -304,7 +308,14 @@ export function CursorModelsManager({
           generation.current !== before ||
           draining.current ||
           queue.current.length > 0
-        if (overtaken && attempt < 3) return load(force, attempt + 1)
+        if (overtaken) {
+          // Never adopt a document a newer write overtook, not even when the
+          // retries run out: the rows on screen came from the last consistent
+          // read, and an older map would feed the next write. The reader can
+          // ask again once the writes have settled.
+          if (attempt < 3) return load(force, attempt + 1)
+          return
+        }
         adopt(data)
       } catch (failure) {
         if (!alive.current) return
@@ -429,6 +440,10 @@ export function CursorModelsManager({
    */
   const close = useCallback(() => {
     const open = editingRef.current
+    // Every write in flight or queued when the reader closes may still be
+    // refused, so each one holds the dialog rather than closing over its error.
+    const watching = queue.current.map((op) => op.id)
+    if (open !== undefined) watching.push(open)
     if (open === undefined && !draining.current && queue.current.length === 0) {
       onClose()
       return
@@ -436,7 +451,7 @@ export function CursorModelsManager({
     if (open !== undefined) flushText(open)
     void idle().then(() => {
       if (!alive.current) return
-      const failed = open !== undefined && errorsRef.current[open] !== undefined
+      const failed = watching.some((id) => errorsRef.current[id] !== undefined)
       if (!failed) onClose()
     })
   }, [flushText, idle, onClose])

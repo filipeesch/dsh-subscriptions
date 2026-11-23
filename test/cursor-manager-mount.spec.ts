@@ -826,6 +826,158 @@ test('a second close with nothing pending closes the dialog', async () => {
   })
 })
 
+test('an overtaken read is never adopted, even past the retries', async () => {
+  let reads = 0
+  const held: (() => void)[] = []
+  const rpc = {
+    async call(_channel: string, endpoint: string) {
+      const name = endpoint.replace('subscriptions-auth.', '')
+      if (name === 'cursorModels') {
+        reads += 1
+        // Every read after the first hangs, and every response describes the
+        // document from before the writes: none of them may be adopted.
+        if (reads > 1) {
+          await new Promise<void>((resolveWait) => {
+            held.push(resolveWait)
+          })
+        }
+        return {
+          ok: true,
+          value: modelsView(undefined, { 'composer-2': { enabled: true } }),
+        }
+      }
+      if (name === 'cursorSetSettings') return { ok: true, value: {} }
+      return { ok: false, error: { message: 'unexpected ' + name } }
+    },
+  } as never
+  await withDom(async (dom) => {
+    await dom.render(
+      createElement(CursorModelsManager, {
+        rpc,
+        t,
+        onClose: () => undefined,
+        onSaved: () => undefined,
+      }),
+    )
+    const box = (model: string) =>
+      dom.document.querySelector(
+        'input[aria-label="' + t('cursorModelEnabled', { model }) + '"]',
+      ) as HTMLInputElement
+    await dom.click(buttonByText(dom, en.cursorModelsReload))
+    // Four rounds, each a real write that overtakes the read being held.
+    // The first step must change the value: a toggle to the value already in
+    // effect sends no write and therefore overtakes nothing.
+    const steps: [string, boolean][] = [
+      ['Composer 2', false],
+      ['Composer 2', true],
+      ['Composer 2', false],
+      ['Claude Sonnet 5.5', false],
+    ]
+    for (const [model, enabled] of steps) {
+      await dom.setChecked(box(model), enabled)
+      held.shift()?.()
+      await dom.wait(40)
+    }
+    await dom.wait(80)
+    // The stale document says Composer is enabled; the last write says it is
+    // not, so an adopted stale read would flip it back.
+    assert.equal(box('Composer 2').checked, false)
+    assert.equal(box('Claude Sonnet 5.5').checked, false)
+    assert.ok(reads >= 5, 'the reads were repeated, not adopted: ' + reads)
+  })
+})
+
+test('a close waits for a pending enablement write and holds a failure', async () => {
+  let release: (() => void) | undefined
+  const rpc = {
+    async call(_channel: string, endpoint: string) {
+      const name = endpoint.replace('subscriptions-auth.', '')
+      if (name === 'cursorModels') return { ok: true, value: modelsView() }
+      if (name === 'cursorSetSettings') {
+        await new Promise<void>((resolveWait) => {
+          release = resolveWait
+        })
+        return { ok: false, error: { message: 'write failed' } }
+      }
+      return { ok: false, error: { message: 'unexpected ' + name } }
+    },
+  } as never
+  let closed = 0
+  await withDom(async (dom) => {
+    await dom.render(
+      createElement(CursorModelsManager, {
+        rpc,
+        t,
+        onClose: () => {
+          closed += 1
+        },
+        onSaved: () => undefined,
+      }),
+    )
+    await dom.setChecked(
+      dom.document.querySelector(
+        'input[aria-label="' +
+          t('cursorModelEnabled', { model: 'Composer 2' }) +
+          '"]',
+      ),
+      true,
+    )
+    // Close while that write is still in flight.
+    await dom.click(buttonByText(dom, en.imageClose))
+    assert.equal(closed, 0, 'the dialog waits for the write')
+    release?.()
+    await dom.wait(80)
+    assert.equal(closed, 0, 'the refused write keeps the dialog open')
+    assert.match(dom.text(), /write failed/)
+  })
+})
+
+test('a read cannot drop the text a reader is still typing', async () => {
+  let release: (() => void) | undefined
+  let reads = 0
+  const rpc = {
+    async call(_channel: string, endpoint: string) {
+      const name = endpoint.replace('subscriptions-auth.', '')
+      if (name === 'cursorModels') {
+        reads += 1
+        if (reads === 2) {
+          await new Promise<void>((resolveWait) => {
+            release = resolveWait
+          })
+        }
+        return { ok: true, value: modelsView() }
+      }
+      if (name === 'cursorSetSettings') return { ok: true, value: {} }
+      return { ok: false, error: { message: 'unexpected ' + name } }
+    },
+  } as never
+  await withDom(async (dom) => {
+    await dom.render(
+      createElement(CursorModelsManager, {
+        rpc,
+        t,
+        onClose: () => undefined,
+        onSaved: () => undefined,
+      }),
+    )
+    await dom.click(
+      dom.document.querySelector(
+        'button[aria-label="' +
+          t('cursorModelOverride', { model: 'Composer 2' }) +
+          '"]',
+      ),
+    )
+    await dom.setValue(input(dom, 'Composer 2'), '700000')
+    // A reload lands while the field is open and uncommitted.
+    await dom.click(buttonByText(dom, en.cursorModelsReload))
+    release?.()
+    await dom.wait(80)
+    const field = input(dom, 'Composer 2')
+    assert.ok(field, 'the field is still open')
+    assert.equal((field as HTMLInputElement).value, '700000')
+  })
+})
+
 test('a typed window writes after the pause and marks the row manual', async () => {
   const { rpc, calls } = fakeRpc((endpoint) => {
     if (endpoint === 'cursorModels') return { ok: true, value: modelsView() }
