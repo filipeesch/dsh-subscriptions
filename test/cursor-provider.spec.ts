@@ -960,3 +960,16 @@ test('a refresh started by exact resolution re-announces new metadata', async ()
   assert.equal(applied.length, 2)
   assert.equal(applied[1]?.[0]?.displayName, 'Second')
 })
+test('the route publishes a retry policy for pre-output failures only', () => {
+  const { gateway } = gatewayOf()
+  const adapter = adapterOf(gateway)
+  const policy = adapter.providerRetryPolicy('cursor')
+  assert.equal(policy?.mode, 'normal')
+  assert.equal(policy?.mode === 'normal' ? policy.maxRetries : undefined, 2)
+  assert.deepEqual(
+    policy?.mode === 'normal' ? [...policy.retryableCodes] : [],
+    ['CURSOR_UNAVAILABLE'],
+  )
+  // The other routes this plugin serves keep the host's default policy.
+  assert.equal(adapter.providerRetryPolicy('codex'), undefined)
+})
