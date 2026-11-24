@@ -1,3 +1,35 @@
+## v0.6.1 — 2026-11-24
+
+- **A Cursor turn recovers from a failure that produced nothing.** When an
+  attempt fails before emitting text, reasoning, or a tool call, the route drops
+  the agent and runs the turn once more from the full history. A rejected API
+  key or rejected model parameters are never replayed, and neither is a failure
+  after output, because repeating a half-finished run would send part of the
+  turn twice. One adapter request makes at most three provider attempts,
+  counting the smaller-tier retry.
+- **The failure code says whether a replay is safe.** A pre-output failure that
+  survived the route's replay reports `CURSOR_UNAVAILABLE`, and the route
+  publishes a retry policy that lets the host repeat only that code, at most
+  twice. A failure after output, a rejected API key, and rejected model
+  parameters keep `CURSOR_RUN_FAILED`, which the host does not retry.
+- **A failed turn records one warning from a closed vocabulary.** The line names
+  the boundary, the phase (setup or run), the cause, and a reviewed literal such
+  as `local store failure` or `credential rejected`, optionally with the SDK's
+  error class, code, and status. Provider text is never printed, so the resolved
+  key and the request's own text cannot reach the log; an unfamiliar failure
+  reads `unclassified failure`. The sentence the conversation shows is unchanged
+  and carries no provider text.
+- **A broken run stream is a failure, not a stop.** When the stream ends in an
+  error, the route reports it even if the provider later says the run finished,
+  and a setup failure that never reached an attempt stays non-retryable.
+- **An agent's lifetime is wall-clock time.** An agent unused for 20 minutes —
+  60 while a tool result is owed — is closed by a sweep, and a turn never reuses
+  one past its budget. A suspended machine no longer extends an agent's life,
+  and a run longer than the budget keeps its agent until it ends.
+- **Internal:** the Cursor runtime split into session, registry, turn gate,
+  agent factory, run pump, plan, and failure modules behind the same adapter
+  behavior, and a failed prewarm no longer disables warmup for the process.
+
 ## v0.6.0 — 2026-11-23
 
 - **Cursor published capacities.** The projection now reads the document it is

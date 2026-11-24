@@ -29,6 +29,8 @@ export interface ToolCall {
 /** Error codes outside DSH's default retry list: a half-finished Cursor run must not be replayed. */
 export const ERROR_CODES = {
   error: 'CURSOR_RUN_FAILED',
+  /** A pre-output failure that survived the route's replay; the host retries it. */
+  unavailable: 'CURSOR_UNAVAILABLE',
   aborted: 'ABORTED',
   missingKey: 'MISSING_CREDENTIAL',
 } as const
@@ -99,6 +101,11 @@ export class Reply {
 
   get content(): unknown[] {
     return this.message.content
+  }
+
+  /** Whether a terminal chunk was already pushed; the fallback finish tests it. */
+  get settled(): boolean {
+    return this.ended
   }
 
   thinking(chunk: string): void {

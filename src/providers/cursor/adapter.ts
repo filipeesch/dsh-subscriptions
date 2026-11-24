@@ -8,6 +8,7 @@
  */
 
 import { LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
+import type { ResolvedRetryPolicy } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   LlmModelInfo,
@@ -28,6 +29,7 @@ import {
 } from './catalog.js'
 import { cursorCatalogStore } from './catalog-store.js'
 import { resolveContextWindow } from './context-window.js'
+import { cursorRetryPolicy, describeFailure } from './failure.js'
 import { offeredTierValue, reasoningInfo, requestedTier } from './params.js'
 import { catalogSignature } from './catalog.js'
 import { CURSOR_ROUTE, DEFAULT_CURSOR_API_KEY_REF } from './route.js'
@@ -139,6 +141,17 @@ export class CursorAdapter extends LlmAdapter {
 
   override providerInfo(provider: string): LlmProviderInfo {
     return { id: provider, name: 'Cursor' }
+  }
+
+  /**
+   * The route owns its retry policy because only it knows which failures are
+   * safe to replay: {@link cursorRetryPolicy} retries the pre-output code and
+   * nothing else.
+   */
+  override providerRetryPolicy(
+    provider: string,
+  ): ResolvedRetryPolicy | undefined {
+    return provider === CURSOR_ROUTE ? cursorRetryPolicy() : undefined
   }
 
   override async listModels(
@@ -277,7 +290,33 @@ export class CursorAdapter extends LlmAdapter {
       this.models('resolve'),
       this.loadImages(options, signal),
     ])
-    const first = await Promise.race([setup, cancelled])
+    let first: Awaited<typeof setup> | 'aborted'
+    try {
+      first = await Promise.race([setup, cancelled])
+    } catch (error) {
+      // Setup owns the credential read and the attachment reads, so its
+      // rejection is a failed turn like any other and must end in the route's
+      // own sentence and one warning instead of an adapter throw. Nothing has
+      // been sent yet, so the failure cannot echo the request.
+      const queue = new ChunkQueue()
+      const reply = new Reply(queue)
+      if (signal.aborted) {
+        reply.finish('aborted')
+      } else {
+        const report = describeFailure({
+          phase: 'setup',
+          errors: [error],
+          action: 'run the model',
+          beforeOutput: true,
+          // No attempt and no recovery ran, so the host has nothing to replay.
+          recoverySpent: false,
+        })
+        this.options.onWarn?.(report.warning)
+        reply.finish('error', report.sentence, report.code)
+      }
+      yield* queue
+      return
+    }
     if (first === 'aborted') {
       const queue = new ChunkQueue()
       const reply = new Reply(queue)
@@ -414,9 +453,12 @@ export class CursorAdapter extends LlmAdapter {
         if (!image) {
           try {
             image = await read(ref, signal)
-          } catch (error) {
+          } catch {
+            // The attachment is optional, so the request continues without it.
+            // The thrown message stays out of the log: it comes from the same
+            // untrusted surface the failure vocabulary exists to contain.
             this.options.onWarn?.(
-              `Cursor image ${id} unreadable: ${error instanceof Error ? error.message : String(error)}`,
+              'Cursor could not read an attached image; the request continues without it.',
             )
           }
           if (image) {

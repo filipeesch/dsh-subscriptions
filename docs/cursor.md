@@ -120,6 +120,76 @@ answered. If a conversation genuinely outgrows the window, give that
 summarization route quota (or configure the host's compaction model) rather than
 relying on a larger advertised window.
 
+## Failures and recovery
+
+A turn that fails before it emitted anything — no text, no reasoning, no tool
+call — is replayed once: the route drops the agent and runs the same turn again
+on a new one seeded with the full history. A rejected API key and rejected model
+parameters are never replayed, even before output, because neither can succeed
+on retry. A failure after output is not replayed either, because repeating a
+half-finished run would send part of the turn twice. One adapter request
+therefore makes at most three provider attempts, counting the smaller-tier
+retry; the host's own retries are separate requests.
+
+The code a failed turn reports says what may happen next. A pre-output failure
+that survived the replay reports `CURSOR_UNAVAILABLE`, and the route publishes a
+retry policy that lets the host repeat only that code, at most twice. A failure
+after output, a rejected API key, and rejected model parameters report
+`CURSOR_RUN_FAILED`, which the host's default policy does not retry.
+
+Every failed turn records one warning on the plugin's log. The line names the
+boundary (before or after output), the phase (`setup` while the agent is created
+or sent to, `run` once a run exists), the cause (`credential`, `unreachable`,
+`parameters`, or `local`), and a diagnostic detail drawn from the route's own
+reviewed vocabulary:
+
+```text
+Cursor failed before output (phase=setup, cause=local): local store failure
+Cursor failed before output (phase=run, cause=credential): credential rejected (AuthenticationError, code=unauthenticated, status=401)
+```
+
+The detail is always a fixed literal — `local store failure`,
+`agent state lost`, `stream timed out`, `stream closed early`, `rate limited`,
+`quota exhausted`, `transport unreachable`, `credential rejected`,
+`model parameters rejected`, or `unclassified failure` — optionally followed by
+allowlisted structured fields from the SDK's own error object: one of the SDK's
+reviewed error class names, one of the reviewed error codes, or an HTTP status
+the SDK reports as a number. Provider text is never printed, and nothing is read
+out of it, because it can echo a credential or a request fragment — including a
+number or a name that looks like a status or an error class. An unfamiliar
+failure therefore reads `unclassified failure`, and the fix is to teach the
+vocabulary about it. The sentence the conversation shows is separate and fixed.
+On `dsh web`, the warning appears in the terminal that started the host.
+
+Three consequences worth knowing. A request that fails during setup — the
+credential read before any agent exists — reports `CURSOR_RUN_FAILED`, because
+the route's recovery was never spent, so the host does not retry it. A run
+stream that breaks is a failed delivery even when the provider still reports the
+run as running, or later reports it as finished: the route reports the failure
+rather than a clean stop or a tool handoff, which is how a truncated answer is
+not mistaken for a complete one. A run that reports its own failure gets a
+bounded moment to report the reason before the turn settles — whichever source
+reported the failure, and whether or not something else woke the turn meanwhile.
+A failure whose reason never arrives is reported without a replay, without a
+smaller tier and without offering the host a retry, and a run that ends with a
+tool call still open withholds the call while keeping any output it had already
+produced. A rejection the run has already reported is enough to stop the call
+from going out at all, even if the run has not formally ended yet, and a failure
+the stream reports settles the turn without waiting for the run's result to
+catch up. And an attachment the route cannot read leaves one fixed warning line
+of its own — the request continues without the image, and the reader's exception
+stays out of the log.
+
+One failure class survives the restart boundary: a process-wide `@cursor/sdk`
+state can fail every turn until DSH restarts, because the route can rebuild an
+agent but not the SDK's own runtime. The warning's detail is what tells that
+case apart from a transient failure.
+
+An agent's lifetime is wall-clock time: 20 minutes unused, or 60 minutes while a
+tool result is still owed. A sweep closes idle agents, and a turn never reuses
+one past its budget. A suspended machine therefore does not extend an agent's
+life, and a run longer than the budget keeps its agent until it ends.
+
 ## Quota
 
 The card reads Cursor's current period usage with the same API key. What it
@@ -162,13 +232,17 @@ and remainder), and a click opens the full dialog.
 ## Verification
 
 Without a real account, unit tests cover the adapter through injected SDK and
-HTTP seams. With an account, install the plugin, store the key, open **Settings
-→ Subscriptions**, and check that Cursor lists models and reports a window; then
-send one prompt with a tool call from the composer.
+HTTP seams, including the pre-output replay, both failure codes, the retry
+policy, the redacted warning, and the wall-clock lifetime sweep. With an
+account, install the plugin, store the key, open **Settings → Subscriptions**,
+and check that Cursor lists models and reports a window; then send one prompt
+with a tool call from the composer.
 
 See the
 [decision record](../.agents/notes/implemented/provider/2026-11-21-cursor-key-route.md)
-for the endpoint probes and the alternatives, and the
+for the endpoint probes and the alternatives, the
 [capacity and manager decision](../.agents/notes/implemented/provider/2026-11-23-cursor-capacities-and-manager.md)
 for why the window resolves in this order and why a manual value outranks the
-published one.
+published one, and the
+[failure recovery decision](../.agents/notes/implemented/provider/2026-11-24-cursor-failure-recovery.md)
+for why only a pre-output failure is replayed and what the warning carries.
