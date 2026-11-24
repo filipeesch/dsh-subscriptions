@@ -6,13 +6,11 @@ import type {
 } from './SubscriptionsSection.js'
 import type { OllamaSettingsView } from './ollama-draft.js'
 import { callSubscriptionsAuth } from './subscriptions-rpc.js'
-import { externalUsageWindowLabel } from './ExternalUsageCards.js'
 import { OllamaSettingsManager } from './OllamaSettingsManager.js'
 import { USAGE_BADGE_REFRESH_EVENT } from './usage-badge-preferences.js'
 import { subscriptionCardStyles as styles } from './subscription-card-styles.js'
-import { UsageMeter } from './UsageMeter.js'
-import { quotaText, useQuotaClock } from './quota-display.js'
-import { useQuotaDisplayMode } from './usage-badge-preferences.js'
+import { KeyCredentialField } from './KeyCredentialField.js'
+import { UsageWindowRow } from './UsageWindowRow.js'
 
 type Translate = SubscriptionsSectionInjected['t']
 
@@ -32,9 +30,11 @@ export function OllamaCard({
   rpc: ConnectionHandle['rpc']
   t: Translate
 }) {
-  const quotaMode = useQuotaDisplayMode()
-  const quotaNow = useQuotaClock()
   const [view, setView] = useState<OllamaSettingsView>()
+  // Bumped whenever this card's settings change: the credential field's
+  // identity includes it, because a saved override can keep the reference text
+  // and still change who owns it.
+  const [revision, setRevision] = useState(0)
   const [configured, setConfigured] = useState<boolean>()
   const [usage, setUsage] = useState<ProviderUsage>()
   const [observedAt, setObservedAt] = useState<number>()
@@ -119,16 +119,29 @@ export function OllamaCard({
           {view.effective.web ? t('ollamaWebOn') : t('ollamaWebOff')}
         </p>
       )}
+      {view !== undefined && view.keyUsable === false && (
+        <p style={styles.status}>{t('ollamaKeyAddressMismatch')}</p>
+      )}
       {statusError !== undefined && (
         <p style={styles.error}>
           {t('ollamaModelsLoadFailed', { message: statusError })}
         </p>
       )}
-      {view !== undefined && configured === false && (
-        <p style={styles.status}>
-          {t('ollamaConfigureHint', { ref: view.effective.apiKeyRef })}
-        </p>
-      )}
+      <KeyCredentialField
+        // The identity carries the settings revision as well as the reference:
+        // a saved override can keep the same text and still change who owns the
+        // reference, and the field must re-read its own state.
+        key={`${view?.effective.apiKeyRef ?? 'pending'}:${revision}`}
+        rpc={rpc}
+        t={t}
+        route="ollama-cloud"
+        onChanged={() => {
+          // No revision bump here: this is the field's own mutation, and
+          // remounting it would discard the validation outcome it is about to
+          // report. The connection manager's save still bumps it.
+          void refreshStatus()
+        }}
+      />
       {configured === true && (
         <div style={styles.account}>
           <div style={styles.accountHeader}>
@@ -170,31 +183,15 @@ export function OllamaCard({
             {usage?.windows?.length === 0 && (
               <p style={styles.status}>{t('usageEmpty')}</p>
             )}
-            {usage?.windows?.map((window, index) => {
-              const label = externalUsageWindowLabel(t, window)
-              return (
-                <div key={index} style={styles.usageRow}>
-                  <div style={styles.usageMeta}>
-                    <span>{label}</span>
-                    <span>
-                      {quotaText(window.usedPercent, quotaMode, t)}
-                      {window.resetsAt === undefined
-                        ? ''
-                        : ` · ${t('usageResets', { date: new Date(window.resetsAt).toLocaleString() })}`}
-                      {window.resetsAt !== undefined &&
-                        window.resetsAt <= quotaNow &&
-                        ` · ${t('quotaExpiredWindow')}`}
-                    </span>
-                  </div>
-                  <UsageMeter
-                    window={window}
-                    t={t}
-                    observedAt={observedAt}
-                    stale={usageStale}
-                  />
-                </div>
-              )
-            })}
+            {usage?.windows?.map((window, index) => (
+              <UsageWindowRow
+                key={index}
+                window={window}
+                t={t}
+                observedAt={observedAt}
+                stale={usageStale}
+              />
+            ))}
           </div>
         </div>
       )}
@@ -228,6 +225,7 @@ export function OllamaCard({
           t={t}
           onClose={() => setManage(false)}
           onSaved={() => {
+            setRevision((value) => value + 1)
             void refreshStatus()
           }}
         />

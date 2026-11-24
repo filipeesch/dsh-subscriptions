@@ -171,7 +171,10 @@ function card(t, { enabled, fetchedAt, locale }) {
     t('cursorStatus', { count: 27 }) +
     '</p>' +
     '<p class="dsh-subscription-hint">' +
-    t('cursorKeyRef', { ref: 'CURSOR_API_KEY' }) +
+    t('credentialStoredMasked', {
+      ref: 'CURSOR_API_KEY',
+      masked: 'sk-…f4c2',
+    }) +
     '</p>' +
     line +
     '<div><button type="button" style="font-weight:600">' +

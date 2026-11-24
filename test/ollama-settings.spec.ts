@@ -197,9 +197,19 @@ test('validateOllamaSettings rejects unusable documents', () => {
     () => validateOllamaSettings({ baseURL: 'https://ollama.com/api#x' }),
     /query or fragment/,
   )
+  // The reference is a name, not a place to paste a secret: anything outside the
+  // identifier grammar is refused, and the refusal never repeats the value.
   assert.throws(
     () => validateOllamaSettings({ apiKeyRef: 'A B' }),
-    /whitespace/,
+    /reference name/,
+  )
+  assert.throws(
+    () => validateOllamaSettings({ apiKeyRef: 'sk-pasted-secret-0123456789' }),
+    (error: Error) => {
+      assert.match(error.message, /reference name/)
+      assert.doesNotMatch(error.message, /sk-pasted-secret/)
+      return true
+    },
   )
   assert.throws(() => validateOllamaSettings({ apiKeyRef: '' }), /apiKeyRef/)
   // A valid document round-trips with only its known keys.

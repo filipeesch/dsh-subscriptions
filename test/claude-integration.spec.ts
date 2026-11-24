@@ -51,8 +51,11 @@ interface VirtualLogin {
  * simulated browser approval (manual 302 follow), real loopback callback,
  * real code exchange.
  */
-async function virtualLogin(t: TestContext): Promise<VirtualLogin> {
-  const fake = installFakeClaude(t)
+async function virtualLogin(
+  t: TestContext,
+  options: Parameters<typeof installFakeClaude>[1] = {},
+): Promise<VirtualLogin> {
+  const fake = installFakeClaude(t, options)
   const flows = new OAuthFlowManager()
   const attempt = await flows.start('claude', claudeFlow)
   assert.ok(
@@ -256,4 +259,44 @@ test('claude: a model run streams text through the real adapter', async (t) => {
   const body = JSON.parse(apiCall.bodyText) as Record<string, unknown>
   assert.equal(body.model, 'claude-opus-4-6')
   assert.equal(body.stream, true)
+})
+test('claude: the enterprise budget shape reads through the virtual provider', async (t) => {
+  // A seat metered by a dollar ceiling reports no plan bucket at all; the same
+  // fixture answers that shape so the reader runs end to end, not only against
+  // a hand-built payload.
+  const { session } = await virtualLogin(t, {
+    usage: () => ({
+      five_hour: null,
+      seven_day: null,
+      seven_day_oauth_apps: null,
+      limits: [],
+      extra_usage: {
+        is_enabled: true,
+        monthly_limit: 60000,
+        used_credits: 60021,
+        utilization: 100,
+        currency: 'USD',
+        decimal_places: 2,
+      },
+      spend: {
+        used: { amount_minor: 60021, currency: 'USD', exponent: 2 },
+        limit: { amount_minor: 60000, currency: 'USD', exponent: 2 },
+        percent: 100,
+        enabled: true,
+      },
+    }),
+  })
+  const reading = await fetchClaudeUsage(
+    session,
+    undefined,
+    undefined,
+    cliVersion,
+  )
+  assert.deepEqual(
+    reading.windows?.map((window) => [window.kind, window.scope]),
+    [['other', 'Extra usage']],
+  )
+  assert.equal(reading.windows?.[0]?.usedAmount, 60021)
+  assert.equal(reading.windows?.[0]?.currency, 'USD')
+  assert.equal(reading.planWindowsAbsent, true)
 })

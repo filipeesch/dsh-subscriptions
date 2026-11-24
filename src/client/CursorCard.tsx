@@ -5,15 +5,10 @@ import type {
   SubscriptionsSectionInjected,
 } from './SubscriptionsSection.js'
 import { callSubscriptionsAuth } from './subscriptions-rpc.js'
-import { externalUsageWindowLabel } from './ExternalUsageCards.js'
 import { subscriptionCardStyles as styles } from './subscription-card-styles.js'
-import {
-  USAGE_BADGE_REFRESH_EVENT,
-  useQuotaDisplayMode,
-} from './usage-badge-preferences.js'
-import { UsageMeter } from './UsageMeter.js'
-import { quotaText, useQuotaClock } from './quota-display.js'
-import { formatMoney } from './money-format.js'
+import { USAGE_BADGE_REFRESH_EVENT } from './usage-badge-preferences.js'
+import { UsageWindowRow } from './UsageWindowRow.js'
+import { KeyCredentialField } from './KeyCredentialField.js'
 import { CursorModelsManager } from './CursorModelsManager.js'
 import { CursorSourceLine } from './CursorCapacitySource.js'
 
@@ -47,8 +42,6 @@ export function CursorCard({
   rpc: ConnectionHandle['rpc']
   t: Translate
 }) {
-  const quotaMode = useQuotaDisplayMode()
-  const quotaNow = useQuotaClock()
   const [view, setView] = useState<CursorSettingsView>()
   const [configured, setConfigured] = useState<boolean>()
   const [usage, setUsage] = useState<ProviderUsage>()
@@ -160,9 +153,18 @@ export function CursorCard({
             ? t('cursorStatus', { count: view.models })
             : t('cursorStatusNone')}
       </p>
-      {view !== undefined && (
-        <p style={styles.status}>{t('cursorKeyRef', { ref: view.keyRef })}</p>
-      )}
+      <KeyCredentialField
+        // The route's effective reference identifies this field: when a save
+        // renames it, React remounts rather than letting the field state one
+        // reference while editing another.
+        key={view?.keyRef ?? 'pending'}
+        rpc={rpc}
+        t={t}
+        route="cursor"
+        onChanged={() => {
+          void refreshStatus()
+        }}
+      />
       {view !== undefined && (
         <CursorSourceLine
           t={t}
@@ -174,9 +176,6 @@ export function CursorCard({
       )}
       {statusError !== undefined && (
         <p style={styles.error}>{t('usageError', { message: statusError })}</p>
-      )}
-      {configured === false && (
-        <p style={styles.status}>{t('cursorConfigure')}</p>
       )}
       {configured === true && (
         <div style={styles.usage}>
@@ -212,40 +211,15 @@ export function CursorCard({
           {usage?.windows?.length === 0 && (
             <p style={styles.status}>{t('usageEmpty')}</p>
           )}
-          {usage?.windows?.map((quota, index) => {
-            const label = externalUsageWindowLabel(t, quota)
-            const money =
-              quota.usedAmount !== undefined && quota.currency !== undefined
-                ? `${formatMoney(quota.usedAmount, quota.currency)}${
-                    quota.limitAmount === undefined
-                      ? ''
-                      : ` / ${formatMoney(quota.limitAmount, quota.currency)}`
-                  }`
-                : quotaText(quota.usedPercent, quotaMode, t)
-            return (
-              <div key={index} style={styles.usageRow}>
-                <div style={styles.usageMeta}>
-                  <span>{label}</span>
-                  <span>
-                    {money}
-                    {quota.resetsAt === undefined
-                      ? ''
-                      : ` · ${t('usageResets', { date: new Date(quota.resetsAt).toLocaleString() })}`}
-                    {quota.resetsAt !== undefined &&
-                      quota.resetsAt <= quotaNow &&
-                      ` · ${t('quotaExpiredWindow')}`}
-                    {usageStale && ` · ${t('usageMeterStale')}`}
-                  </span>
-                </div>
-                <UsageMeter
-                  window={quota}
-                  t={t}
-                  observedAt={observedAt}
-                  stale={usageStale}
-                />
-              </div>
-            )
-          })}
+          {usage?.windows?.map((quota, index) => (
+            <UsageWindowRow
+              key={index}
+              window={quota}
+              t={t}
+              observedAt={observedAt}
+              stale={usageStale}
+            />
+          ))}
         </div>
       )}
       {view !== undefined && (

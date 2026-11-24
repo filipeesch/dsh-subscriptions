@@ -23,6 +23,7 @@
 import type { ProviderUsage, UsageWindow } from '../common.js'
 import { parseProviderJson, readBoundedJson } from '../common.js'
 import type { FetchFn } from '../common.js'
+import { hasControlCharacters } from '../credential-text.js'
 
 /** Where Cursor's dashboard RPCs live. */
 export const DEFAULT_CURSOR_ENDPOINT = 'https://api2.cursor.sh'
@@ -130,6 +131,14 @@ export async function fetchCursorUsage(
   const accessToken = exchange?.accessToken
   if (typeof accessToken !== 'string' || accessToken.length === 0) {
     throw new Error('Cursor did not return an access token for this API key')
+  }
+  // The exchanged token rides a second header. A transport error that quotes it
+  // would carry a credential, so a token that cannot be a header value is
+  // refused before the request is built.
+  if (hasControlCharacters(accessToken)) {
+    throw new Error(
+      'the Cursor usage token cannot be sent: it carries control characters',
+    )
   }
 
   const periodResponse = await http(

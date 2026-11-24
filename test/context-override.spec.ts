@@ -76,8 +76,10 @@ function ollama(
   fetchFn?: FetchFn,
 ): OllamaAdapter {
   return new OllamaAdapter({
-    apiKey: async () => 'k',
-    baseURL: () => DEFAULT_OLLAMA_BASE_URL,
+    connection: async () => ({
+      apiKey: 'k',
+      baseURL: DEFAULT_OLLAMA_BASE_URL,
+    }),
     catalog: () => catalog,
     discovery: fetchFn !== undefined,
     ...(fetchFn === undefined ? {} : { fetchFn }),

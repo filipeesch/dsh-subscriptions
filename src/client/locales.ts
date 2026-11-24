@@ -103,6 +103,9 @@ export const en = {
   usageWeekly: 'Weekly',
   usageMonthly: 'Monthly',
   usageWindow: 'Window',
+  usageCurrencyUnknown: 'currency not reported',
+  usagePlanWindowsAbsent:
+    "This account didn't report session or weekly limits; the spend budget is shown instead.",
   usageResets: 'resets {date}',
   usagePercentUsed: 'Used {value}%',
   usagePercentRemaining: 'Remaining {value}%',
@@ -248,8 +251,42 @@ export const en = {
   cursorTitle: 'Cursor',
   cursorStatus: '{count} model(s) in the picker',
   cursorStatusNone: 'No models loaded',
-  cursorConfigure: 'Add a CURSOR_API_KEY credential to use Cursor models.',
-  cursorKeyRef: 'Credential: {ref}',
+  credentialLabel: 'API key',
+  credentialPlaceholder: 'Paste the API key',
+  credentialSave: 'Save key',
+  credentialReplace: 'Replace key',
+  credentialRemove: 'Remove stored key',
+  credentialMissing: 'No key found at {ref}.',
+  credentialStored: 'Stored in DSH at {ref}.',
+  credentialStoredMasked: 'Stored in DSH at {ref}: {masked}',
+  credentialFromEnv: 'Found in the environment at {ref}.',
+  credentialFromEnvFile: 'Found in {source} for {ref}.',
+  credentialConfigured: 'Configured at {ref}.',
+  credentialSaveFailed: 'Could not save the key: {message}',
+  credentialValidationFailed:
+    'The key is saved, but the route could not use it.',
+  credentialRemoveFailed: 'Could not remove the key: {message}',
+  credentialLookupFailed: 'Could not read the credential: {message}',
+  credentialNotWritable: 'This host cannot write the key.',
+  credentialOverride: 'Save a DSH override',
+  credentialSavedUnread: 'The key was saved, but its state could not be read.',
+  credentialRemovedUnread:
+    'The key was removed, but its state could not be read.',
+  credentialSuperseded:
+    'Another change replaced or removed this key while it was being checked, so this result belongs to that change.',
+  credentialGone:
+    'The key is no longer stored: another change removed it after the save.',
+  credentialNotCommitted:
+    'The host did not confirm the write, so the key is not stored.',
+  credentialNotRemoved:
+    'The host did not confirm the removal, so the key may still be stored.',
+  credentialSaving: 'Saving the key…',
+  credentialValidating: 'Saved. Checking the key with the route…',
+  credentialSaved: 'Key saved.',
+  credentialRemoveHint:
+    'Removing the DSH copy lets an environment value supply the route again, if one is set.',
+  credentialSourceProjectEnv: 'the project .env file',
+  credentialSourceUserEnv: 'the user .env file',
   cursorCeilingLabel: 'Fallback monthly ceiling (US$)',
   cursorCeilingUnused: 'Not applied: Cursor reports a limit',
   cursorCeilingHint:
@@ -338,9 +375,6 @@ export const en = {
     'No models configured. Fetch the cloud list and tick the ones to keep.',
   ollamaModelsLoadFailed: 'Could not load Ollama settings: {message}',
   ollamaModelsSaveFailed: 'Could not save Ollama settings: {message}',
-  ollamaConfigureHint:
-    'No API key found at {ref}. Add it to the credentials file ' +
-    '(~/.dsh/.credentials.yaml).',
   ollamaDisplayName: 'Display name',
   ollamaRowDetails: 'Details',
   ollamaEffortsUnknown:
@@ -365,6 +399,8 @@ export const en = {
     'defaults apply again.',
   ollamaCapVision: 'vision',
   ollamaCapThinking: 'thinking',
+  ollamaKeyAddressMismatch:
+    'The saved address is not the configured one, so DSH sends the stored key only to the configured address. A check of that key proves it there, not at the saved address; to use the route at the saved address, set that address in configuration.',
   ollamaContext: 'context {tokens}',
 } satisfies Record<string, string>
 
@@ -469,6 +505,8 @@ export const zh = {
   usageWeekly: '每周',
   usageMonthly: '每月',
   usageWindow: '窗口',
+  usageCurrencyUnknown: '未报告货币',
+  usagePlanWindowsAbsent: '此账户未报告会话或每周限额，改为显示消费预算。',
   usageResets: '{date} 重置',
   usagePercentUsed: '已用 {value}%',
   usagePercentRemaining: '剩余 {value}%',
@@ -604,8 +642,37 @@ export const zh = {
   cursorTitle: 'Cursor',
   cursorStatus: '选择器中 {count} 个模型',
   cursorStatusNone: '尚未加载模型',
-  cursorConfigure: '添加 CURSOR_API_KEY 凭据后即可使用 Cursor 模型。',
-  cursorKeyRef: '凭据：{ref}',
+  credentialLabel: 'API 密钥',
+  credentialPlaceholder: '粘贴 API 密钥',
+  credentialSave: '保存密钥',
+  credentialReplace: '替换密钥',
+  credentialRemove: '删除已保存密钥',
+  credentialMissing: '在 {ref} 未找到密钥。',
+  credentialStored: '已保存在 DSH：{ref}。',
+  credentialStoredMasked: '已保存在 DSH：{ref}（{masked}）',
+  credentialFromEnv: '来自环境变量 {ref}。',
+  credentialFromEnvFile: '来自 {source} 中的 {ref}。',
+  credentialConfigured: '已配置：{ref}。',
+  credentialSaveFailed: '无法保存密钥：{message}',
+  credentialValidationFailed: '密钥已保存，但路由无法使用它。',
+  credentialRemoveFailed: '无法删除密钥：{message}',
+  credentialLookupFailed: '无法读取凭据：{message}',
+  credentialNotWritable: '此主机无法写入密钥。',
+  credentialOverride: '保存 DSH 覆盖值',
+  credentialSavedUnread: '密钥已保存，但无法读取其状态。',
+  credentialRemovedUnread: '密钥已删除，但无法读取其状态。',
+  credentialSuperseded:
+    '检查期间另一处更改已替换或删除此密钥，因此该结果属于那次更改。',
+  credentialGone: '密钥已不在存储中：保存后另一处更改将其删除。',
+  credentialNotCommitted: '主机未确认写入，密钥未保存。',
+  credentialNotRemoved: '主机未确认删除，密钥可能仍在存储中。',
+  credentialSaving: '正在保存密钥…',
+  credentialValidating: '已保存。正在用路由验证密钥…',
+  credentialSaved: '密钥已保存。',
+  credentialRemoveHint:
+    '删除 DSH 中的副本后，如果设置了环境变量，它会重新为该路由提供密钥。',
+  credentialSourceProjectEnv: '项目 .env 文件',
+  credentialSourceUserEnv: '用户 .env 文件',
   cursorCeilingLabel: '备用每月上限（美元）',
   cursorCeilingUnused: '未生效：Cursor 已报告额度上限',
   cursorCeilingHint:
@@ -680,8 +747,6 @@ export const zh = {
   ollamaModelsEmpty: '尚未配置模型。请拉取云端列表并勾选需要保留的模型。',
   ollamaModelsLoadFailed: 'Ollama 设置加载失败：{message}',
   ollamaModelsSaveFailed: 'Ollama 设置保存失败：{message}',
-  ollamaConfigureHint:
-    '未在 {ref} 找到 API 密钥。请在凭据文件（~/.dsh/.credentials.yaml）中添加。',
   ollamaDisplayName: '显示名',
   ollamaRowDetails: '详情',
   ollamaEffortsUnknown: '该模型支持思考，推理档位将由实时发现补充。',
@@ -701,6 +766,8 @@ export const zh = {
     '清除全部已保存的 Ollama 覆盖项？将重新使用配置档案值与内置默认值。',
   ollamaCapVision: '视觉',
   ollamaCapThinking: '思考',
+  ollamaKeyAddressMismatch:
+    '保存的地址与配置的地址不同，因此 DSH 只会把已存储的密钥发送到配置的地址。对该密钥的检查只能证明它在配置地址可用，而不是在保存的地址；若要在保存的地址使用该路由，请在配置中设置该地址。',
   ollamaContext: '上下文 {tokens}',
 } satisfies Record<keyof typeof en, string>
 

@@ -1,3 +1,45 @@
+## v0.7.0 — 2026-11-24
+
+- **The key routes own their API key in the card.** The Cursor and Ollama Cloud
+  cards state whether a key already comes from the DSH store, the environment, a
+  project or user `.env`, or nowhere; show the host's masked preview when it
+  reports one; and save, replace, or remove the value in place. A saved key is
+  validated by the route's own read — catalog discovery for Cursor, model
+  listing for Ollama Cloud — and a rejected key stays saved, with the rejection
+  stated on the card, so a typo is corrected there instead of being discarded.
+  Removal clears only DSH's copy and says when an environment variable still
+  supplies the reference. Only a reference fixed by operator configuration can
+  be managed here: a route whose reference the browser can rename is refused, a
+  pasted secret cannot be stored as a reference, no refusal repeats a name or a
+  value, and a committed write is reported as committed even when its state
+  cannot be read back. A saved key is validated by a read that cannot join the
+  previous key's fetch, and a host that reports no masked preview states the
+  origin alone. A configured name that is not a reference is never printed back,
+  and the Cursor catalog read states a fixed sentence instead of provider text.
+  A saved Ollama address stops the stored key from being spent anywhere — chat,
+  discovery, the listing, usage, or web — and the card says the key is idle
+  there; a post-save check names the credential generation it validated, so a
+  key another change replaced is reported as superseded rather than as a pass.
+- **Claude reports the dollar budget an enterprise seat states.** The reader
+  maps the spend block, falling back to the flat extra-usage block, into one
+  money window placed after the plan windows, normalized by the amount exponent
+  and currency the endpoint declares and with the share the endpoint computed. A
+  seat that reports no plan window says so on the card instead of reading as "no
+  usage reported"; an account that reports both a subscription and overage shows
+  both.
+- **The weekly OAuth-apps lane is read.** A plan that publishes the OAuth-apps
+  weekly bucket now gets that window, labelled as its own lane, so the card
+  lists the same lanes the provider's own usage screen does.
+- **Every card states the amounts a window carries.** One shared row and label
+  serve the Claude, Codex, Cursor, Ollama Cloud, and key-only cards: a money
+  window reads as spent against the ceiling in its currency, a window that
+  carries spend with no ceiling says its share is unknown, and a provider-named
+  lane is no longer prefixed with a generic kind.
+- **Internal:** the RPC dispatch split into per-domain handlers behind one
+  endpoint table, `registerAuthRpc` takes an options object, each key route owns
+  its default credential reference, and the external usage controller resolves
+  its reader from a table instead of a source switch.
+
 ## v0.6.1 — 2026-11-24
 
 - **A Cursor turn recovers from a failure that produced nothing.** When an

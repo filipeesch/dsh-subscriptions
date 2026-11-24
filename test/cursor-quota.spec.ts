@@ -268,3 +268,47 @@ test('the limit origin travels with the window', async () => {
   assert.equal(b.windows?.[0]?.limitAmount, 250_000)
   assert.equal(b.windows?.[0]?.remainingAmount, 249_000)
 })
+
+test('an exchanged token that cannot ride a header is refused before the second request', async () => {
+  // The token comes from the provider, not from the card, and it rides its own
+  // header: a transport error quoting that header would carry it. The marker must
+  // not reach the message and no request may be attempted with it.
+  const marker = 'sk-token-marker'
+  const { fetch, calls } = fakeFetch([exchange(`${marker}\r\nX-Injected: 1`)])
+  await assert.rejects(
+    () => fetchCursorUsage('api-key', { http: fetch }),
+    (error: Error) => {
+      assert.match(error.message, /control characters/)
+      assert.doesNotMatch(error.message, new RegExp(marker))
+      return true
+    },
+  )
+  assert.equal(calls.length, 1, 'only the exchange was requested')
+  assert.ok(!calls[0]?.headers.authorization?.includes(marker))
+})
+
+test('a transport failure is reported without the request it carried', async () => {
+  // Node's invalid-header error quotes the value it rejected. The controller's
+  // transport guard replaces that failure with a fixed sentence, so the value
+  // cannot reach the reply; the fetch stub here throws the way undici does.
+  const marker = 'sk-header-value-marker'
+  const http = (async () => {
+    throw new TypeError(
+      `Headers.append: "${marker}" is an invalid header value`,
+    )
+  }) as unknown as typeof fetch
+  const { ExternalUsageController } =
+    await import('../src/providers/external-usage-controller.js')
+  const controller = new ExternalUsageController(
+    async () => ({ value: 'api-key', source: 'file' }),
+    http,
+  )
+  await assert.rejects(
+    () => controller.usage('opencode-go'),
+    (error: Error) => {
+      assert.match(error.message, /usage endpoint could not be reached/)
+      assert.doesNotMatch(error.message, new RegExp(marker))
+      return true
+    },
+  )
+})

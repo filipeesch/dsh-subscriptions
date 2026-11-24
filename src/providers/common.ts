@@ -721,6 +721,12 @@ export interface ProviderUsage {
   windows?: UsageWindow[]
   /** Plan name the usage endpoint reported, when present. */
   plan?: string
+  /**
+   * The provider reported no plan window — no session and no weekly bucket —
+   * while still reporting a budget. Displays state it instead of presenting the
+   * budget as the whole reading.
+   */
+  planWindowsAbsent?: boolean
   /** Banked Codex resets or Claude grants, when the provider discloses them. */
   resetCredits?: ResetCredit[]
   /** Optional reset lookup failure; ordinary usage remains usable. */

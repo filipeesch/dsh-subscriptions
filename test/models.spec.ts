@@ -2791,3 +2791,42 @@ test('oauthEndpointError reads the code from both the RFC 6749 and the OpenAI en
     'codex token endpoint error (HTTP 502): [provider response body omitted]',
   )
 })
+test('invalidate drops the in-flight fetch so the next forced read uses the new key', async () => {
+  // The credential card invalidates after a save. A forced read that joined the
+  // old fetch would be validating the previous key, so the cache must both stop
+  // the old result from landing and start the next read fresh.
+  const cache = new ModelCatalogCache<{ id: string }>(undefined, 0)
+  let release: ((models: { id: string }[]) => void) | undefined
+  const stale = new Promise<{ id: string }[]>((resolve) => {
+    release = resolve
+  })
+  let started: (() => void) | undefined
+  const began = new Promise<void>((resolve) => {
+    started = resolve
+  })
+  const reads: string[] = []
+  const first = cache.force(async () => {
+    reads.push('old-key')
+    started?.()
+    return await stale
+  })
+  // The old read must be in flight, as it is when a save invalidates the cache.
+  await began
+  cache.invalidate()
+  const second = await cache.force(async () => {
+    reads.push('new-key')
+    return [{ id: 'new-key-model' }]
+  })
+  release?.([{ id: 'old-key-model' }])
+  await first.catch(() => undefined)
+  assert.deepEqual(reads, ['old-key', 'new-key'])
+  assert.deepEqual(
+    second.map((model) => model.id),
+    ['new-key-model'],
+  )
+  // The late result never replaced the new one.
+  assert.deepEqual(
+    cache.lastKnown()?.map((model) => model.id),
+    ['new-key-model'],
+  )
+})

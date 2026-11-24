@@ -1,3 +1,4 @@
+import { isCredentialRefName } from '@deepseek-ai/dsh-credentials'
 import { readFileSync } from 'node:fs'
 import { mkdir, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
@@ -102,10 +103,43 @@ export function validateOllamaBaseURL(value: unknown): string {
   return raw.trim()
 }
 
-/** Credential references are looked up by name, so whitespace is always a typo. */
+/**
+ * Whether two already-valid base URLs address the same destination.
+ *
+ * Used to decide when the host may spend a stored credential on a listing: a
+ * different host, port, or path is a different destination, whichever card
+ * setting produced it.
+ * @param left - one validated base URL.
+ * @param right - the other validated base URL.
+ * @returns true when both normalize to the same origin and path.
+ */
+export function sameOllamaDestination(left: string, right: string): boolean {
+  const normalize = (value: string): string | undefined => {
+    try {
+      const url = new URL(value)
+      return `${url.origin}${url.pathname.replace(/\/+$/, '')}`
+    } catch {
+      return undefined
+    }
+  }
+  const a = normalize(left)
+  const b = normalize(right)
+  return a !== undefined && a === b
+}
+
+/**
+ * Credential references are looked up by name, so the name is a POSIX
+ * identifier and nothing else. The grammar check is what keeps a pasted secret
+ * out of this field: a value that does not name a reference cannot be stored,
+ * so it can never be shown back, logged, or used to address another credential.
+ */
 function readApiKeyRef(value: unknown): string {
   const raw = readNonEmptyString(value, 'apiKeyRef')
-  if (/\s/.test(raw)) fail('apiKeyRef must not contain whitespace')
+  if (!isCredentialRefName(raw)) {
+    fail(
+      'apiKeyRef must be a credential reference name, such as OLLAMA_API_KEY',
+    )
+  }
   return raw
 }
 

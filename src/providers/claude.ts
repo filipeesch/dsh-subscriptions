@@ -566,11 +566,256 @@ function claudeLimitsWindows(value: unknown): UsageWindow[] {
   return windows
 }
 
+/** A finite number the endpoint reported, or undefined. */
+function claudeNumber(value: unknown): number | undefined {
+  const parsed =
+    typeof value === 'string' && value.trim() !== '' ? Number(value) : value
+  return typeof parsed === 'number' && Number.isFinite(parsed)
+    ? parsed
+    : undefined
+}
+
+/** A JSON object the payload carried, or undefined for any other value. */
+function claudeRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined
+}
+
+/** Largest scale the endpoint may declare for a minor-unit amount. */
+const CLAUDE_MAX_MONEY_EXPONENT = 6
+
+/** One amount the endpoint reported, in the shared window's minor unit. */
+interface ClaudeMoneyAmount {
+  cents: number
+  currency?: string
+}
+
+/**
+ * One amount as the mapper needs it: not stated, stated and unusable, or usable.
+ *
+ * The distinction is load-bearing. An absent ceiling is a spend-only reading and
+ * belongs on the card; an unusable ceiling must not silently become one, because
+ * that presents a drifted payload as a valid shape.
+ */
+type ClaudeAmount =
+  | { kind: 'absent' }
+  | { kind: 'invalid' }
+  | { kind: 'amount'; amount: ClaudeMoneyAmount }
+
+const CLAUDE_ABSENT: ClaudeAmount = { kind: 'absent' }
+
+/** A reported share, clamped into the seam's 0–100 contract. */
+function claudeShare(value: unknown): number | undefined {
+  const percent = claudeNumber(value)
+  if (percent === undefined) return undefined
+  return Math.min(100, Math.max(0, percent))
+}
+
+/** Normalize one minor-unit value to the shared window's two decimals. */
+function claudeCents(minor: number, exponent: number): number | undefined {
+  const cents = minor * 10 ** (2 - exponent)
+  return Number.isFinite(cents) ? Math.round(cents) : undefined
+}
+
+/** Read a structured amount at the scale the endpoint declared. */
+function claudeAmount(value: unknown, fallbackExponent = 2): ClaudeAmount {
+  if (value === undefined || value === null) return CLAUDE_ABSENT
+  const amount = claudeRecord(value)
+  if (amount === undefined) return { kind: 'invalid' }
+  const minor = claudeNumber(amount.amount_minor)
+  if (minor === undefined || minor < 0) return { kind: 'invalid' }
+  let exponent = fallbackExponent
+  if (amount.exponent !== undefined && amount.exponent !== null) {
+    const declared = claudeNumber(amount.exponent)
+    if (
+      declared === undefined ||
+      !Number.isSafeInteger(declared) ||
+      declared < 0 ||
+      declared > CLAUDE_MAX_MONEY_EXPONENT
+    )
+      return { kind: 'invalid' }
+    exponent = declared
+  }
+  const cents = claudeCents(minor, exponent)
+  if (cents === undefined) return { kind: 'invalid' }
+  const currency =
+    typeof amount.currency === 'string' && /^[A-Za-z]{3}$/.test(amount.currency)
+      ? amount.currency.toUpperCase()
+      : undefined
+  return {
+    kind: 'amount',
+    amount: { cents, ...(currency === undefined ? {} : { currency }) },
+  }
+}
+
+/** Read a flat amount, where both numbers share the block's declared scale. */
+function claudeFlatAmount(value: unknown, exponent: number): ClaudeAmount {
+  if (value === undefined || value === null) return CLAUDE_ABSENT
+  const minor = claudeNumber(value)
+  if (minor === undefined || minor < 0) return { kind: 'invalid' }
+  const cents = claudeCents(minor, exponent)
+  return cents === undefined
+    ? { kind: 'invalid' }
+    : { kind: 'amount', amount: { cents } }
+}
+
+/**
+ * Build the one money window a budget describes.
+ *
+ * The share comes from the percentage the endpoint reported and, when it reports
+ * none, from the amounts. The remaining amount is the one the endpoint reported,
+ * or the ceiling minus the spend when both are known — never invented, and never
+ * negative. A ceiling stated in another currency is dropped instead of being
+ * divided by an amount it cannot be compared with.
+ */
+function claudeMoneyWindow(input: {
+  used: ClaudeMoneyAmount
+  limit?: ClaudeMoneyAmount
+  percent?: number
+  remaining?: ClaudeMoneyAmount
+}): UsageWindow {
+  const mixedCurrency =
+    input.limit?.currency !== undefined &&
+    input.used.currency !== undefined &&
+    input.limit.currency !== input.used.currency
+  const limit = mixedCurrency ? undefined : input.limit
+  const percent =
+    input.percent ??
+    (limit !== undefined && limit.cents > 0
+      ? Math.min(100, (input.used.cents / limit.cents) * 100)
+      : undefined)
+  const remaining =
+    input.remaining?.cents ??
+    (limit === undefined
+      ? undefined
+      : Math.max(0, limit.cents - input.used.cents))
+  const currency = input.used.currency ?? limit?.currency
+  return {
+    kind: 'other',
+    scope: 'Extra usage',
+    ...(percent === undefined ? {} : { usedPercent: percent }),
+    usedAmount: input.used.cents,
+    ...(limit === undefined
+      ? {}
+      : { limitAmount: limit.cents, limitSource: 'provider' as const }),
+    ...(remaining === undefined || remaining < 0
+      ? {}
+      : { remainingAmount: remaining }),
+    ...(currency === undefined ? {} : { currency }),
+  }
+}
+
+/**
+ * The dollar budget an enterprise seat reports, as one money window.
+ *
+ * The spend block is authoritative when it is present: a disabled budget is
+ * disabled, and an amount it states but cannot support drops the window rather
+ * than resurrecting the older flat shape or inventing a ceiling. Only a block
+ * that omits the spend entirely lets the flat extra-usage block answer for it.
+ * That block states both numbers at one declared scale, and a ceiling it
+ * explicitly reports as zero stays zero.
+ */
+function claudeBudgetWindow(
+  payload: Record<string, unknown>,
+): UsageWindow | undefined {
+  const spendValue = payload.spend
+  if (spendValue !== undefined && spendValue !== null) {
+    const spend = claudeRecord(spendValue)
+    // A block that is present but not an object is a drifted payload, not an
+    // older shape: the flat block must not answer for it.
+    if (spend === undefined) return undefined
+    if (spend.enabled === false) return undefined
+    const used = claudeAmount(spend.used)
+    if (used.kind === 'invalid') return undefined
+    if (used.kind === 'amount') {
+      const cap = claudeRecord(spend.cap)
+      let ceiling = claudeAmount(spend.limit)
+      if (ceiling.kind === 'absent') {
+        const credits = claudeAmount(cap?.credits)
+        const money = claudeAmount(cap?.money)
+        ceiling = credits.kind === 'absent' ? money : credits
+      }
+      if (ceiling.kind === 'invalid') return undefined
+      const balance = claudeAmount(spend.balance)
+      // A balance is a convenience, not the budget: an unusable one, or one in
+      // another currency, is ignored and the remaining amount is derived.
+      const usableBalance =
+        balance.kind === 'amount' &&
+        (balance.amount.currency === undefined ||
+          used.amount.currency === undefined ||
+          balance.amount.currency === used.amount.currency)
+          ? balance
+          : undefined
+      const percent = claudeShare(spend.percent)
+      return claudeMoneyWindow({
+        used: used.amount,
+        ...(ceiling.kind === 'amount' ? { limit: ceiling.amount } : {}),
+        ...(percent === undefined ? {} : { percent }),
+        ...(usableBalance === undefined
+          ? {}
+          : { remaining: usableBalance.amount }),
+      })
+    }
+  }
+
+  const extraValue = payload.extra_usage
+  if (extraValue === undefined || extraValue === null) return undefined
+  const extra = claudeRecord(extraValue)
+  if (extra === undefined || extra.is_enabled !== true) return undefined
+  let exponent = 2
+  if (extra.decimal_places !== undefined && extra.decimal_places !== null) {
+    const declared = claudeNumber(extra.decimal_places)
+    if (
+      declared === undefined ||
+      !Number.isSafeInteger(declared) ||
+      declared < 0 ||
+      declared > CLAUDE_MAX_MONEY_EXPONENT
+    )
+      return undefined
+    exponent = declared
+  }
+  const used = claudeFlatAmount(extra.used_credits, exponent)
+  if (used.kind !== 'amount') return undefined
+  const ceiling = claudeFlatAmount(extra.monthly_limit, exponent)
+  if (ceiling.kind === 'invalid') return undefined
+  const currency =
+    typeof extra.currency === 'string' && /^[A-Za-z]{3}$/.test(extra.currency)
+      ? extra.currency.toUpperCase()
+      : undefined
+  const percent = claudeShare(extra.utilization)
+  const withCurrency = (amount: ClaudeMoneyAmount): ClaudeMoneyAmount =>
+    currency === undefined ? amount : { ...amount, currency }
+  return claudeMoneyWindow({
+    used: withCurrency(used.amount),
+    ...(ceiling.kind === 'amount'
+      ? { limit: withCurrency(ceiling.amount) }
+      : {}),
+    ...(percent === undefined ? {} : { percent }),
+  })
+}
+
+function claudePlanWindows(payload: Record<string, unknown>): UsageWindow[] {
+  const modern = claudeLimitsWindows(payload.limits)
+  if (modern.length > 0) return modern
+  const legacy = [
+    claudeLegacyWindow(payload.five_hour, 'session'),
+    claudeLegacyWindow(payload.seven_day, 'weekly'),
+    claudeLegacyWindow(payload.seven_day_oauth_apps, 'weekly', 'OAuth apps'),
+    claudeLegacyWindow(payload.seven_day_opus, 'weekly', 'Opus'),
+    claudeLegacyWindow(payload.seven_day_sonnet, 'weekly', 'Sonnet'),
+  ]
+  return legacy.filter((window): window is UsageWindow => window !== undefined)
+}
+
 /**
  * Fetch the claude subscription usage from the OAuth usage endpoint (the
  * source of Claude Code's `/usage` screen). Newer responses carry a
  * structured `limits` array; older ones the flat `five_hour`/`seven_day*`
- * buckets — both shapes are read, the array winning when it has entries.
+ * buckets — both shapes are read, the array winning when it has entries. The
+ * dollar budget an enterprise seat reports becomes one money window after the
+ * plan windows, and a payload that reports no plan window says so through
+ * `planWindowsAbsent` instead of reading as an empty snapshot.
  * Requests the optional cedar_ember banked-reset block with the existing CLI
  * identity. A 400/403 retries once without that parameter; ordinary windows
  * remain available and resetCreditsError records the optional lookup failure.
@@ -619,19 +864,25 @@ export async function fetchClaudeUsage(
     ...(resetCredits === undefined ? {} : { resetCredits }),
     ...(resetCreditsError === undefined ? {} : { resetCreditsError }),
   }
-  const modern = claudeLimitsWindows(payload.limits)
-  if (modern.length > 0) return { supported: true, windows: modern, ...resets }
-  const windows: UsageWindow[] = []
-  const legacy = [
-    claudeLegacyWindow(payload.five_hour, 'session'),
-    claudeLegacyWindow(payload.seven_day, 'weekly'),
-    claudeLegacyWindow(payload.seven_day_opus, 'weekly', 'Opus'),
-    claudeLegacyWindow(payload.seven_day_sonnet, 'weekly', 'Sonnet'),
-  ]
-  for (const window of legacy) {
-    if (window !== undefined) windows.push(window)
+  const planWindows = claudePlanWindows(payload)
+  const budget = claudeBudgetWindow(payload)
+  // The money window goes last: the footer bar states the reading's first
+  // window, so an account that reports both keeps its plan quota in front.
+  const windows = budget === undefined ? planWindows : [...planWindows, budget]
+  // An enterprise seat reports no plan bucket at all; the card says so instead
+  // of presenting a lane as the whole reading. An empty reading keeps its own
+  // state ("no usage reported"), so the flag rides a reading that has something.
+  const planWindowsAbsent =
+    windows.length > 0 &&
+    !planWindows.some(
+      (window) => window.kind === 'session' || window.kind === 'weekly',
+    )
+  return {
+    supported: true,
+    windows,
+    ...resets,
+    ...(planWindowsAbsent ? { planWindowsAbsent: true } : {}),
   }
-  return { supported: true, windows, ...resets }
 }
 
 interface ClaudeModelCapabilities {

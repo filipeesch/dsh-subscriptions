@@ -7,6 +7,14 @@
  */
 import assert from 'node:assert/strict'
 import React from 'react'
+
+/** Whether any dependency changed against the previous render's list. */
+function depsChanged(
+  deps: readonly unknown[],
+  previous: readonly unknown[],
+): boolean {
+  return deps.some((dep, index) => !Object.is(dep, previous[index]))
+}
 import type { ReactElement } from 'react'
 
 export type Node = ReactElement<Record<string, any>>
@@ -77,6 +85,29 @@ export class Component {
         return state.value
       },
       useEffect: effect,
+      // Dep-keyed memoization, as React does it: a component whose effect
+      // depends on a memoized callback must not re-run when nothing changed,
+      // and one that changes a dep must re-run. Returning the fresh function
+      // unconditionally would loop every effect that names its callback.
+      useCallback: (
+        fn: (...args: any[]) => unknown,
+        deps?: readonly unknown[],
+      ) => {
+        const state = slot()
+        if (!deps || !state.deps || depsChanged(deps, state.deps)) {
+          state.value = fn
+          state.deps = deps
+        }
+        return state.value
+      },
+      useMemo: (factory: () => unknown, deps?: readonly unknown[]) => {
+        const state = slot()
+        if (!deps || !state.deps || depsChanged(deps, state.deps)) {
+          state.value = factory()
+          state.deps = deps
+        }
+        return state.value
+      },
       useId: () => {
         const state = slot()
         return (state.value ??= `fixture-${this.cursor}`)

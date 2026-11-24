@@ -1560,6 +1560,16 @@ export function apply(ctx: Context, config: Config): void {
       return cursorPublished.refresh(models.map((model) => model.id))
     },
     cursorNotifyPicker: notifyCursorPicker,
+    // A key save invalidates the catalog the old credential produced, so the
+    // card's validation read cannot join a fetch started before the save.
+    cursorForgetCatalog: () => cursorAdapter?.forgetCatalog(),
+    cursorValidateKey: async (apiKey) => {
+      // No adapter means no Cursor route on this host: the validation cannot
+      // prove the key, so it fails rather than reporting a success nobody made.
+      if (cursorAdapter === undefined)
+        throw new Error('the Cursor route is not mounted')
+      await cursorAdapter.validateKey(apiKey)
+    },
     // Opening the card must not reach the SDK; only its Refresh asks for a
     // live discovery, and the picker keeps the cache current meanwhile.
     // The count is the enabled models, which is what the picker lists.

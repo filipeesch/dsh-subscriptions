@@ -446,8 +446,113 @@ test('a detached failure does not mark its replacement stale', async () => {
   const fresh = await controller.usage('cursor')
   assert.equal(fresh.windows?.[0]?.usedAmount, 2_000)
   rejectFirst(new Error('boom'))
-  await assert.rejects(old, /boom/)
+  // The transport failure is reported as a fixed sentence; what this case pins
+  // is that the detached failure does not mark the replacement stale.
+  await assert.rejects(old, /usage endpoint could not be reached/)
   const later = await controller.usage('cursor')
   assert.notEqual(later.stale, true)
   assert.equal(later.observedAt, fresh.observedAt)
+})
+test('a reader supplied at construction serves its source without a branch in the class', async () => {
+  // The controller's source switch became a table: a new source is an entry,
+  // and a test that supplies one must not need an edit to the class.
+  const seen: string[] = []
+  const controller = new ExternalUsageController(
+    async () => ({ value: 'go-secret' }),
+    (async () => {
+      throw new Error('the injected reader must answer; no request is expected')
+    }) as typeof fetch,
+    {},
+    'https://ollama.test',
+    {},
+    {
+      'opencode-go': async ({ apiKey }) => {
+        seen.push(apiKey)
+        return {
+          supported: true,
+          windows: [{ kind: 'session', usedPercent: 7 }],
+        }
+      },
+    },
+  )
+  const usage = await controller.usage('opencode-go')
+  assert.deepEqual(seen, ['go-secret'])
+  assert.equal(usage.windows?.[0]?.usedPercent, 7)
+})
+test('the destination gate is per source, not per reference name', async () => {
+  // Two sources may share a reference name. Gating by name would hide a healthy
+  // provider's usage because another provider's address moved.
+  const controller = new ExternalUsageController(
+    async () => ({ value: 'shared-key' }),
+    (async () => {
+      throw new Error('no request is expected')
+    }) as typeof fetch,
+    { 'opencode-go': 'SHARED_KEY', 'ollama-cloud': 'SHARED_KEY' },
+    'https://ollama.test',
+    {},
+    {},
+    { 'ollama-cloud': () => false },
+  )
+  const status = await controller.status()
+  assert.equal(status['opencode-go'].configured, true)
+  assert.equal(status['ollama-cloud'].configured, false)
+  await assert.rejects(() => controller.usage('ollama-cloud'), /not configured/)
+})
+
+test('a value that cannot ride a header is refused before any request', async () => {
+  // A value stored by another means can carry a control character; the
+  // transport error for the header it would build quotes the value.
+  const marker = 'sk-header-marker'
+  const requests: string[] = []
+  const controller = new ExternalUsageController(
+    async () => ({ value: `${marker}\r\nX-Injected: 1`, source: 'file' }),
+    (async (input: RequestInfo | URL) => {
+      requests.push(String(input))
+      return Response.json({})
+    }) as typeof fetch,
+  )
+  await assert.rejects(
+    () => controller.usage('opencode-go'),
+    (error: Error) => {
+      assert.match(error.message, /carries control characters/)
+      assert.doesNotMatch(error.message, new RegExp(marker))
+      return true
+    },
+  )
+  assert.deepEqual(requests, [] as string[])
+})
+
+test('an abort-named failure with a live signal is a transport failure', async () => {
+  const controller = new ExternalUsageController(
+    async () => ({ value: 'api-key', source: 'file' }),
+    (async () => {
+      const error = new Error('aborted with sk-marker')
+      error.name = 'AbortError'
+      throw error
+    }) as typeof fetch,
+  )
+  await assert.rejects(
+    () => controller.usage('opencode-go'),
+    (error: Error) => {
+      assert.match(error.message, /usage endpoint could not be reached/)
+      assert.doesNotMatch(error.message, /sk-marker/)
+      return true
+    },
+  )
+})
+
+test('a real cancellation reports its own fixed sentence', async () => {
+  const abort = new AbortController()
+  const controller = new ExternalUsageController(
+    async () => ({ value: 'api-key', source: 'file' }),
+    (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      abort.abort()
+      init?.signal?.throwIfAborted()
+      return Response.json({})
+    }) as typeof fetch,
+  )
+  await assert.rejects(
+    () => controller.usage('opencode-go', abort.signal),
+    /the usage read was cancelled/,
+  )
 })

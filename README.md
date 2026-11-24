@@ -14,12 +14,14 @@ reported quota in **Settings → Subscriptions**.
   GitHub Copilot, or Google Antigravity and choose their models in DSH's picker.
   These routes use account sign-in, without provider API keys.
 - **Cursor key route:** Add the `cursor` route with a `CURSOR_API_KEY`
-  credential. Cursor's models join the picker, one agent runs per conversation,
-  and the card reports the subscription's money or percentage quota. Each
-  model's advertised context window comes from its tier, a manual override, or
-  the public models.dev catalog, and the card's **Manage models** dialog states
-  which. The route ships no stored catalog and no OAuth login. See
-  [Cursor](docs/cursor.md).
+  credential, or paste the key straight into the Cursor card: the card states
+  whether a key already comes from the DSH store or the environment, keeps the
+  value masked, and can replace or remove it. Cursor's models join the picker,
+  one agent runs per conversation, and the card reports the subscription's money
+  or percentage quota. Each model's advertised context window comes from its
+  tier, a manual override, or the public models.dev catalog, and the card's
+  **Manage models** dialog states which. The route ships no stored catalog and
+  no OAuth login. See [Cursor](docs/cursor.md).
 - **Ollama Cloud key route:** Add the `ollama-cloud` route with an
   `OLLAMA_API_KEY` credential. The route ships no model catalog: configure it on
   the Settings → Subscriptions card, which fetches the cloud list, ticks the
@@ -27,14 +29,21 @@ reported quota in **Settings → Subscriptions**.
   effort, and local context window. The picker shows exactly the ticked list, so
   an unconfigured route offers no model. The card also edits the base URL, the
   credential reference, and the web search/fetch switch, and persists them under
-  the DSH home directory. No OAuth sign-in. A hand-written `llm-pi-ai` route
-  with the same id collides with this one: delete the manual block when enabling
-  the plugin route. Stop sequences are unsupported on this route, consistent
-  with the other adapters. Web search/fetch stay off until the card's switch is
-  on (or a profile sets `ollama.web`), so untouched installs keep their existing
-  web provider; a profile still pins them to `ollama-cloud`. Not ported from the
-  standalone plugin: its transient-error reclassification, per-image request
-  quotas, and per-model usage counts. See the
+  the DSH home directory, including the API key itself, so the credential no
+  longer has to be exported first; a reference renamed in that card is served
+  from a setting the browser controls, so the credential field manages only the
+  default or profile-configured reference; listing models from an address other
+  than the configured one needs the key typed for that request: chat, discovery,
+  usage, and web spend the stored key only at the configured address, and the
+  card says the key is idle when the saved address differs. No OAuth sign-in. A
+  hand-written `llm-pi-ai` route with the same id collides with this one: delete
+  the manual block when enabling the plugin route. Stop sequences are
+  unsupported on this route, consistent with the other adapters. Web
+  search/fetch stay off until the card's switch is on (or a profile sets
+  `ollama.web`), so untouched installs keep their existing web provider; a
+  profile still pins them to `ollama-cloud`. Not ported from the standalone
+  plugin: its transient-error reclassification, per-image request quotas, and
+  per-model usage counts. See the
   [key-route note](.agents/notes/implemented/provider/2026-10-10-ollama-cloud-key-route.md).
 - **Account and model control:** Refresh catalogs and choose visible models. For
   Codex, Claude, Grok, Copilot, and Antigravity, manage multiple accounts and
@@ -47,7 +56,9 @@ reported quota in **Settings → Subscriptions**.
   → Models** (their model routes remain built into DSH), Ollama Cloud usage
   through its `OLLAMA_API_KEY` credential, and Cursor usage through its
   `CURSOR_API_KEY` credential (money against the seat's ceiling on an enterprise
-  plan, percentages on a personal one). GitHub Copilot has no usage endpoint.
+  plan, percentages on a personal one). Claude also reports the dollar budget an
+  enterprise seat states, its weekly OAuth-apps lane, and the case where the
+  account reports no plan window at all. GitHub Copilot has no usage endpoint.
 - **Provider tools:** Use Codex web search, Grok X search, ChatGPT or Grok image
   generation and editing, and Grok video generation when the matching provider
   is enabled.

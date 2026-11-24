@@ -78,6 +78,16 @@ export interface FakeClaude {
   issuedCodes: Set<string>
 }
 
+/** What a caller may replace in the fixture. */
+export interface FakeClaudeOptions {
+  /**
+   * The usage payload the endpoint answers with. The default is the plan-window
+   * shape (a modern limits array); a test that needs the enterprise budget shape
+   * supplies its own, so both account shapes run through this one fixture.
+   */
+  usage?: () => unknown
+}
+
 const LOOPBACK_RE = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/
 
 function anthropicSseBody(): string {
@@ -142,7 +152,10 @@ function anthropicSseBody(): string {
  * @param t - the node:test context (the mock is auto-restored when the test ends).
  * @returns the fake handle (observed calls, issued codes).
  */
-export function installFakeClaude(t: TestContext): FakeClaude {
+export function installFakeClaude(
+  t: TestContext,
+  options: FakeClaudeOptions = {},
+): FakeClaude {
   const fake: FakeClaude = { calls: [], issuedCodes: new Set() }
   const realFetch = globalThis.fetch.bind(globalThis)
   let tokenSerial = 0
@@ -231,6 +244,7 @@ export function installFakeClaude(t: TestContext): FakeClaude {
         url === `${CLAUDE_USAGE_URL}?cedar_ember=1`) &&
       method === 'GET'
     ) {
+      if (options.usage !== undefined) return Response.json(options.usage())
       const now = Date.now()
       return Response.json({
         limits: [

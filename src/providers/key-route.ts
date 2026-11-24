@@ -8,7 +8,10 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import {
+  credentialRef,
+  isCredentialRefName,
+} from '@deepseek-ai/dsh-credentials'
 import type {
   AdapterRegistrationHandle,
   LlmAdapter,
@@ -26,7 +29,13 @@ export type CredentialResolver = (
  * @returns the resolver, safe to keep for the route's lifetime.
  */
 export function createCredentialResolver(ctx: Context): CredentialResolver {
-  return (name) => ctx.credentials.resolve(credentialRef(name))
+  return async (name) => {
+    // A configured name that is not a reference (someone pasted a secret there)
+    // reads as unconfigured: throwing would put the name on the wire, and the
+    // seam's own error quotes it.
+    if (!isCredentialRefName(name)) return undefined
+    return await ctx.credentials.resolve(credentialRef(name))
+  }
 }
 
 /**

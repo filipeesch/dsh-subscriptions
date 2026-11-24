@@ -51,7 +51,7 @@ import { en, zh } from '../src/client/locales.js'
 import { visibleUsageWindows } from '../src/client/usage-window-filter.js'
 import { fetchMiniMaxUsage } from '../src/providers/minimax-usage.js'
 import { fetchKimiCodeUsage } from '../src/providers/external-usage.js'
-import { externalUsageWindowLabel } from '../src/client/ExternalUsageCards.js'
+import { usageWindowLabel as externalUsageWindowLabel } from '../src/client/UsageWindowRow.js'
 
 const windows: UsageWindow[] = Array.from({ length: 60 }, (_, i) => ({
   kind: 'other',

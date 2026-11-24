@@ -62,6 +62,8 @@ export interface OllamaSettingsView {
     defaultEffort?: string
   }[]
   configOverridesModels: boolean
+  /** Whether a stored key is spent at the effective address. */
+  keyUsable: boolean
 }
 
 /** One cloud catalog entry returned by the `ollamaModels` endpoint. */

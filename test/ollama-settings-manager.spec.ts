@@ -63,6 +63,7 @@ function fixture(
           },
           models: viewModels,
           configOverridesModels: false,
+          keyUsable: true,
         }
         return { ok: true, value: view }
       }

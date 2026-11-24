@@ -132,14 +132,22 @@ interface OllamaCatalogRow {
   defaultEffort: string | undefined
 }
 
+/** The credential and the destination it was authorized for, read together. */
+export interface OllamaConnection {
+  apiKey: string
+  /** Native base URL (`https://ollama.com/api`); chat maps it to `/v1`. */
+  baseURL: string
+}
+
 export interface OllamaAdapterOptions {
-  /** Resolve the API key per request; `undefined` means unconfigured. */
-  apiKey: () => Promise<string | undefined>
   /**
-   * Live native base URL (`https://ollama.com/api`); chat maps it to `/v1`.
-   * Read per request so a Settings save takes effect without a restart.
+   * Resolve the key and the address together, once per request. `undefined`
+   * means no usable credential: unconfigured, or a key the host will not spend
+   * at the current address. Reading both at once is what keeps a Settings save
+   * from pairing an approved key with a destination that was never approved —
+   * the request is built from this snapshot, never from a later re-read.
    */
-  baseURL: () => string
+  connection: () => Promise<OllamaConnection | undefined>
   /**
    * Live catalog snapshot, in picker order. The Settings store (or a
    * non-empty config override) is the only source; an empty list means the
@@ -633,10 +641,11 @@ export class OllamaAdapter extends LlmAdapter {
     // an empty store hides the picker entry instead of advertising models
     // the user never adopted.
     if (catalog.length === 0) return []
-    // No key means logged out: hide the route instead of advertising
-    // models every request would fail for.
-    const apiKey = await this.options.apiKey()
-    if (apiKey === undefined) return []
+    // No usable connection means logged out (or a key the host keeps off this
+    // address): hide the route instead of advertising models every request
+    // would fail for.
+    const connection = await this.options.connection()
+    if (connection === undefined) return []
     if (this.options.discovery === false)
       return this.staticList(provider, catalog)
     try {
@@ -644,8 +653,8 @@ export class OllamaAdapter extends LlmAdapter {
         (signal) =>
           this.catalogCache.get(() =>
             fetchOllamaModels({
-              baseURL: this.options.baseURL(),
-              apiKey,
+              baseURL: connection.baseURL,
+              apiKey: connection.apiKey,
               fetchFn: this.options.fetchFn,
               signal,
             }),
@@ -720,17 +729,19 @@ export class OllamaAdapter extends LlmAdapter {
     // Discovery carries the key when one exists; keyless endpoints still
     // list, and no secret rides a metadata fetch it cannot use. The fetch
     // shares the picker bound so a hung listing cannot stall resolution.
-    const discoveryKey =
-      this.options.discovery === false ? undefined : await this.options.apiKey()
-    const discovered =
+    const discovery =
       this.options.discovery === false
+        ? undefined
+        : await this.options.connection()
+    const discovered =
+      discovery === undefined
         ? undefined
         : await withTimeout(
             (signal) =>
               this.catalogCache.resolve(() =>
                 fetchOllamaModels({
-                  baseURL: this.options.baseURL(),
-                  apiKey: discoveryKey,
+                  baseURL: discovery.baseURL,
+                  apiKey: discovery.apiKey,
                   fetchFn: this.options.fetchFn,
                   signal,
                 }),
@@ -772,8 +783,8 @@ export class OllamaAdapter extends LlmAdapter {
       this.options.streamIdleTimeoutMs ?? 300_000,
     )
     try {
-      const apiKey = await this.options.apiKey()
-      if (apiKey === undefined)
+      const connection = await this.options.connection()
+      if (connection === undefined)
         throw new LlmError(
           'ollama-cloud API key is not configured',
           'MISSING_CREDENTIAL',
@@ -797,12 +808,12 @@ export class OllamaAdapter extends LlmAdapter {
         toChatMessages(resolved, options.system),
         options.maxTokens ?? entry.maxTokens,
       )
-      const chatBase = ollamaChatBaseURL(this.options.baseURL())
+      const chatBase = ollamaChatBaseURL(connection.baseURL)
       const fetchFn = this.options.fetchFn ?? hostFetch
       const response = await fetchFn(`${chatBase}/chat/completions`, {
         method: 'POST',
         headers: {
-          authorization: `Bearer ${apiKey}`,
+          authorization: `Bearer ${connection.apiKey}`,
           accept: 'text/event-stream',
           'content-type': 'application/json',
           ...attributionHeaders(),

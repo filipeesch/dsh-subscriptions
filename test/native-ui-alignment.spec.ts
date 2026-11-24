@@ -172,10 +172,18 @@ test('restyle leaves the ten-second rotation and meter observation plumbing inta
     badge,
     /<UsageMeter\b[\s\S]*?observedAt=\{observedAt\}\s+stale=\{stale\}/,
   )
+  // The settings page hands the reading's observation to the shared row; the
+  // row is what mounts the meter, so both halves of the plumbing are asserted
+  // where they now live.
   const settings = source('SubscriptionsSection.tsx')
   assert.match(
     settings,
-    /<UsageMeter\b[\s\S]*?observedAt=\{observedAt\[usageKey\]\}\s+stale=\{\s*usageError !== undefined \|\| usage\.stale === true\s*\}/,
+    /<UsageWindowRow\b[\s\S]*?observedAt=\{observedAt\[usageKey\]\}\s+stale=\{\s*usageError !== undefined \|\| usage\.stale === true\s*\}/,
+  )
+  const row = source('UsageWindowRow.tsx')
+  assert.match(
+    row,
+    /<UsageMeter\b[\s\S]*?observedAt=\{observedAt\}\s+stale=\{stale\}/,
   )
 })
 
