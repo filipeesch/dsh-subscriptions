@@ -21,8 +21,14 @@ import { formatMoney } from '../src/client/money-format.js'
 import { PlanWindowsAbsentNote } from '../src/client/SubscriptionsSection.js'
 import type { UsageWindow } from '../src/client/SubscriptionsSection.js'
 
-const t = ((key: string) => key) as never
-const translate = (key: string): string => key
+/**
+ * Keep the key and its parameters visible: a stub that drops the interpolation
+ * would hide the numbers a row renders, and a shorter formatted amount is a
+ * substring of a longer one in some locales.
+ */
+const translate = (key: string, params?: Record<string, unknown>): string =>
+  params === undefined ? key : `${key}(${Object.values(params).join(',')})`
+const t = translate as never
 
 test('a money window states the amount spent and the ceiling', () => {
   const window: UsageWindow = {
@@ -45,12 +51,15 @@ test('a money window states the amount spent and the ceiling', () => {
   assert.match(html, /Extra usage/)
   // The row routes amounts through the shared money formatter, whatever locale
   // the host renders it in.
-  assert.ok(html.includes(formatMoney(60_021, 'USD')))
-  assert.ok(html.includes(formatMoney(60_000, 'USD')))
+  // Compare against the value the row renders rather than a substring of it:
+  // a shorter formatted amount is a substring of a longer one in some locales
+  // (600,00 US$ contains 0,00 US$), which would hide a missing number.
+  const rendered = usageWindowValue(translate as never, window, 'used')
+  assert.ok(html.includes(rendered))
   // A full meter is not the only cue: the row states what is left, including
   // an exhausted window's zero.
-  assert.ok(html.includes(formatMoney(0, 'USD')))
-  assert.match(html, /usageBarRemaining/)
+  assert.match(rendered, /usageBarRemaining/)
+  assert.ok(rendered.includes(formatMoney(0, 'USD')))
 })
 
 test('a money window without a ceiling states that its share is unknown', () => {
@@ -71,9 +80,11 @@ test('a money window without a ceiling states that its share is unknown', () => 
 
 test('a percent window states the share the preference selects', () => {
   const window: UsageWindow = { kind: 'session', usedPercent: 40 }
-  assert.equal(
+  // The key and its percentage stay visible: the row must state the share the
+  // provider reported, not a bare label.
+  assert.match(
     usageWindowValue(translate as never, window, 'used'),
-    'quotaUsedPercent',
+    /^quotaUsedPercent\(40\)$/,
   )
   const html = renderToStaticMarkup(
     createElement(UsageWindowRow, { window, t }),
@@ -129,9 +140,9 @@ test('a ceiling without a share states the amounts and no share note', () => {
 
 test('the percent preference selects the share label', () => {
   const window: UsageWindow = { kind: 'session', usedPercent: 40 }
-  assert.equal(
+  assert.match(
     usageWindowValue(translate as never, window, 'remaining'),
-    'quotaRemainingPercent',
+    /^quotaRemainingPercent\(60\)$/,
   )
 })
 
