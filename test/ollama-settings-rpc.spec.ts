@@ -112,7 +112,11 @@ interface Candidate {
  *   must win over the store.
  */
 async function mount(
-  options: { ollamaModels?: { id: string; name?: string }[] } = {},
+  options: {
+    ollamaModels?: { id: string; name?: string }[]
+    /** Hold every credential resolution until this settles. */
+    deferResolve?: Promise<void>
+  } = {},
 ): Promise<{ handler: FakeConnectionHandler; fake: FakeLlm; web: FakeWeb }> {
   process.env.DSH_HOME = HOME
   rmSync(settingsPath(), { force: true })
@@ -443,7 +447,7 @@ test('ollamaModels falls back to the stored credential and surfaces a rejection'
   }
 })
 
-test('saving the reference and base URL moves usage to the same target', async () => {
+test('a saved reference moves usage to that reference at the configured address', async () => {
   const { handler } = await mount()
   const seen: { url: string; authorization: string | undefined }[] = []
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -465,21 +469,61 @@ test('saving the reference and base URL moves usage to the same target', async (
       authorization: 'Bearer stored-key',
     })
     await call(handler, 'ollamaSetSettings', {
-      settings: {
-        apiKeyRef: 'CUSTOM_OLLAMA_KEY',
-        baseURL: 'http://localhost:11434',
-      },
+      settings: { apiKeyRef: 'CUSTOM_OLLAMA_KEY' },
     })
     const moved = await call(handler, 'externalUsage', {
       source: 'ollama-cloud',
     })
     assert.equal(moved.ok, true)
-    // The saved reference and address reach the usage reader too, and the
-    // custom name resolves to its own value, not the default reference's.
+    // The saved reference reaches the usage reader, and the custom name
+    // resolves to its own value, not the default reference's.
     assert.deepEqual(seen.at(-1), {
-      url: 'http://localhost:11434/balance',
+      url: `${DEFAULT_OLLAMA_BASE_URL}/balance`,
       authorization: 'Bearer custom-key',
     })
+  } finally {
+    globalThis.fetch = offlineFetch
+  }
+})
+
+test('a saved address stops the stored key from reaching usage', async () => {
+  // The address is card-editable and the key is not: sending the stored key to
+  // an address the card chose would hand it to that host, so the usage read is
+  // refused before any request.
+  const { handler } = await mount()
+  const requests: string[] = []
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input)
+    requests.push(url)
+    // The listing and the usage read share this stub; each gets its shape.
+    if (url.endsWith('/tags'))
+      return Response.json({ models: [{ model: 'glm-5.3:cloud' }] })
+    if (url.endsWith('/show')) return Response.json({})
+    return Response.json({ included: { allowance_usd: 10, balance_usd: 7.5 } })
+  }) as unknown as typeof fetch
+  try {
+    await call(handler, 'ollamaSetSettings', {
+      settings: { baseURL: 'http://localhost:11434' },
+    })
+    requests.length = 0
+    const moved = await call(handler, 'externalUsage', {
+      source: 'ollama-cloud',
+    })
+    assert.equal(moved.ok, false)
+    if (!moved.ok) assert.match(moved.error.message, /not configured/)
+    assert.deepEqual(
+      requests,
+      [] as string[],
+      'no request carried the stored key',
+    )
+
+    // A key typed for the listing is still accepted at that address.
+    const typed = await call(handler, 'ollamaModels', {
+      apiKey: 'one-time-key',
+      baseURL: 'http://localhost:11434',
+    })
+    assert.ok(typed.ok, JSON.stringify(typed))
+    assert.ok(requests.includes('http://localhost:11434/tags'))
   } finally {
     globalThis.fetch = offlineFetch
   }
@@ -505,4 +549,36 @@ test('the web switch registers the providers once and gates them live', async ()
   await tick()
   assert.deepEqual([web.search.length, web.fetch.length], [1, 1])
   assert.equal(web.search[0]?.available(), true)
+})
+
+test('an address change while the key resolves cannot retarget the request', async () => {
+  // The key and the address are read together, once: a settings save that lands
+  // while the credential resolves must not move the destination of the request
+  // that already approved its key.
+  let release: (() => void) | undefined
+  const deferred = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const { handler, web } = await mount({ deferResolve: deferred })
+  const seen: string[] = []
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    seen.push(String(input))
+    return Response.json({ results: [] })
+  }) as unknown as typeof fetch
+  try {
+    await call(handler, 'ollamaSetSettings', { settings: { web: true } })
+    await tick()
+    const search = web.search[0]
+    assert.ok(search !== undefined, 'the web search provider is registered')
+    const pending = search.search({ query: 'q' })
+    // The card moves the address while the key is still resolving.
+    await call(handler, 'ollamaSetSettings', {
+      settings: { web: true, baseURL: 'http://localhost:11434' },
+    })
+    release?.()
+    await pending
+    assert.deepEqual(seen, [`${DEFAULT_OLLAMA_BASE_URL}/web_search`])
+  } finally {
+    globalThis.fetch = offlineFetch
+  }
 })

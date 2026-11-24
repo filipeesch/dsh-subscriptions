@@ -1095,13 +1095,12 @@ async function checkMiniMaxRows(cdp, settingsOutlet) {
       const base =
         window.kind === 'session'
           ? SECTION_EN.usageSession
-          : window.kind === 'weekly'
-            ? SECTION_EN.usageWeekly
-            : SECTION_EN.usageWindow
+          : SECTION_EN.usageWeekly
+      // One label rule: a session or weekly lane names its kind and its scope,
+      // and a lane of another kind is named by its scope alone — in the settings
+      // cards and in the expanded badge alike.
       const label =
-        settings && window.kind === 'other'
-          ? window.scope
-          : `${base} · ${window.scope}`
+        window.kind === 'other' ? window.scope : `${base} · ${window.scope}`
       const row = snapshot.rows[index]
       if (
         row?.label !== label ||

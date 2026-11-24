@@ -834,9 +834,12 @@ test('reset RPC requires a prepared account-bound ticket and surfaces ambiguous 
   const ctx = new Context()
   const fake = createFakeConnection()
   ctx.provide('connection', fake.connection)
-  registerAuthRpc(ctx, controller, {
-    speed: async () => ({ tier: 'standard', fastModels: [] }),
-    setSpeed: async () => {},
+  registerAuthRpc(ctx, {
+    controller,
+    speed: {
+      speed: async () => ({ tier: 'standard', fastModels: [] }),
+      setSpeed: async () => {},
+    },
   })
   await new Promise((resolve) => setTimeout(resolve, 50))
   assert.ok(fake.registered(), 'the reset routes were registered')

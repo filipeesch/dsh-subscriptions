@@ -22,18 +22,14 @@ import { providerSettingsCss } from './provider-settings-styles.js'
 import { ExternalUsageCards } from './ExternalUsageCards.js'
 import { OllamaCard } from './OllamaCard.js'
 import { CursorCard } from './CursorCard.js'
-import { UsageMeter } from './UsageMeter.js'
-import { quotaText, useQuotaClock } from './quota-display.js'
+import { UsageWindowRow } from './UsageWindowRow.js'
 import {
   ResetCreditsDisclosure,
   ResetCreditsErrorLine,
   showsResetCredits,
 } from './reset-credits-view.js'
 import { UsageBadgeDisplaySetting } from './UsageBadgeDisplaySetting.js'
-import {
-  USAGE_BADGE_REFRESH_EVENT,
-  useQuotaDisplayMode,
-} from './usage-badge-preferences.js'
+import { USAGE_BADGE_REFRESH_EVENT } from './usage-badge-preferences.js'
 import { subscriptionCardStyles as cardStyles } from './subscription-card-styles.js'
 import type { ProviderId } from '../providers/ids.js'
 import type { SubscriptionsKey } from './locales.js'
@@ -114,6 +110,11 @@ export interface ProviderUsage {
   stale?: boolean
   supported: boolean
   windows?: UsageWindow[]
+  /**
+   * The provider reported no plan window while still reporting a budget; the
+   * card states it instead of presenting the budget as the whole reading.
+   */
+  planWindowsAbsent?: boolean
   plan?: string
   /**
    * Banked limit-reset grants. Codex entries carry id/expiry only. Claude
@@ -375,29 +376,23 @@ export function clientVersionText(
   })
 }
 
-/**
- * Localized label of one usage window (kind, plus the model scope when named).
- * @param t - section translate.
- * @param window - the reported window.
- * @returns e.g. "5-hour window" or "Weekly · Opus".
- */
-function usageWindowLabel(
-  t: SubscriptionsSectionInjected['t'],
-  window: UsageWindow,
-): string {
-  const base =
-    window.kind === 'session'
-      ? t('usageSession')
-      : window.kind === 'weekly'
-        ? t('usageWeekly')
-        : t('usageWindow')
-  return window.scope !== undefined && window.scope !== ''
-    ? `${base} · ${window.scope}`
-    : base
-}
-
 /** Meter fill color lives with the pace logic: fresh 90%+ is red, pace presets add a yellow lead threshold. */
 export { usageBarColor } from './usage-pace.js'
+
+/**
+ * The line a card states when its reading carries a budget but no plan window:
+ * the account is metered differently, not broken. Exported so a static render
+ * can assert the sentence the card mounts.
+ * @param props.t - section translate.
+ * @returns the note the card shows under the window rows.
+ */
+export function PlanWindowsAbsentNote({
+  t,
+}: {
+  t: SubscriptionsSectionInjected['t']
+}) {
+  return <p style={styles.statusLine}>{t('usagePlanWindowsAbsent')}</p>
+}
 
 /**
  * The Subscriptions settings page component.
@@ -407,8 +402,6 @@ export { usageBarColor } from './usage-pace.js'
 export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const { rpc } = props
   const t = props.t ?? fallbackTranslate
-  const quotaMode = useQuotaDisplayMode()
-  const quotaNow = useQuotaClock()
   const [statuses, setStatuses] = useState<
     Partial<Record<SubscriptionProvider, ProviderStatus>>
   >({})
@@ -983,31 +976,21 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
                             {t('usageNoVisibleModels')}
                           </p>
                         )}
-                      {shownWindows.map((window, index) => {
-                        return (
-                          <div key={index} style={styles.usageRow}>
-                            <div style={styles.usageMeta}>
-                              <span>{usageWindowLabel(t, window)}</span>
-                              <span>
-                                {quotaText(window.usedPercent, quotaMode, t)}
-                                {window.resetsAt !== undefined &&
-                                  ` · ${t('usageResets', { date: new Date(window.resetsAt).toLocaleString() })}`}
-                                {window.resetsAt !== undefined &&
-                                  window.resetsAt <= quotaNow &&
-                                  ` · ${t('quotaExpiredWindow')}`}
-                              </span>
-                            </div>
-                            <UsageMeter
-                              window={window}
-                              t={t}
-                              observedAt={observedAt[usageKey]}
-                              stale={
-                                usageError !== undefined || usage.stale === true
-                              }
-                            />
-                          </div>
-                        )
-                      })}
+                      {shownWindows.map((window, index) => (
+                        <UsageWindowRow
+                          key={index}
+                          window={window}
+                          t={t}
+                          observedAt={observedAt[usageKey]}
+                          stale={
+                            usageError !== undefined || usage.stale === true
+                          }
+                        />
+                      ))}
+                      {usage?.planWindowsAbsent === true &&
+                        shownWindows.some(
+                          (window) => window.usedAmount !== undefined,
+                        ) && <PlanWindowsAbsentNote t={t} />}
                       {(id === 'codex' || id === 'claude') &&
                         usage?.resetCreditsError !== undefined && (
                           <ResetCreditsErrorLine

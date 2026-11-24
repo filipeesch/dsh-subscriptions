@@ -29,6 +29,7 @@ import {
   OllamaWebFetchProvider,
   OllamaWebSearchProvider,
 } from '../src/providers/ollama-web.js'
+import type { OllamaWebOptions } from '../src/providers/ollama-web.js'
 
 function sseBody(frames: unknown[]): string {
   return (
@@ -116,8 +117,12 @@ function makeAdapter(
   } = {},
 ): OllamaAdapter {
   return new OllamaAdapter({
-    apiKey: options.apiKey ?? (async () => 'k'),
-    baseURL: () => DEFAULT_OLLAMA_BASE_URL,
+    connection: async () => {
+      const apiKey = await (options.apiKey ?? (async () => 'k'))()
+      return apiKey === undefined
+        ? undefined
+        : { apiKey, baseURL: DEFAULT_OLLAMA_BASE_URL }
+    },
     catalog: () => options.catalog ?? CATALOG,
     ...(options.fetchFn === undefined ? {} : { fetchFn: options.fetchFn }),
     ...(options.discovery === undefined
@@ -699,6 +704,34 @@ test('the family table fills levels neither the endpoint nor the row reports', a
   assert.equal(resolved.reasoning?.defaultEffort, 'max')
 })
 
+/**
+ * Build the providers' single connection snapshot from the parts a case states.
+ * The snapshot is what a request is built from, so the key and the address are
+ * approved together.
+ */
+function webOptions(input: {
+  apiKey: () => Promise<string | undefined>
+  baseURL: string | (() => string)
+  enabled?: () => boolean
+  fetchFn?: FetchFn
+  requestTimeoutMs?: number
+}): OllamaWebOptions {
+  return {
+    connection: async () => {
+      const apiKey = await input.apiKey()
+      if (apiKey === undefined) return undefined
+      const baseURL =
+        typeof input.baseURL === 'function' ? input.baseURL() : input.baseURL
+      return { apiKey, baseURL }
+    },
+    ...(input.enabled === undefined ? {} : { enabled: input.enabled }),
+    ...(input.fetchFn === undefined ? {} : { fetchFn: input.fetchFn }),
+    ...(input.requestTimeoutMs === undefined
+      ? {}
+      : { requestTimeoutMs: input.requestTimeoutMs }),
+  }
+}
+
 test('web search posts the query and drops url-less rows', async () => {
   const seen: { url: string; body: Record<string, unknown> }[] = []
   const fetchFn = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -727,7 +760,7 @@ test('web search posts the query and drops url-less rows', async () => {
     baseURL: DEFAULT_OLLAMA_BASE_URL,
     fetchFn,
   }
-  const search = new OllamaWebSearchProvider(options)
+  const search = new OllamaWebSearchProvider(webOptions(options))
   assert.equal(search.available(), true)
   const result = await search.search({ query: 'q', maxResults: 50 })
   assert.deepEqual(result, {
@@ -735,7 +768,7 @@ test('web search posts the query and drops url-less rows', async () => {
     truncated: false,
   })
   assert.equal(seen[0]?.body['max_results'], 10)
-  const fetch = new OllamaWebFetchProvider(options)
+  const fetch = new OllamaWebFetchProvider(webOptions(options))
   assert.deepEqual(await fetch.fetch({ url: 'https://example.com/a' }), {
     url: 'https://example.com/a',
     statusCode: 200,
@@ -752,12 +785,14 @@ test('web providers read the base URL and the switch live', async () => {
     seen.push(String(input))
     return Response.json({ results: [] })
   }) as FetchFn
-  const provider = new OllamaWebSearchProvider({
-    apiKey: async () => 'k' as string | undefined,
-    baseURL: () => base,
-    enabled: () => enabled,
-    fetchFn,
-  })
+  const provider = new OllamaWebSearchProvider(
+    webOptions({
+      apiKey: async () => 'k' as string | undefined,
+      baseURL: () => base,
+      enabled: () => enabled,
+      fetchFn,
+    }),
+  )
   // Off by default: unavailable, and a pinned profile's call is refused
   // before any provider I/O.
   assert.equal(provider.available(), false)
@@ -776,22 +811,26 @@ test('web providers read the base URL and the switch live', async () => {
 })
 
 test('web providers fail loudly without a key and never follow redirects', async () => {
-  const loggedOut = new OllamaWebSearchProvider({
-    apiKey: async () => undefined,
-    baseURL: DEFAULT_OLLAMA_BASE_URL,
-  })
+  const loggedOut = new OllamaWebSearchProvider(
+    webOptions({
+      apiKey: async () => undefined,
+      baseURL: DEFAULT_OLLAMA_BASE_URL,
+    }),
+  )
   await assert.rejects(() => loggedOut.search({ query: 'q' }), /OLLAMA_API_KEY/)
-  const redirecting = new OllamaWebSearchProvider({
-    apiKey: async () => 'k' as string | undefined,
-    baseURL: DEFAULT_OLLAMA_BASE_URL,
-    fetchFn: (async (_input: RequestInfo | URL, init?: RequestInit) => {
-      assert.equal((init as { redirect?: string }).redirect, 'error')
-      // Realistic undici shape: the redirect rejection nests in `cause`.
-      throw new TypeError('fetch failed', {
-        cause: new Error('redirect mode is set to error'),
-      })
-    }) as FetchFn,
-  })
+  const redirecting = new OllamaWebSearchProvider(
+    webOptions({
+      apiKey: async () => 'k' as string | undefined,
+      baseURL: DEFAULT_OLLAMA_BASE_URL,
+      fetchFn: (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        assert.equal((init as { redirect?: string }).redirect, 'error')
+        // Realistic undici shape: the redirect rejection nests in `cause`.
+        throw new TypeError('fetch failed', {
+          cause: new Error('redirect mode is set to error'),
+        })
+      }) as FetchFn,
+    }),
+  )
   await assert.rejects(
     () => redirecting.search({ query: 'q' }),
     (error: unknown) =>
@@ -802,14 +841,16 @@ test('web providers fail loudly without a key and never follow redirects', async
 
 test('web HTTP and decode failures never retry and keep their codes', async () => {
   let calls = 0
-  const failing = new OllamaWebSearchProvider({
-    apiKey: async () => 'k' as string | undefined,
-    baseURL: DEFAULT_OLLAMA_BASE_URL,
-    fetchFn: (async () => {
-      calls += 1
-      return new Response('nope', { status: 500 })
-    }) as FetchFn,
-  })
+  const failing = new OllamaWebSearchProvider(
+    webOptions({
+      apiKey: async () => 'k' as string | undefined,
+      baseURL: DEFAULT_OLLAMA_BASE_URL,
+      fetchFn: (async () => {
+        calls += 1
+        return new Response('nope', { status: 500 })
+      }) as FetchFn,
+    }),
+  )
   await assert.rejects(
     () => failing.search({ query: 'q' }),
     (error: unknown) =>
@@ -817,12 +858,14 @@ test('web HTTP and decode failures never retry and keep their codes', async () =
       (error as { code?: string }).code === 'OLLAMA_WEB_BAD_RESPONSE',
   )
   assert.equal(calls, 1)
-  const garbled = new OllamaWebSearchProvider({
-    apiKey: async () => 'k' as string | undefined,
-    baseURL: DEFAULT_OLLAMA_BASE_URL,
-    fetchFn: (async () =>
-      new Response('not json{{', { status: 200 })) as FetchFn,
-  })
+  const garbled = new OllamaWebSearchProvider(
+    webOptions({
+      apiKey: async () => 'k' as string | undefined,
+      baseURL: DEFAULT_OLLAMA_BASE_URL,
+      fetchFn: (async () =>
+        new Response('not json{{', { status: 200 })) as FetchFn,
+    }),
+  )
   await assert.rejects(
     () => garbled.search({ query: 'q' }),
     (error: unknown) =>
@@ -833,18 +876,20 @@ test('web HTTP and decode failures never retry and keep their codes', async () =
 
 test('web timeouts and transport failures retry once, then carry codes', async () => {
   let calls = 0
-  const hanging = new OllamaWebSearchProvider({
-    apiKey: async () => 'k' as string | undefined,
-    baseURL: DEFAULT_OLLAMA_BASE_URL,
-    fetchFn: ((_input: RequestInfo | URL, init?: RequestInit) =>
-      new Promise((_resolve, reject) => {
-        calls += 1
-        init?.signal?.addEventListener('abort', () =>
-          reject(new DOMException('aborted', 'AbortError')),
-        )
-      })) as FetchFn,
-    requestTimeoutMs: 20,
-  })
+  const hanging = new OllamaWebSearchProvider(
+    webOptions({
+      apiKey: async () => 'k' as string | undefined,
+      baseURL: DEFAULT_OLLAMA_BASE_URL,
+      fetchFn: ((_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          calls += 1
+          init?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('aborted', 'AbortError')),
+          )
+        })) as FetchFn,
+      requestTimeoutMs: 20,
+    }),
+  )
   await assert.rejects(
     () => hanging.search({ query: 'q' }),
     (error: unknown) =>
@@ -853,14 +898,16 @@ test('web timeouts and transport failures retry once, then carry codes', async (
   )
   assert.equal(calls, 2)
   let transportCalls = 0
-  const broken = new OllamaWebSearchProvider({
-    apiKey: async () => 'k' as string | undefined,
-    baseURL: DEFAULT_OLLAMA_BASE_URL,
-    fetchFn: (async () => {
-      transportCalls += 1
-      throw new TypeError('fetch failed')
-    }) as FetchFn,
-  })
+  const broken = new OllamaWebSearchProvider(
+    webOptions({
+      apiKey: async () => 'k' as string | undefined,
+      baseURL: DEFAULT_OLLAMA_BASE_URL,
+      fetchFn: (async () => {
+        transportCalls += 1
+        throw new TypeError('fetch failed')
+      }) as FetchFn,
+    }),
+  )
   await assert.rejects(
     () => broken.search({ query: 'q' }),
     (error: unknown) =>
@@ -872,24 +919,26 @@ test('web timeouts and transport failures retry once, then carry codes', async (
 
 test('a body-read timeout reports TIMEOUT and retries like a connect timeout', async () => {
   let calls = 0
-  const stalled = new OllamaWebSearchProvider({
-    apiKey: async () => 'k' as string | undefined,
-    baseURL: DEFAULT_OLLAMA_BASE_URL,
-    // Headers arrive, the body never does: the stream errors when the
-    // attempt timer aborts it, like a real transport would.
-    fetchFn: ((_input: RequestInfo | URL, init?: RequestInit) => {
-      calls += 1
-      const stream = new ReadableStream({
-        start(controller) {
-          init?.signal?.addEventListener('abort', () =>
-            controller.error(new DOMException('aborted', 'AbortError')),
-          )
-        },
-      })
-      return Promise.resolve(new Response(stream, { status: 200 }))
-    }) as FetchFn,
-    requestTimeoutMs: 20,
-  })
+  const stalled = new OllamaWebSearchProvider(
+    webOptions({
+      apiKey: async () => 'k' as string | undefined,
+      baseURL: DEFAULT_OLLAMA_BASE_URL,
+      // Headers arrive, the body never does: the stream errors when the
+      // attempt timer aborts it, like a real transport would.
+      fetchFn: ((_input: RequestInfo | URL, init?: RequestInit) => {
+        calls += 1
+        const stream = new ReadableStream({
+          start(controller) {
+            init?.signal?.addEventListener('abort', () =>
+              controller.error(new DOMException('aborted', 'AbortError')),
+            )
+          },
+        })
+        return Promise.resolve(new Response(stream, { status: 200 }))
+      }) as FetchFn,
+      requestTimeoutMs: 20,
+    }),
+  )
   await assert.rejects(
     () => stalled.search({ query: 'q' }),
     (error: unknown) =>
@@ -900,14 +949,16 @@ test('a body-read timeout reports TIMEOUT and retries like a connect timeout', a
 })
 
 test('a malformed reply carries no provider bytes in its chain', async () => {
-  const garbled = new OllamaWebSearchProvider({
-    apiKey: async () => 'k' as string | undefined,
-    baseURL: DEFAULT_OLLAMA_BASE_URL,
-    fetchFn: (async () =>
-      new Response('REDACTED malformed provider response', {
-        status: 200,
-      })) as FetchFn,
-  })
+  const garbled = new OllamaWebSearchProvider(
+    webOptions({
+      apiKey: async () => 'k' as string | undefined,
+      baseURL: DEFAULT_OLLAMA_BASE_URL,
+      fetchFn: (async () =>
+        new Response('REDACTED malformed provider response', {
+          status: 200,
+        })) as FetchFn,
+    }),
+  )
   const error = await garbled.search({ query: 'q' }).then(
     () => {
       throw new Error('must not succeed')
@@ -924,18 +975,20 @@ test('a malformed reply carries no provider bytes in its chain', async () => {
 
 test('an oversized reply fails without buffering it whole', async () => {
   let calls = 0
-  const huge = new OllamaWebSearchProvider({
-    apiKey: async () => 'k' as string | undefined,
-    baseURL: DEFAULT_OLLAMA_BASE_URL,
-    fetchFn: (async () => {
-      calls += 1
-      // Declared over the cap: rejected before the first body read.
-      return new Response('{}', {
-        status: 200,
-        headers: { 'content-length': String(4 * 1024 * 1024) },
-      })
-    }) as FetchFn,
-  })
+  const huge = new OllamaWebSearchProvider(
+    webOptions({
+      apiKey: async () => 'k' as string | undefined,
+      baseURL: DEFAULT_OLLAMA_BASE_URL,
+      fetchFn: (async () => {
+        calls += 1
+        // Declared over the cap: rejected before the first body read.
+        return new Response('{}', {
+          status: 200,
+          headers: { 'content-length': String(4 * 1024 * 1024) },
+        })
+      }) as FetchFn,
+    }),
+  )
   await assert.rejects(
     () => huge.search({ query: 'q' }),
     (error: unknown) =>
@@ -949,26 +1002,28 @@ test('an undeclared oversized stream stops early and cancels', async () => {
   let cancelled = false
   let pulls = 0
   const chunk = new TextEncoder().encode('x'.repeat(256 * 1024))
-  const streaming = new OllamaWebSearchProvider({
-    apiKey: async () => 'k' as string | undefined,
-    baseURL: DEFAULT_OLLAMA_BASE_URL,
-    fetchFn: (async () =>
-      new Response(
-        new ReadableStream({
-          // Endless 256 KiB chunks with no content-length: the 2 MiB cap
-          // must trip after a bounded prefix, and the live stream must be
-          // cancelled instead of left hanging behind the rejection.
-          pull(controller) {
-            pulls += 1
-            controller.enqueue(chunk)
-          },
-          cancel() {
-            cancelled = true
-          },
-        }),
-        { status: 200 },
-      )) as FetchFn,
-  })
+  const streaming = new OllamaWebSearchProvider(
+    webOptions({
+      apiKey: async () => 'k' as string | undefined,
+      baseURL: DEFAULT_OLLAMA_BASE_URL,
+      fetchFn: (async () =>
+        new Response(
+          new ReadableStream({
+            // Endless 256 KiB chunks with no content-length: the 2 MiB cap
+            // must trip after a bounded prefix, and the live stream must be
+            // cancelled instead of left hanging behind the rejection.
+            pull(controller) {
+              pulls += 1
+              controller.enqueue(chunk)
+            },
+            cancel() {
+              cancelled = true
+            },
+          }),
+          { status: 200 },
+        )) as FetchFn,
+    }),
+  )
   await assert.rejects(
     () => streaming.search({ query: 'q' }),
     (error: unknown) =>

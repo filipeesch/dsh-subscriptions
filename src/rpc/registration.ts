@@ -19,6 +19,7 @@ import { OAuthFlowManager } from '../auth/oauth-flow.js'
 import { DeviceFlowManager } from '../auth/device-flow.js'
 import { ResetRedemption } from '../providers/reset-redemption.js'
 import { BadRequest, registerAuthRpc } from '../auth/rpc.js'
+import { hasControlCharacters } from '../providers/credential-text.js'
 import type {
   CursorKnownContextView,
   CursorRpcController,
@@ -35,8 +36,13 @@ import {
   createCredentialResolver,
   registerKeyRoute,
 } from '../providers/key-route.js'
+import { KeyCredentials } from '../providers/key-credentials.js'
+import type { KeyCredentialSeam } from '../providers/key-credentials.js'
+import { CURSOR_ROUTE } from '../providers/cursor/route.js'
+import { isCredentialRefName } from '@deepseek-ai/dsh-credentials'
 import { ExternalUsageController } from '../providers/external-usage-controller.js'
 import {
+  DEFAULT_OLLAMA_BASE_URL,
   OllamaAdapter,
   fetchOllamaModels,
   OLLAMA_CLOUD_ROUTE,
@@ -49,6 +55,7 @@ import {
 } from '../providers/ollama-web.js'
 import {
   OllamaSettingsStore,
+  sameOllamaDestination,
   validateOllamaSettings,
 } from '../providers/ollama-settings.js'
 import type { OllamaModelSetting } from '../providers/ollama-settings.js'
@@ -182,6 +189,10 @@ export interface RpcDeps {
   cursorRefreshContext: () => Promise<PublishedRefreshOutcome>
   /** Re-announce the Cursor route so the host re-lists its models. */
   cursorNotifyPicker: () => void
+  /** Drop the cached Cursor catalog because the credential that produced it changed. */
+  cursorForgetCatalog: () => void
+  /** Prove one Cursor key with a live read made with exactly that value. */
+  cursorValidateKey: (apiKey: string) => Promise<void>
   resolveAttachments: () => AttachmentStore | undefined
   usageFetchers: UsageFetchers
   selectedSpeed: (sessionId: string, model?: string) => SpeedTier
@@ -230,6 +241,8 @@ export function assembleRpc(deps: RpcDeps): void {
     cursorKnownContext,
     cursorRefreshContext,
     cursorNotifyPicker,
+    cursorForgetCatalog,
+    cursorValidateKey,
     resolveAttachments,
     usageFetchers,
     selectedSpeed,
@@ -384,6 +397,32 @@ export function assembleRpc(deps: RpcDeps): void {
   }
   let resolveExternalCredential:
     ((name: string) => Promise<{ value: string } | undefined>) | undefined
+  // The operator-configured address is the only destination the host spends a
+  // stored credential on. The base URL is also card-editable, so every path that
+  // would send the key — chat, discovery, the listing, usage, and web — asks
+  // this one question.
+  const operatorOllamaBaseURL =
+    config.ollama?.baseURL ?? DEFAULT_OLLAMA_BASE_URL
+  const ollamaDestinationIsConfigured = (): boolean =>
+    sameOllamaDestination(ollamaBaseURL(), operatorOllamaBaseURL)
+  /**
+   * The Ollama credential and the address it may be spent at, captured together.
+   *
+   * The address and the reference are both card-editable, so a Settings save can
+   * land between reading one and using the other. Every consumer builds its
+   * request from this snapshot instead of re-reading the address later: the key
+   * and the destination are approved as one value.
+   * @returns the pair, or undefined when there is no usable credential.
+   */
+  const ollamaConnection = async (): Promise<
+    { apiKey: string; baseURL: string } | undefined
+  > => {
+    const baseURL = ollamaBaseURL()
+    if (!sameOllamaDestination(baseURL, operatorOllamaBaseURL)) return undefined
+    const apiKey = (await resolveExternalCredential?.(ollamaApiKeyRef()))?.value
+    if (apiKey === undefined || hasControlCharacters(apiKey)) return undefined
+    return { apiKey, baseURL }
+  }
   let ollamaAdapter: OllamaAdapter | undefined
   let ollamaHandle: AdapterRegistrationHandle | undefined
   ctx.inject(['credentials'], (credentialsCtx) => {
@@ -393,9 +432,7 @@ export function assembleRpc(deps: RpcDeps): void {
     // next request without a restart; the stored catalog is the only source
     // of models.
     ollamaAdapter = new OllamaAdapter({
-      apiKey: async () =>
-        (await resolveExternalCredential?.(ollamaApiKeyRef()))?.value,
-      baseURL: ollamaBaseURL,
+      connection: ollamaConnection,
       catalog: ollamaCatalog,
       resolveAttachments,
       streamIdleTimeoutMs,
@@ -415,20 +452,16 @@ export function assembleRpc(deps: RpcDeps): void {
   const syncOllamaWeb = (): void => {
     if (ollamaWebRegistered || !ollamaWebEnabled()) return
     ollamaWebRegistered = true
-    const ollamaApiKey = async (): Promise<string | undefined> =>
-      (await resolveExternalCredential?.(ollamaApiKeyRef()))?.value
     ctx.inject(['web'], (webCtx) => {
       webCtx.web.registerSearchProvider(
         new OllamaWebSearchProvider({
-          apiKey: ollamaApiKey,
-          baseURL: ollamaBaseURL,
+          connection: ollamaConnection,
           enabled: ollamaWebEnabled,
         }),
       )
       webCtx.web.registerFetchProvider(
         new OllamaWebFetchProvider({
-          apiKey: ollamaApiKey,
-          baseURL: ollamaBaseURL,
+          connection: ollamaConnection,
           enabled: ollamaWebEnabled,
         }),
       )
@@ -444,6 +477,11 @@ export function assembleRpc(deps: RpcDeps): void {
     { 'ollama-cloud': ollamaApiKeyRef, cursor: cursorApiKeyRef },
     ollamaBaseURL,
     { ceilingUSD: () => cursorSettings.ceilingUSD() },
+    {},
+    // The usage read spends the stored key too, so Ollama follows the same
+    // destination policy. The gate names the source, not the reference: another
+    // provider may use the same reference name at its own destination.
+    { 'ollama-cloud': ollamaDestinationIsConfigured },
   )
   const resetRedemption = new ResetRedemption(
     async (account, signal) => {
@@ -473,7 +511,9 @@ export function assembleRpc(deps: RpcDeps): void {
       const models = await cursorModelCount(refresh).catch(() => undefined)
       return {
         provider: 'cursor',
-        keyRef: cursorApiKeyRef(),
+        // A configured name that is not a reference is omitted, not echoed: it
+        // may be a value someone pasted into the profile.
+        keyRef: isCredentialRefName(cursorApiKeyRef()) ? cursorApiKeyRef() : '',
         publishedContext: cursorKnownContext().enabled,
         knownContext: cursorKnownContext(),
         ...(stored.monthlyCeilingUSD === undefined
@@ -581,9 +621,138 @@ export function assembleRpc(deps: RpcDeps): void {
       }
     },
   }
-  registerAuthRpc(
-    ctx,
-    new SubscriptionsAuthController(
+  // The two key routes read a credential reference per request. This surface is
+  // the write side the cards drive; the seam is resolved per call because the
+  // RPC is assembled before the credentials service is guaranteed to exist.
+  const keyCredentials = new KeyCredentials({
+    // Only an operator-controlled reference is editable from the browser. The
+    // Cursor reference lives in the profile; Ollama also accepts one from its
+    // card-editable store, and that one must not become a writer for any
+    // reference the host knows.
+    editableRefOf: (route) => {
+      if (route === CURSOR_ROUTE) return cursorApiKeyRef()
+      if (ollamaSettings.get().apiKeyRef !== undefined) return undefined
+      return ollamaApiKeyRef()
+    },
+    seam: () => ctx.get('credentials') as KeyCredentialSeam | undefined,
+    onChanged: (route) => {
+      // The reading is cached per credential: a save or removal must not serve
+      // the previous key's numbers. Discovery is cached too, and a forced read
+      // joins an in-flight fetch, so both routes drop theirs before the card's
+      // validation asks for a fresh one.
+      externalUsage.invalidate(
+        route === CURSOR_ROUTE ? 'cursor' : 'ollama-cloud',
+      )
+      if (route === CURSOR_ROUTE) {
+        cursorForgetCatalog()
+        cursorNotifyPicker()
+      } else {
+        ollamaAdapter?.invalidateModels()
+        ollamaHandle?.replace([OLLAMA_CLOUD_ROUTE])
+      }
+    },
+    // Host-only: the validation proves the committed credential by fingerprint,
+    // and the value itself never crosses the RPC.
+    resolveValue: async (ref) =>
+      (await resolveExternalCredential?.(ref))?.value,
+    validators: {
+      // Each route's own read, run by the host against the committed credential
+      // and bound to its generation, so a concurrent change cannot be validated
+      // as this writer's.
+      [CURSOR_ROUTE]: async (value) => {
+        // The service hands the value it verified, and the read spends exactly
+        // that value: a catalog read made with the stored key could be the
+        // previous one, and a missing key reads as a successful empty catalog.
+        if (value === undefined)
+          throw new BadRequest('no Cursor API key is configured for this route')
+        await cursorValidateKey(value)
+      },
+      [OLLAMA_CLOUD_ROUTE]: async (value) => {
+        // The service hands the value it verified, and the read targets the
+        // operator's address: a pass means the committed key works where the
+        // route actually spends it. A route with no stored value cannot pass.
+        if (value === undefined)
+          throw new BadRequest('no Ollama API key is configured for this route')
+        await listOllamaModels(
+          { apiKey: value, baseURL: operatorOllamaBaseURL },
+          AbortSignal.timeout(OLLAMA_PULL_TIMEOUT_MS),
+        )
+      },
+    },
+  })
+  /**
+   * List the Ollama catalog at one address.
+   *
+   * A typed key rides this listing only: it is never stored and never echoed.
+   * The host-resolved key is bound to the operator-configured destination,
+   * because the base URL is also card-editable; a different address keeps its
+   * own refusal. Provider and transport failures are reported as fixed
+   * sentences: their text can repeat the request, and this message reaches the
+   * Settings browser.
+   * @param input - the listing request.
+   * @param signal - caller cancellation.
+   * @returns the discovered models, shaped as the card lists them.
+   */
+  const listOllamaModels = async (
+    input: { apiKey?: string; baseURL?: string },
+    signal: AbortSignal,
+  ) => {
+    const baseURL = input.baseURL ?? ollamaBaseURL()
+    let apiKey = input.apiKey
+    if (apiKey === undefined) {
+      if (!sameOllamaDestination(baseURL, operatorOllamaBaseURL))
+        throw new BadRequest(
+          'enter the API key to list models from an address other than the configured one',
+        )
+      apiKey = (await ollamaConnection())?.apiKey
+      if (apiKey === undefined)
+        throw new BadRequest('no Ollama API key is configured for this route')
+    }
+    if (hasControlCharacters(apiKey))
+      throw new BadRequest(
+        'the Ollama API key cannot be sent: it carries control characters',
+      )
+    const timeout = AbortSignal.timeout(OLLAMA_PULL_TIMEOUT_MS)
+    const combined = AbortSignal.any([signal, timeout])
+    let discovered: OllamaDiscoveredModel[]
+    try {
+      discovered = await fetchOllamaModels({
+        baseURL,
+        apiKey,
+        signal: combined,
+      })
+    } catch (error) {
+      if (timeout.aborted) {
+        // The host renders error.cause. This timeout replaces the abort.
+        // eslint-disable-next-line preserve-caught-error -- the replacement is the message the host shows
+        throw new Error(
+          `Ollama model listing timed out after ${OLLAMA_PULL_TIMEOUT_MS}ms`,
+        )
+      }
+      // The provider's message can repeat the request; only the reviewed cause
+      // stays, out of the reply.
+      throw new Error('the Ollama endpoint could not be read', { cause: error })
+    }
+    return {
+      models: discovered.map((row) => ({
+        id: row.id,
+        rawId: row.rawId,
+        name: row.rawId,
+        vision: row.inputModalities?.includes('image') === true,
+        thinking: row.thinking,
+        ...(row.contextWindow === undefined
+          ? {}
+          : { contextWindow: row.contextWindow }),
+        efforts:
+          row.reasoning?.efforts.map((effort) => String(effort.id)) ?? [],
+        ...(row.reasoning?.defaultEffort === undefined
+          ? {}
+          : { defaultEffort: String(row.reasoning.defaultEffort) }),
+      })),
+    }
+  }
+  registerAuthRpc(ctx, {
+    controller: new SubscriptionsAuthController(
       flows,
       deviceFlows,
       authChanged,
@@ -613,7 +782,7 @@ export function assembleRpc(deps: RpcDeps): void {
     ),
     speed,
     modelDefaults,
-    {
+    providerSettings: {
       visibleModels: (provider) => preferences.get(provider).visibleModels,
       async get(provider, force) {
         await loadModelDefaults()
@@ -743,13 +912,17 @@ export function assembleRpc(deps: RpcDeps): void {
       },
     },
     externalUsage,
-    {
+    ollama: {
       settings: async () => ({
         provider: 'ollama-cloud',
         settings: ollamaSettings.get(),
         effective: {
           baseURL: ollamaBaseURL(),
-          apiKeyRef: ollamaApiKeyRef(),
+          // Same rule as the Cursor card: a name that is not a reference is
+          // omitted rather than printed back.
+          apiKeyRef: isCredentialRefName(ollamaApiKeyRef())
+            ? ollamaApiKeyRef()
+            : '',
           web: ollamaWebEnabled(),
         },
         // The picker's catalog, so the dialog can show what it is editing even
@@ -780,6 +953,7 @@ export function assembleRpc(deps: RpcDeps): void {
             : { defaultEffort: entry.defaultEffort }),
         })),
         configOverridesModels: ollamaModelsOverridden(),
+        keyUsable: ollamaDestinationIsConfigured(),
       }),
       setSettings: async (input) => {
         let validated
@@ -798,51 +972,10 @@ export function assembleRpc(deps: RpcDeps): void {
         ollamaHandle?.replace([OLLAMA_CLOUD_ROUTE])
         syncOllamaWeb()
       },
-      models: async (input, signal) => {
-        const baseURL = input.baseURL ?? ollamaBaseURL()
-        // A typed key rides this listing only: it is never written to the store
-        // and never echoed back in the reply.
-        const apiKey =
-          input.apiKey ??
-          (await resolveExternalCredential?.(ollamaApiKeyRef()))?.value
-        const timeout = AbortSignal.timeout(OLLAMA_PULL_TIMEOUT_MS)
-        const combined = AbortSignal.any([signal, timeout])
-        let discovered: OllamaDiscoveredModel[]
-        try {
-          discovered = await fetchOllamaModels({
-            baseURL,
-            apiKey,
-            signal: combined,
-          })
-        } catch (error) {
-          if (timeout.aborted) {
-            // The host renders error.cause. This timeout replaces the abort.
-            // eslint-disable-next-line preserve-caught-error -- the replacement is the message the host shows
-            throw new Error(
-              `Ollama model listing timed out after ${OLLAMA_PULL_TIMEOUT_MS}ms`,
-            )
-          }
-          throw error
-        }
-        return {
-          models: discovered.map((row) => ({
-            id: row.id,
-            rawId: row.rawId,
-            name: row.rawId,
-            vision: row.inputModalities?.includes('image') === true,
-            thinking: row.thinking,
-            ...(row.contextWindow === undefined
-              ? {}
-              : { contextWindow: row.contextWindow }),
-            efforts:
-              row.reasoning?.efforts.map((effort) => String(effort.id)) ?? [],
-            ...(row.reasoning?.defaultEffort === undefined
-              ? {}
-              : { defaultEffort: String(row.reasoning.defaultEffort) }),
-          })),
-        }
-      },
+      models: async (input, signal) => listOllamaModels(input, signal),
     },
     cursor,
-  )
+
+    keyCredentials,
+  })
 }

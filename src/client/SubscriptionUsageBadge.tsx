@@ -37,6 +37,7 @@ import { useSubscriptionAnchoredPosition } from './useSubscriptionAnchoredPositi
 import { callSubscriptionsAuth } from './SubscriptionsSection.js'
 import { UsageMeter } from './UsageMeter.js'
 import { UsageBar, hasMoney, windowTooltip } from './UsageBar.js'
+import { usageWindowLabel } from './UsageWindowRow.js'
 import { formatMoney } from './money-format.js'
 import { readAccountModelId } from '../providers/account-model.js'
 import { quotaPercent, quotaText, useQuotaClock } from './quota-display.js'
@@ -576,19 +577,6 @@ type Translate = (
   key: SubscriptionsKey,
   params?: Record<string, unknown>,
 ) => string
-
-/** Localized label of one usage window (kind, plus the model scope when named). */
-function usageWindowLabel(t: Translate, window: UsageWindow): string {
-  const base =
-    window.kind === 'session'
-      ? t('usageSession')
-      : window.kind === 'weekly'
-        ? t('usageWeekly')
-        : t('usageWindow')
-  return window.scope !== undefined && window.scope !== ''
-    ? `${base} · ${window.scope}`
-    : base
-}
 
 /**
  * The composer subscription-usage badge: a pill reading e.g.

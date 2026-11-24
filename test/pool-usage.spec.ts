@@ -512,3 +512,31 @@ test('snapshotFor: a discarded fetch that fails after a newer success cannot cac
     'the late failure must not displace the fresh success',
   )
 })
+test('quotaFor: the extra-usage budget does not stand in for the plan quota', async () => {
+  // The money window is scoped to its own lane, so an exhausted overage budget
+  // must not park an account whose plan windows are healthy — and a healthy
+  // budget must not excuse an exhausted plan window either.
+  const budget: UsageWindow = {
+    kind: 'other',
+    scope: 'Extra usage',
+    usedAmount: 60_021,
+    limitAmount: 60_000,
+    limitSource: 'provider',
+    usedPercent: 100,
+    currency: 'USD',
+  }
+  const { tracker } = trackerOf(async () => ({
+    supported: true,
+    windows: [{ kind: 'session', usedPercent: 12 }, budget],
+  }))
+  const healthy = await tracker.quotaFor(MEMBER)
+  assert.equal(healthy.exhausted, false)
+  assert.equal(healthy.available, true)
+
+  const exhaustedPlan = trackerOf(async () => ({
+    supported: true,
+    windows: [{ kind: 'session', usedPercent: 100 }, budget],
+  }))
+  const blocked = await exhaustedPlan.tracker.quotaFor(MEMBER)
+  assert.equal(blocked.exhausted, true)
+})

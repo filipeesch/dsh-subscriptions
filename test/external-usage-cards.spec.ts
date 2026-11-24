@@ -10,7 +10,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { externalUsageWindowLabel } from '../src/client/ExternalUsageCards.js'
+import { usageWindowLabel as externalUsageWindowLabel } from '../src/client/UsageWindowRow.js'
 import { en, zh } from '../src/client/locales.js'
 import type { UsageWindow } from '../src/client/SubscriptionsSection.js'
 

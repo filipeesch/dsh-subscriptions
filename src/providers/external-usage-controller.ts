@@ -1,5 +1,6 @@
 import { fetchMiniMaxUsage } from './minimax-usage.js'
 import { fetchCursorUsage } from './cursor/quota.js'
+import { DEFAULT_CURSOR_API_KEY_REF } from './cursor/route.js'
 import {
   fetchKimiCodeUsage,
   fetchOllamaUsage,
@@ -9,6 +10,7 @@ import {
   DEFAULT_OLLAMA_API_KEY_REF,
   DEFAULT_OLLAMA_BASE_URL,
 } from './ollama.js'
+import { credentialDigest, hasControlCharacters } from './credential-text.js'
 import type { ProviderUsage } from './common.js'
 
 /** Usage-only sources whose model routes are supplied by the DSH base install. */
@@ -54,7 +56,45 @@ const DEFAULT_REFS: Record<ExternalUsageSource, string> = {
   minimax: 'MINIMAX_API_KEY',
   'minimax-cn': 'MINIMAX_CN_API_KEY',
   'ollama-cloud': DEFAULT_OLLAMA_API_KEY_REF,
-  cursor: 'CURSOR_API_KEY',
+  cursor: DEFAULT_CURSOR_API_KEY_REF,
+}
+
+/** Every fact one shared read needs; a reader is a plain function of these. */
+export interface UsageReadInput {
+  apiKey: string
+  ollamaBaseURL: string
+  /** Monthly ceiling in dollars, used only when Cursor reports spend without a limit. */
+  ceilingUSD: number | undefined
+  endpoint: string | undefined
+  http: typeof fetch
+  signal: AbortSignal | undefined
+}
+
+/** One source's usage reader, keyed into {@link READERS}. */
+export type UsageReader = (input: UsageReadInput) => Promise<ProviderUsage>
+
+/**
+ * The reader of each source. Adding a source is this table plus the source id:
+ * no branch inside the controller knows which provider it is calling.
+ */
+const READERS: Record<ExternalUsageSource, UsageReader> = {
+  'opencode-go': ({ apiKey, http, signal }) =>
+    fetchOpenCodeGoUsage(apiKey, http, signal),
+  'kimi-code': ({ apiKey, http, signal }) =>
+    fetchKimiCodeUsage(apiKey, http, signal),
+  minimax: ({ apiKey, http, signal }) =>
+    fetchMiniMaxUsage(apiKey, 'global', http, signal),
+  'minimax-cn': ({ apiKey, http, signal }) =>
+    fetchMiniMaxUsage(apiKey, 'cn', http, signal),
+  'ollama-cloud': ({ apiKey, ollamaBaseURL, http, signal }) =>
+    fetchOllamaUsage(apiKey, ollamaBaseURL, http, signal),
+  cursor: ({ apiKey, http, signal, ceilingUSD, endpoint }) =>
+    fetchCursorUsage(apiKey, {
+      http,
+      ...(signal === undefined ? {} : { signal }),
+      ...(ceilingUSD === undefined ? {} : { ceilingUSD }),
+      ...(endpoint === undefined ? {} : { endpoint }),
+    }),
 }
 
 /** How long one successful read serves the card and every mounted composer. */
@@ -63,25 +103,18 @@ const CACHE_TTL_MS = 60_000
 /** Bound one shared Cursor read; a hung connection becomes a stale reading. */
 const READ_TIMEOUT_MS = 20_000
 
-/** Non-reversible short identity of a credential value, for cache keys only. */
-function fingerprintOf(value: string): string {
-  let hash = 0x811c9dc5
-  for (let index = 0; index < value.length; index++) {
-    hash ^= value.charCodeAt(index)
-    hash = Math.imul(hash, 0x01000193)
-  }
-  return (hash >>> 0).toString(16)
-}
-
 export class ExternalUsageController {
   private readonly refs: Record<ExternalUsageSource, LiveValue>
   private readonly ollamaBaseURL: LiveValue
+  private readonly readers: Record<ExternalUsageSource, UsageReader>
   private readonly cache = new Map<
     string,
     { usage: ProviderUsage; observedAt: number; stale: boolean }
   >()
   private readonly inflight = new Map<string, Promise<ProviderUsage>>()
   private readonly generations = new Map<string, number>()
+  /** The transport the readers get: every rejection becomes a fixed sentence. */
+  private readonly guardedHttp: typeof fetch
 
   constructor(
     private readonly resolveCredential: ResolveCredential,
@@ -93,14 +126,44 @@ export class ExternalUsageController {
       ceilingUSD?: () => number | undefined
       endpoint?: () => string | undefined
     } = {},
+    readers: Partial<Record<ExternalUsageSource, UsageReader>> = {},
+    /**
+     * Per-source gate for a credential the host will not spend right now (a key
+     * kept off a card-chosen address). It is keyed by source, not by reference:
+     * two sources may share a reference name without sharing a destination.
+     */
+    private readonly usable: Partial<
+      Record<ExternalUsageSource, () => boolean>
+    > = {},
   ) {
     this.refs = { ...DEFAULT_REFS, ...refs }
+    this.readers = { ...READERS, ...readers }
     this.ollamaBaseURL = ollamaBaseURL
+    // Readers build authorization headers from values this controller never
+    // sees (a provider-issued token, for one). A transport failure can quote that
+    // header, so both branches answer a fixed sentence and keep no raw error —
+    // not even as a cause, which a log could print.
+    this.guardedHttp = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const signal = init?.signal
+      try {
+        return await this.http(input, init)
+      } catch {
+        // The caller's signal decides cancellation; an exception merely named
+        // like an abort is a transport failure.
+        if (signal?.aborted === true)
+          throw new Error('the usage read was cancelled')
+        throw new Error('the usage endpoint could not be reached')
+      }
+    }) as typeof fetch
   }
 
   async status(): Promise<Record<ExternalUsageSource, ExternalUsageStatus>> {
     const values = await Promise.all(
       EXTERNAL_USAGE_SOURCES.map(async (source) => {
+        if (this.usable[source]?.() === false) return false
         const value = await this.resolveCredential(valueOf(this.refs[source]))
         return typeof value?.value === 'string' && value.value.length > 0
       }),
@@ -133,6 +196,8 @@ export class ExternalUsageController {
     // Snapshot the endpoint facts before the first await: a save that
     // switches the ref or host mid-flight must not send the old
     // reference's key to the new host.
+    if (this.usable[source]?.() === false)
+      throw new Error(`${source} API key is not configured`)
     const ref = valueOf(this.refs[source])
     const ollamaBase = valueOf(this.ollamaBaseURL)
     const ceiling = this.cursor.ceilingUSD?.()
@@ -140,6 +205,14 @@ export class ExternalUsageController {
     const credential = await this.resolveCredential(ref)
     if (credential?.value === undefined || credential.value.length === 0) {
       throw new Error(`${source} API key is not configured`)
+    }
+    // A value predating the card can carry a control character; building the
+    // header with it would put it in the transport's error, so it is refused
+    // here for every reader.
+    if (hasControlCharacters(credential.value)) {
+      throw new Error(
+        `the ${source} API key cannot be sent: it carries control characters`,
+      )
     }
     const read = (signal?: AbortSignal) =>
       this.read(source, credential.value, ollamaBase, ceiling, endpoint, signal)
@@ -161,7 +234,7 @@ export class ExternalUsageController {
     const key = [
       source,
       ref,
-      fingerprintOf(credential.value),
+      credentialDigest(credential.value),
       ollamaBase,
       ceiling ?? '',
       endpoint ?? '',
@@ -264,25 +337,13 @@ export class ExternalUsageController {
     endpoint: string | undefined,
     signal?: AbortSignal,
   ): Promise<ProviderUsage> {
-    if (source === 'minimax' || source === 'minimax-cn')
-      return fetchMiniMaxUsage(
-        apiKey,
-        source === 'minimax-cn' ? 'cn' : 'global',
-        this.http,
-        signal,
-      )
-    if (source === 'ollama-cloud')
-      return fetchOllamaUsage(apiKey, ollamaBase, this.http, signal)
-    if (source === 'cursor') {
-      return fetchCursorUsage(apiKey, {
-        http: this.http,
-        ...(signal === undefined ? {} : { signal }),
-        ...(ceiling === undefined ? {} : { ceilingUSD: ceiling }),
-        ...(endpoint === undefined ? {} : { endpoint }),
-      })
-    }
-    return source === 'opencode-go'
-      ? fetchOpenCodeGoUsage(apiKey, this.http, signal)
-      : fetchKimiCodeUsage(apiKey, this.http, signal)
+    return await this.readers[source]({
+      apiKey,
+      ollamaBaseURL: ollamaBase,
+      ceilingUSD: ceiling,
+      endpoint,
+      http: this.guardedHttp,
+      signal,
+    })
   }
 }

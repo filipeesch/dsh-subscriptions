@@ -28,12 +28,42 @@ login and keeps no `auth.json` entry.
 A Cursor API key from [cursor.com/dashboard](https://cursor.com/dashboard) →
 **API Keys** (a personal or service-account key; a team admin key is not
 supported), stored in DSH credentials under the reference the route reads.
-`CURSOR_API_KEY` is the default; the reference is configurable.
+`CURSOR_API_KEY` is the default; the reference is configurable. Paste the key
+into the Cursor card in **Settings → Subscriptions**, or supply it through the
+environment or a `.env` file under the same reference — see
+[Setting the key](#setting-the-key).
 
 The host's Node runtime must satisfy the SDK's Node floor (the versions in
 [compatibility.md](compatibility.md) ship Node 24). The route registers even
 when the key is absent: without a key it lists no models and reports a
 missing-credential error on use.
+
+## Setting the key
+
+The Cursor card owns the key as well as the route's settings. Its field states
+where the value currently comes from and offers save, replace, and remove:
+
+| Card states         | Meaning                                                       |
+| ------------------- | ------------------------------------------------------------- |
+| No key found at REF | The reference resolves to nothing, in any layer               |
+| Environment         | The process environment or an inline `.env` value supplies it |
+| Project/user `.env` | That named layer supplies it; DSH holds no copy               |
+| Stored in DSH       | DSH's store supplies it, with the host's masked preview       |
+
+The masked preview is the host's; an older host reports none, and the card then
+states the stored origin alone. Saving stores the value under the route's
+effective reference and validates it with a live catalog read. A rejected key
+stays saved, with the rejection stated on the card, so a typo is corrected there
+instead of being discarded. Removing clears the DSH copy only: when an
+environment variable still supplies the reference, the card says so and the
+route keeps working.
+
+The reference itself is configuration (`apiKeyRef`), not a card field; the card
+edits the secret behind the reference the route already reads, so only a
+reference fixed by the profile or the built-in default can be managed this way.
+A different reference in the environment is not adopted automatically: set
+`apiKeyRef` to the name the environment uses, or save the value under the
+default one.
 
 ## Configuration
 

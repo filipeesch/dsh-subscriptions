@@ -726,14 +726,29 @@ test('exact model resolution carries the advertised reasoning efforts', async ()
   )
 })
 
-test('a forced reload propagates an SDK failure', async () => {
+test('a forced reload fails with a fixed sentence and warns with the reviewed detail', async () => {
   const { gateway } = gatewayOf()
-  const adapter = adapterOf(gateway)
+  const warnings: string[] = []
+  const adapter = adapterOf(gateway, {
+    onWarn: (message) => warnings.push(message),
+  })
   await adapter.listModels('cursor')
   gateway.listModels = async () => {
     throw new Error('offline')
   }
-  await assert.rejects(adapter.refreshCatalog(), /offline/)
+  // The thrown message reaches the Settings browser through RPC, so it is fixed;
+  // the reviewed warning keeps the diagnostic for the log.
+  await assert.rejects(
+    adapter.refreshCatalog(),
+    /the Cursor catalog could not be read/,
+  )
+  await assert.rejects(adapter.refreshCatalog(), (error: Error) => {
+    assert.doesNotMatch(error.message, /offline/)
+    return true
+  })
+  assert.ok(
+    warnings.some((message) => message.includes('Cursor catalog failed')),
+  )
 })
 
 test('startup revalidation publishes the seed and reads the SDK once', async () => {
@@ -796,6 +811,9 @@ test('a withdrawn tier is forgotten on catalog change and cannot reappear withou
     },
   ]
   await adapter.listModels('cursor')
+  // The picker refresh runs in the background once a catalog is known; its
+  // prune lands a tick later.
+  await new Promise((resolve) => setTimeout(resolve, 0))
   assert.equal(tier.acceptedTier('claude-sonnet-5-5'), undefined)
   // Reappearance does not make the old acceptance effective again.
   models = CATALOG
@@ -972,4 +990,92 @@ test('the route publishes a retry policy for pre-output failures only', () => {
   )
   // The other routes this plugin serves keep the host's default policy.
   assert.equal(adapter.providerRetryPolicy('codex'), undefined)
+})
+
+test('a key validation spends exactly the given value, never the cached one', async () => {
+  // The validation must prove the credential the writer committed: joining a
+  // catalog read made with the previous key, or reading the stored key again,
+  // would report a verdict about another value.
+  const keys: string[] = []
+  const gateway: CursorGateway = {
+    async createAgent() {
+      throw new Error('no agent runs in this case')
+    },
+    async deleteAgent() {},
+    async listModels(options) {
+      keys.push(options.apiKey)
+      return CATALOG
+    },
+  }
+  const adapter = adapterOf(gateway)
+  // Warm the cache with the stored key first.
+  await adapter.listModels('cursor')
+  assert.deepEqual(keys, ['crsr_test'])
+  await adapter.validateKey('verified-key')
+  assert.deepEqual(keys, ['crsr_test', 'verified-key'])
+  // An empty value is refused before any read.
+  await assert.rejects(adapter.validateKey(''), /the Cursor API key is empty/)
+  assert.deepEqual(keys, ['crsr_test', 'verified-key'])
+})
+
+test('a key validation treats an empty catalog as a failure', async () => {
+  const gateway: CursorGateway = {
+    async createAgent() {
+      throw new Error('no agent runs in this case')
+    },
+    async deleteAgent() {},
+    async listModels() {
+      return []
+    },
+  }
+  const adapter = adapterOf(gateway)
+  await assert.rejects(adapter.validateKey('k'), /returned no models/)
+})
+
+test('a key validation publishes nothing and forgets no remembered tier', async () => {
+  // The read runs after the write and can be superseded, so it must not publish
+  // ids or prune tiers for a key another writer already replaced. A probe paused
+  // this read, refreshed with the current key, then released it: the older read
+  // published last and its withdrawn tier was forgotten.
+  let release: (() => void) | undefined
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const published: string[][] = []
+  const forgotten: string[] = []
+  let warmed = 0
+  const gateway: CursorGateway = {
+    async createAgent() {
+      warmed += 1
+      throw new Error('no agent runs in this case')
+    },
+    async deleteAgent() {},
+    async listModels(options) {
+      if (options.apiKey === 'previous-key') {
+        await gate
+        // A model whose remembered tier this catalog no longer offers: a
+        // publishing read would forget it.
+        return [{ id: 'withdrawn-model', name: 'withdrawn-model' }]
+      }
+      return [{ id: 'current-model', name: 'current-model' }]
+    },
+  }
+  const adapter = adapterOf(gateway, {
+    // Warmup is enabled here on purpose: the validation must not trigger it.
+    prewarm: true,
+    onCatalog: (ids) => published.push([...ids]),
+    acceptedTier: (model) => (model === 'withdrawn-model' ? 'high' : undefined),
+    forgetAcceptedTier: (model) => forgotten.push(model),
+  })
+  const validation = adapter.validateKey('previous-key')
+  // A normal discovery with the current key completes while validation waits;
+  // it is allowed to warm the SDK, the validation is not.
+  await adapter.refreshCatalog()
+  const warmedByDiscovery = warmed
+  release?.()
+  await validation
+  assert.deepEqual(published, [['current-model']])
+  assert.deepEqual(forgotten, [])
+  // Only a discovery warms the SDK: the deferred validation added no warmup.
+  assert.equal(warmed, warmedByDiscovery)
 })

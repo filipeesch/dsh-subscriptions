@@ -3,16 +3,11 @@ import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import type {
   ProviderUsage,
   SubscriptionsSectionInjected,
-  UsageWindow,
 } from './SubscriptionsSection.js'
 import { callSubscriptionsAuth } from './subscriptions-rpc.js'
 import { subscriptionCardStyles as styles } from './subscription-card-styles.js'
-import {
-  USAGE_BADGE_REFRESH_EVENT,
-  useQuotaDisplayMode,
-} from './usage-badge-preferences.js'
-import { UsageMeter } from './UsageMeter.js'
-import { quotaText, useQuotaClock } from './quota-display.js'
+import { USAGE_BADGE_REFRESH_EVENT } from './usage-badge-preferences.js'
+import { UsageWindowRow } from './UsageWindowRow.js'
 
 type Source = 'opencode-go' | 'kimi-code' | 'minimax' | 'minimax-cn'
 type Translate = SubscriptionsSectionInjected['t']
@@ -30,31 +25,6 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-/**
- * Row label of one window on an external usage card. A session or weekly
- * window appends the model it belongs to when the provider names one (MiniMax
- * reports a window per model), so two models' weekly rows stay distinguishable.
- * The monthly pool is a scope on an `other` window, not a model.
- * @param t - section translate.
- * @param window - the reported window.
- * @returns the localized label, e.g. "Weekly · general".
- */
-export function externalUsageWindowLabel(
-  t: Translate,
-  window: UsageWindow,
-): string {
-  const named = window.scope !== undefined && window.scope !== ''
-  if (window.kind === 'other') {
-    return window.scope === 'Monthly'
-      ? t('usageMonthly')
-      : named
-        ? window.scope!
-        : t('usageWindow')
-  }
-  const base = window.kind === 'session' ? t('usageSession') : t('usageWeekly')
-  return named ? `${base} · ${window.scope}` : base
-}
-
 /** Quota cards for API-key providers already available through DSH itself. */
 export function ExternalUsageCards({
   rpc,
@@ -63,8 +33,6 @@ export function ExternalUsageCards({
   rpc: ConnectionHandle['rpc']
   t: Translate
 }) {
-  const quotaMode = useQuotaDisplayMode()
-  const quotaNow = useQuotaClock()
   const [status, setStatus] = useState<Status>()
   const [statusError, setStatusError] = useState<string>()
   const [usage, setUsage] = useState<Partial<Record<Source, ProviderUsage>>>({})
@@ -199,33 +167,17 @@ export function ExternalUsageCards({
                   {snapshot?.windows?.length === 0 && (
                     <p style={styles.status}>{t('usageEmpty')}</p>
                   )}
-                  {snapshot?.windows?.map((window, index) => {
-                    const label = externalUsageWindowLabel(t, window)
-                    return (
-                      <div key={index} style={styles.usageRow}>
-                        <div style={styles.usageMeta}>
-                          <span>{label}</span>
-                          <span>
-                            {quotaText(window.usedPercent, quotaMode, t)}
-                            {window.resetsAt === undefined
-                              ? ''
-                              : ` · ${t('usageResets', { date: new Date(window.resetsAt).toLocaleString() })}`}
-                            {window.resetsAt !== undefined &&
-                              window.resetsAt <= quotaNow &&
-                              ` · ${t('quotaExpiredWindow')}`}
-                          </span>
-                        </div>
-                        <UsageMeter
-                          window={window}
-                          t={t}
-                          observedAt={observedAt[id]}
-                          stale={
-                            errors[id] !== undefined || snapshot?.stale === true
-                          }
-                        />
-                      </div>
-                    )
-                  })}
+                  {snapshot?.windows?.map((window, index) => (
+                    <UsageWindowRow
+                      key={index}
+                      window={window}
+                      t={t}
+                      observedAt={observedAt[id]}
+                      stale={
+                        errors[id] !== undefined || snapshot?.stale === true
+                      }
+                    />
+                  ))}
                 </div>
               </div>
             )}

@@ -394,11 +394,43 @@ export class CursorAdapter extends LlmAdapter {
       this.catalogApplied(models)
       return models
     } catch (error) {
+      // The reviewed warning keeps the diagnostic; the thrown sentence is fixed
+      // because this error's message reaches the Settings browser through RPC.
       this.options.onWarn?.(
         `Cursor catalog failed: ${safeError(error, 'list the models')}`,
       )
-      throw error
+      throw new Error('the Cursor catalog could not be read', { cause: error })
     }
+  }
+
+  /**
+   * Prove one API key with a live catalog read made with exactly that value.
+   *
+   * A validation must not join the shared catalog read: that read may have been
+   * started with the previous key, and a cached success would then be reported
+   * for a credential nobody used. It also must not read the stored key itself —
+   * the caller passes the value it verified. The read is not published to the
+   * cache; the caller's own invalidation makes the next picker pass read again.
+   * @param apiKey - the verified credential value to spend on this read.
+   * @throws when the key is empty or the provider rejects it, including when it
+   *   answers with an empty catalog.
+   */
+  async validateKey(apiKey: string): Promise<void> {
+    if (apiKey.length === 0) throw new Error('the Cursor API key is empty')
+    this.lifetime.signal.throwIfAborted()
+    await this.readCatalog(apiKey)
+  }
+
+  /**
+   * Drop the known catalog because the credential that produced it changed.
+   *
+   * The cache also drops its in-flight read and its seeded snapshot: a read
+   * started with the previous key must not serve the next validation, and the
+   * persisted catalog belongs to the account that key authenticated. The next
+   * discovery starts from the new credential.
+   */
+  forgetCatalog(): void {
+    this.catalog.invalidate()
   }
 
   /**
@@ -579,13 +611,19 @@ export class CursorAdapter extends LlmAdapter {
   }
 
   /**
-   * Read the live catalog and pay the one-time warmup.
-   * @param apiKey - the resolved credential.
+   * Read the live catalog without touching any state: no warmup, no publication,
+   * no tier pruning.
+   *
+   * A key validation uses this. It runs after the write that committed the
+   * credential and can be superseded, so it must not publish ids or forget
+   * remembered tiers for a key another writer has already replaced. Discovery
+   * keeps the side effects in {@link fetchCatalog}.
+   * @param apiKey - the verified credential to spend on this read.
    * @returns the models the catalog reported.
    * @throws when the adapter was disposed, the read timed out, or the catalog
-   *   reported no models (an empty read must not replace a known catalog).
+   *   reported no models (an empty read must not pass for a working key).
    */
-  private async fetchCatalog(apiKey: string): Promise<CursorCatalogModel[]> {
+  private async readCatalog(apiKey: string): Promise<CursorCatalogModel[]> {
     this.lifetime.signal.throwIfAborted()
     const discovered = await withTimeout(
       () => this.options.gateway.listModels({ apiKey }),
@@ -595,6 +633,18 @@ export class CursorAdapter extends LlmAdapter {
     if (discovered === undefined || discovered.length === 0) {
       throw new Error('the catalog read returned no models')
     }
+    return discovered
+  }
+
+  /**
+   * Read the live catalog and pay the one-time warmup.
+   * @param apiKey - the resolved credential.
+   * @returns the models the catalog reported.
+   * @throws when the adapter was disposed, the read timed out, or the catalog
+   *   reported no models (an empty read must not replace a known catalog).
+   */
+  private async fetchCatalog(apiKey: string): Promise<CursorCatalogModel[]> {
+    const discovered = await this.readCatalog(apiKey)
     if (this.options.prewarm !== false) {
       const modelId =
         discovered.find((model) => model.id === 'default')?.id ??

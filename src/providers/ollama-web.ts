@@ -31,15 +31,21 @@ export const OLLAMA_WEB_MAX_RESULTS = 10
 /** Response body bound for web payloads. */
 export const OLLAMA_WEB_MAX_BYTES = 2 * 1024 * 1024
 
+/** The credential and the destination it was authorized for, read together. */
+export interface OllamaWebConnection {
+  apiKey: string
+  /** Native base URL; web endpoints ride it unchanged (no `/v1` mapping). */
+  baseURL: string
+}
+
 export interface OllamaWebOptions {
-  /** Resolve the API key per call; `undefined` means unconfigured. */
-  apiKey: () => Promise<string | undefined>
   /**
-   * Native base URL; web endpoints ride it unchanged (no `/v1` mapping). A
-   * function form is read per call so a Settings save applies without a
-   * restart.
+   * Resolve the key and the address together, per call. `undefined` means no
+   * usable credential: unconfigured, or a key the host will not spend at the
+   * current address. Reading both at once is what keeps a Settings save from
+   * pairing an approved key with a destination that was never approved.
    */
-  baseURL: string | (() => string)
+  connection: () => Promise<OllamaWebConnection | undefined>
   /** Local gate; absent counts as enabled. Read on every call. */
   enabled?: () => boolean
   fetchFn?: FetchFn
@@ -47,12 +53,6 @@ export interface OllamaWebOptions {
 }
 
 /** The effective base URL; both forms are read fresh so saves apply live. */
-function baseURLOf(options: OllamaWebOptions): string {
-  return typeof options.baseURL === 'function'
-    ? options.baseURL()
-    : options.baseURL
-}
-
 function throwIfAborted(signal?: AbortSignal): void {
   signal?.throwIfAborted()
 }
@@ -182,19 +182,19 @@ function recordOf(value: unknown): Record<string, unknown> | undefined {
     : undefined
 }
 
-async function resolveWebKey(
+async function resolveWebConnection(
   options: OllamaWebOptions,
   signal?: AbortSignal,
-): Promise<string> {
+): Promise<OllamaWebConnection> {
   throwIfAborted(signal)
-  const apiKey = await options.apiKey()
-  if (apiKey === undefined) {
+  const connection = await options.connection()
+  if (connection === undefined) {
     throw new WebError(
       'Ollama web search requires an Ollama Cloud API key; configure OLLAMA_API_KEY',
       'OLLAMA_WEB_MISSING_CREDENTIAL',
     )
   }
-  return apiKey
+  return connection
 }
 
 /**
@@ -218,11 +218,8 @@ export class OllamaWebSearchProvider implements WebSearchProvider {
   constructor(private readonly options: OllamaWebOptions) {}
 
   available(): boolean {
-    try {
-      new URL(baseURLOf(this.options))
-    } catch {
-      return false
-    }
+    // The stored and configured address is validated where it is set; the gate
+    // that changes at runtime is the switch.
     return this.options.enabled?.() ?? true
   }
 
@@ -231,11 +228,11 @@ export class OllamaWebSearchProvider implements WebSearchProvider {
     signal?: AbortSignal,
   ): Promise<WebSearchResult> {
     assertEnabled(this.options)
-    const apiKey = await resolveWebKey(this.options, signal)
-    const base = baseURLOf(this.options).replace(/\/+$/, '')
+    const connection = await resolveWebConnection(this.options, signal)
+    const base = connection.baseURL.replace(/\/+$/, '')
     const payload = await postJson(
       `${base}/web_search`,
-      apiKey,
+      connection.apiKey,
       {
         query: request.query,
         ...(request.maxResults === undefined
@@ -282,11 +279,8 @@ export class OllamaWebFetchProvider implements WebFetchProvider {
   constructor(private readonly options: OllamaWebOptions) {}
 
   available(): boolean {
-    try {
-      new URL(baseURLOf(this.options))
-    } catch {
-      return false
-    }
+    // The stored and configured address is validated where it is set; the gate
+    // that changes at runtime is the switch.
     return this.options.enabled?.() ?? true
   }
 
@@ -295,11 +289,11 @@ export class OllamaWebFetchProvider implements WebFetchProvider {
     signal?: AbortSignal,
   ): Promise<WebFetchResult> {
     assertEnabled(this.options)
-    const apiKey = await resolveWebKey(this.options, signal)
-    const base = baseURLOf(this.options).replace(/\/+$/, '')
+    const connection = await resolveWebConnection(this.options, signal)
+    const base = connection.baseURL.replace(/\/+$/, '')
     const payload = await postJson(
       `${base}/web_fetch`,
-      apiKey,
+      connection.apiKey,
       { url: request.url },
       this.options,
       signal,
