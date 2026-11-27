@@ -1,0 +1,305 @@
+<Screen
+  id="subscriptions"
+  title="Subscriptions"
+  background="color.canvas"
+  states={{
+    "manage-codex": { open: ["codex-manager"] },
+    "pool-models-open": { open: ["codex-manager"], disclosures: { "codex-pool-models": true } },
+    "codex-credits-open": { disclosures: { "codex-credits": true } },
+    "confirm-codex-reset": { open: ["codex-reset"], disclosures: { "codex-credits": true } }
+  }}
+>
+  <Stack align="center" padding={{ mobile: "spacing.sm", tablet: "spacing.lg" }}>
+    <Stack id="settings-shell" styleClass="settings-shell" background="color.surface" radius="radius.panel" gap="spacing.md" padding={{ mobile: "spacing.inset", tablet: "spacing.xl" }}>
+      <Stack direction="row" align="center" justify="between" gap="spacing.sm" wrap>
+        <Text variant="heading" fontSize="font.size.lg" fontWeight="font.weight.medium">Settings</Text>
+        <Button id="open-configuration" size="sm" variant="secondary">Open configuration file</Button>
+      </Stack>
+      <Stack direction={{ mobile: "column", tablet: "row" }} gap={{ mobile: "spacing.md", tablet: "spacing.xl" }}>
+        <Stack id="settings-nav" styleClass="settings-nav" direction={{ mobile: "row", tablet: "column" }} gap="spacing.xs" wrap>
+          <Text styleClass="settings-nav-item">General</Text>
+          <Text styleClass="settings-nav-item">Models</Text>
+          <Text styleClass="settings-nav-item">Built-in plugins</Text>
+          <Text styleClass="settings-nav-item">Agent presets</Text>
+          <Stack id="settings-selected" direction="row" align="center" gap="spacing.sm" padding="spacing.sm" background="color.selected" radius="radius.md">
+            <Icon name="settings" size="spacing.icon" color="color.text" />
+            <Text fontSize="font.size.md" fontWeight="font.weight.medium">Subscriptions</Text>
+          </Stack>
+        </Stack>
+        <Stack id="settings-content" styleClass="settings-content" gap="spacing.md">
+          <Text id="settings-intro" color="color.muted" styleClass="copy-body">Log a subscription provider in or out. Login opens the provider’s authorization page in a new tab; headless setups can paste the callback URL or code instead.</Text>
+          <Card id="quota-preferences" variant="outlined" padding="spacing.inset" radius="radius.card" borderColor="color.border">
+            <Stack gap="spacing.tight">
+              <Select id="status-bar-quota" styleClass="field" label="Status-bar quota display" value="recent" options={[
+                { label: "Current / most recent provider with usage", value: "recent" },
+                { label: "Always show one provider, rotating through the rest", value: "always" },
+                { label: "Hidden", value: "hidden" }
+              ]} />
+              <Text color="color.muted" variant="caption" styleClass="copy-note">Saved automatically in this browser. One provider is shown at a time. Models without a quota source keep the most recent provider selected in this view, or show nothing. Always show instead rotates through the providers with usage every 10 seconds while the current model has no quota source. Hiding does not affect usage details here.</Text>
+              <Select id="quota-percentages" styleClass="field" label="Quota percentages" value="used" options={[
+                { label: "Used (default)", value: "used" }, { label: "Remaining", value: "remaining" }
+              ]} />
+              <Text color="color.muted" variant="caption" styleClass="copy-note">Applies to Settings and the status bar, independently of hiding. Warning colors always indicate high usage.</Text>
+              <Select id="usage-coloring" styleClass="field" label="Usage coloring" value="standard" options={[
+                { label: "Standard (default · 10-point lead)", value: "standard" },
+                { label: "Relaxed (15-point lead)", value: "relaxed" },
+                { label: "Remaining quota only (no yellow)", value: "remaining" }
+              ]} />
+              <Text color="color.muted" variant="caption" styleClass="copy-note">Yellow when usage leads elapsed time by 10 points; red at 90% used takes priority. Saved in this browser; only colors change.</Text>
+            </Stack>
+          </Card>
+          <Card id="codex" variant="outlined" padding="spacing.inset" radius="radius.card" borderColor="color.border">
+            <Stack gap="spacing.sm">
+              <Stack direction="row" align="center" gap="spacing.sm" wrap>
+                <Box width="spacing.dot" height="spacing.dot" radius="radius.pill" background="color.connected" />
+                <Text fontWeight="font.weight.medium">Codex (ChatGPT)</Text>
+                <Text color="color.muted" variant="caption">CLI 9.9.9 · latest on npm</Text>
+              </Stack>
+              <Text color="color.muted" variant="caption">1 account(s) connected</Text>
+              <Card id="codex-account" variant="outlined" padding="spacing.sm" radius="radius.account" borderColor="color.stroke">
+                <Stack gap="spacing.sm">
+                  <Stack direction="row" justify="between" align="center" gap="spacing.sm" wrap>
+                    <Stack direction="row" align="center" gap="spacing.sm">
+                      <Text color="color.warning">★</Text>
+                      <Text fontSize="font.size.field">codex-demo</Text>
+                    </Stack>
+                    <Button id="codex-log-out" variant="secondary" size="sm">Log out</Button>
+                  </Stack>
+                  <Divider />
+                  <Stack direction="row" align="center" justify="between" gap="spacing.sm">
+                    <Stack direction="row" align="center" gap="spacing.sm">
+                      <Text color="color.subtle" variant="caption" fontWeight="font.weight.medium">Usage</Text>
+                      <Text color="color.muted" variant="caption">Plan: plus</Text>
+                    </Stack>
+                    <Button id="codex-refresh" variant="secondary" size="sm">Refresh</Button>
+                  </Stack>
+                  <Stack gap="spacing.xs">
+                    <Stack direction="row" justify="between" gap="spacing.xs" wrap>
+                      <Text color="color.muted" variant="caption">5-hour window</Text>
+                      <Text color="color.muted" variant="caption">11% used · resets 12/1/2026, 2:00 PM</Text>
+                    </Stack>
+                    <Box id="codex-five-hour-meter" styleClass="quota-meter" height="spacing.meter" radius="radius.sm" borderColor="color.stroke">
+                      <Box width="size.session-fill" height="spacing.meter-fill" radius="radius.sm" background="color.connected" />
+                    </Box>
+                  </Stack>
+                  <Stack gap="spacing.xs">
+                    <Stack direction="row" justify="between" gap="spacing.xs" wrap>
+                      <Text color="color.muted" variant="caption">Weekly</Text>
+                      <Text color="color.muted" variant="caption">86% used · resets 12/4/2026, 2:00 PM</Text>
+                    </Stack>
+                    <Box id="codex-weekly-meter" styleClass="quota-meter" height="spacing.meter" radius="radius.sm" borderColor="color.stroke">
+                      <Box width="size.weekly-fill" height="spacing.meter-fill" radius="radius.sm" background="color.warning" />
+                    </Box>
+                  </Stack>
+                  <Disclosure id="codex-credits" label="Usage limit resets · 1 available">
+                    <Stack id="codex-credit-details" direction="row" align="center" justify="between" gap="spacing.sm" wrap>
+                      <Stack direction="row" align="center" gap="spacing.sm">
+                        <Text color="color.muted" variant="caption">Full reset</Text>
+                        <Button id="codex-use-credit" size="sm" variant="secondary" onPress={open("codex-reset")}>Use…</Button>
+                      </Stack>
+                      <Text color="color.muted" variant="caption">Expires 12/31/2026, 11:59 PM</Text>
+                    </Stack>
+                  </Disclosure>
+                </Stack>
+              </Card>
+              <Stack direction="row" align="center" gap="spacing.sm" wrap>
+                <Button id="codex-add" size="sm" variant="secondary">Add account</Button>
+                <Button id="codex-manage" size="sm" variant="secondary" onPress={open("codex-manager")}>Manage</Button>
+              </Stack>
+              <Text color="color.muted" variant="caption" styleClass="copy-note">Browser authorization signs in whichever account the browser currently uses — switch accounts there first (or use an incognito window with the manual code below) to add a different one.</Text>
+            </Stack>
+          </Card>
+          <Card id="claude" variant="outlined" padding="spacing.inset" radius="radius.card" borderColor="color.border">
+            <Stack gap="spacing.tight">
+              <Stack direction="row" align="center" gap="spacing.sm">
+                <Box width="spacing.dot" height="spacing.dot" radius="radius.pill" background="color.offline" />
+                <Text fontWeight="font.weight.medium">Claude</Text>
+              </Stack>
+              <Text color="color.muted" variant="caption">Not logged in</Text>
+              <Stack direction="row" gap="spacing.sm" wrap>
+                <Button id="claude-login" size="sm" variant="secondary">Log in</Button>
+                <Button id="claude-manage" size="sm" variant="secondary">Manage</Button>
+              </Stack>
+            </Stack>
+          </Card>
+          <Card id="grok" variant="outlined" padding="spacing.inset" radius="radius.card" borderColor="color.border">
+            <Stack gap="spacing.tight">
+              <Stack direction="row" align="center" gap="spacing.sm">
+                <Box width="spacing.dot" height="spacing.dot" radius="radius.pill" background="color.offline" />
+                <Text fontWeight="font.weight.medium">Grok (X Premium)</Text>
+              </Stack>
+              <Text color="color.muted" variant="caption">Not logged in</Text>
+              <Stack direction="row" gap="spacing.sm" wrap>
+                <Button id="grok-login" size="sm" variant="secondary">Log in</Button>
+                <Button id="grok-manage" size="sm" variant="secondary">Manage</Button>
+              </Stack>
+            </Stack>
+          </Card>
+          <Card id="copilot" variant="outlined" padding="spacing.inset" radius="radius.card" borderColor="color.border">
+            <Stack gap="spacing.tight">
+              <Stack direction="row" align="center" gap="spacing.sm">
+                <Box width="spacing.dot" height="spacing.dot" radius="radius.pill" background="color.offline" />
+                <Text fontWeight="font.weight.medium">GitHub Copilot</Text>
+              </Stack>
+              <Text color="color.muted" variant="caption">Not logged in</Text>
+              <Stack direction="row" gap="spacing.sm" wrap>
+                <Button id="copilot-login" size="sm" variant="secondary">Log in</Button>
+                <Button id="copilot-manage" size="sm" variant="secondary">Manage</Button>
+              </Stack>
+            </Stack>
+          </Card>
+          <Card id="antigravity" variant="outlined" padding="spacing.inset" radius="radius.card" borderColor="color.border">
+            <Stack gap="spacing.tight">
+              <Stack direction="row" align="center" gap="spacing.sm">
+                <Box width="spacing.dot" height="spacing.dot" radius="radius.pill" background="color.offline" />
+                <Text fontWeight="font.weight.medium">Google Antigravity</Text>
+              </Stack>
+              <Text color="color.muted" variant="caption">Not logged in</Text>
+              <Stack direction="row" gap="spacing.sm" wrap>
+                <Button id="antigravity-login" size="sm" variant="secondary">Log in</Button>
+                <Button id="antigravity-manage" size="sm" variant="secondary">Manage</Button>
+              </Stack>
+            </Stack>
+          </Card>
+          <Card id="ollama" variant="outlined" padding="spacing.inset" radius="radius.account" borderColor="color.stroke">
+            <Stack gap="spacing.tight">
+              <Stack direction="row" align="center" gap="spacing.sm">
+                <Box width="spacing.dot" height="spacing.dot" radius="radius.pill" background="color.offline" />
+                <Text fontWeight="font.weight.medium">Ollama Cloud</Text>
+              </Stack>
+              <Text color="color.muted" variant="caption">No models configured</Text>
+              <Text color="color.muted" variant="caption">Web search/fetch off</Text>
+              <Text color="color.muted" variant="caption" styleClass="copy-note">No API key found at OLLAMA_API_KEY. Add it to the credentials file (~/.dsh/.credentials.yaml).</Text>
+              <Stack align="start">
+                <Button id="ollama-manage" size="sm" variant="secondary">Manage</Button>
+              </Stack>
+            </Stack>
+          </Card>
+          <Card id="opencode-go" variant="outlined" padding="spacing.inset" radius="radius.account" borderColor="color.stroke">
+            <Stack gap="spacing.tight">
+              <Stack direction="row" align="center" gap="spacing.sm">
+                <Box width="spacing.dot" height="spacing.dot" radius="radius.pill" background="color.offline" />
+                <Text fontWeight="font.weight.medium">OpenCode Go</Text>
+              </Stack>
+              <Text color="color.muted" variant="caption">Not configured</Text>
+              <Text color="color.muted" variant="caption" styleClass="copy-note">No API key found at OPENCODE_GO_API_KEY. Add one in Settings → Models.</Text>
+              <Stack align="start">
+                <Button id="opencode-go-refresh" size="sm" variant="secondary">Refresh</Button>
+              </Stack>
+            </Stack>
+          </Card>
+          <Card id="kimi-code" variant="outlined" padding="spacing.inset" radius="radius.account" borderColor="color.stroke">
+            <Stack gap="spacing.tight">
+              <Stack direction="row" align="center" gap="spacing.sm">
+                <Box width="spacing.dot" height="spacing.dot" radius="radius.pill" background="color.offline" />
+                <Text fontWeight="font.weight.medium">Kimi Code</Text>
+              </Stack>
+              <Text color="color.muted" variant="caption">Not configured</Text>
+              <Text color="color.muted" variant="caption" styleClass="copy-note">No API key found at KIMI_CODING_API_KEY. Add one in Settings → Models.</Text>
+              <Stack align="start">
+                <Button id="kimi-code-refresh" size="sm" variant="secondary">Refresh</Button>
+              </Stack>
+            </Stack>
+          </Card>
+          <Card id="minimax" variant="outlined" padding="spacing.inset" radius="radius.account" borderColor="color.stroke">
+            <Stack gap="spacing.tight">
+              <Stack direction="row" align="center" gap="spacing.sm">
+                <Box width="spacing.dot" height="spacing.dot" radius="radius.pill" background="color.offline" />
+                <Text fontWeight="font.weight.medium">MiniMax</Text>
+              </Stack>
+              <Text color="color.muted" variant="caption">Not configured</Text>
+              <Text color="color.muted" variant="caption" styleClass="copy-note">No API key found at MINIMAX_API_KEY. Add one in Settings → Models.</Text>
+              <Stack align="start">
+                <Button id="minimax-refresh" size="sm" variant="secondary">Refresh</Button>
+              </Stack>
+            </Stack>
+          </Card>
+          <Card id="minimax-cn" variant="outlined" padding="spacing.inset" radius="radius.account" borderColor="color.stroke">
+            <Stack gap="spacing.tight">
+              <Stack direction="row" align="center" gap="spacing.sm">
+                <Box width="spacing.dot" height="spacing.dot" radius="radius.pill" background="color.offline" />
+                <Text fontWeight="font.weight.medium">MiniMax CN</Text>
+              </Stack>
+              <Text color="color.muted" variant="caption">Not configured</Text>
+              <Text color="color.muted" variant="caption" styleClass="copy-note">No API key found at MINIMAX_CN_API_KEY. Add one in Settings → Models.</Text>
+              <Stack align="start">
+                <Button id="minimax-cn-refresh" size="sm" variant="secondary">Refresh</Button>
+              </Stack>
+            </Stack>
+          </Card>
+        </Stack>
+      </Stack>
+    </Stack>
+  </Stack>
+  <Modal id="codex-manager" title="Manage Codex (ChatGPT) accounts" size="lg" styleClass="account-dialog">
+    <Stack gap="spacing.md">
+      <Text color="color.muted" variant="caption" styleClass="copy-note">Choose which accounts serve pooled LLM requests. Pool exclusion applies only to LLM routing, not tools or session-wide isolation.</Text>
+      <Card id="codex-routing" variant="outlined" padding="spacing.inset" radius="radius.account" borderColor="color.stroke">
+        <Stack gap="spacing.sm">
+          <Text variant="heading" fontSize="font.size.md" fontWeight="font.weight.medium">codex-demo</Text>
+          <Input id="codex-alias" label="Alias (optional)" placeholder="codex-demo" />
+          <Checkbox id="codex-in-pool" label="Include in the LLM account pool" checked />
+          <Checkbox id="codex-independent" label="Show an independent entry in the model picker" />
+          <Text color="color.muted" variant="caption" styleClass="copy-note">Independent LLM routes use only this account, with no fallback to another account. This does not isolate tools or the whole session.</Text>
+          <Disclosure id="codex-pool-models" label="Pool model allowlist · All models">
+            <Stack id="codex-pool-options" gap="spacing.sm" padding="spacing.sm">
+              <Text color="color.muted" variant="caption" styleClass="copy-note">Applies only to pooled LLM routing, not independent entries. An empty selection allows no models. Turning off pool participation keeps this selection for later.</Text>
+              <Checkbox id="codex-pool-auto" label="Allow all models, including future models" checked />
+              <Stack direction="row" gap="spacing.sm" wrap>
+                <Button id="codex-pool-select-all" size="sm" variant="secondary">Select all</Button>
+                <Button id="codex-pool-clear" size="sm" variant="secondary">Clear selection</Button>
+              </Stack>
+              <Checkbox id="codex-pool-example" label="Example Codex model" checked />
+            </Stack>
+          </Disclosure>
+        </Stack>
+      </Card>
+      <Divider />
+      <Text variant="heading" fontSize="font.size.md" fontWeight="font.weight.medium">Edit model list</Text>
+      <Text color="color.muted" variant="caption" styleClass="copy-note">Configure model visibility, default reasoning effort, subagent speed, context and tools here; Save changes below submits them together with the account settings. Hidden models remain usable by existing sessions; tool changes apply to new sessions.</Text>
+      <Stack align="start">
+        <Button id="codex-model-refresh" variant="ghost" size="sm">Refresh</Button>
+      </Stack>
+      <Checkbox id="codex-visible-auto" label="Automatically show all models, including new models" checked />
+      <Stack direction="row" align="center" gap="spacing.sm" wrap>
+        <Input id="codex-model-filter" label="Filter models" placeholder="Filter models" type="search" grow />
+        <Button id="codex-model-select-all" variant="secondary" size="sm">Select all</Button>
+        <Button id="codex-model-clear" variant="secondary" size="sm">Clear selection</Button>
+      </Stack>
+      <Checkbox id="codex-model-example" label="Example Codex model" checked />
+      <Stack direction={{ mobile: "column", tablet: "row" }} gap="spacing.sm" wrap>
+        <Select id="codex-reasoning" label="Default reasoning effort" value="provider" options={[
+          { label: "Follow provider", value: "provider" }, { label: "Low", value: "low" }, { label: "Medium", value: "medium" }, { label: "High", value: "high" }
+        ]} />
+        <Input id="codex-context" label="Context (tokens)" type="number" />
+        <Select id="codex-subagent-speed" label="Subagent default speed" value="provider" options={[
+          { label: "Follow provider", value: "provider" }, { label: "Standard", value: "standard" }, { label: "Fast", value: "fast" }
+        ]} />
+      </Stack>
+      <Divider />
+      <Text variant="heading" fontSize="font.size.md" fontWeight="font.weight.medium">Provider tools</Text>
+      <Text color="color.muted" variant="caption" styleClass="copy-note">Changes apply only to sessions created after saving. Existing sessions keep their tools. Shared tools remain available if any supporting provider is enabled.</Text>
+      <Checkbox id="codex-image-tool" label="Image generation" checked />
+      <Stack id="codex-manager-actions" direction="row" justify="end" gap="spacing.sm" wrap>
+        <Button id="codex-manager-cancel" variant="secondary" onPress={close("codex-manager")}>Cancel</Button>
+        <Button id="codex-save" disabled>Save changes</Button>
+      </Stack>
+    </Stack>
+  </Modal>
+  <Modal id="codex-reset" title="Confirm full reset" styleClass="reset-dialog">
+    <Stack gap="spacing.md">
+      <Text color="color.muted" variant="caption">codex-demo</Text>
+      <Stack direction="row" justify="between" gap="spacing.sm">
+        <Text color="color.muted" variant="caption">Weekly</Text>
+        <Text variant="label">86%</Text>
+      </Stack>
+      <Text color="color.muted" variant="caption">Expires 12/31/2026, 11:59 PM</Text>
+      <Text color="color.muted" variant="caption" styleClass="copy-note">This consumes one credit and resets weekly + 5-hour limits. This interface cannot undo it. Confirmation expires in 60 seconds.</Text>
+      <Checkbox id="codex-reset-ack" label="I understand that one credit will be consumed." />
+      <Stack direction="row" justify="end" gap="spacing.sm" wrap>
+        <Button id="codex-reset-cancel" variant="secondary" onPress={close("codex-reset")}>Cancel</Button>
+        <Button id="codex-reset-consume" disabled>Consume 1 reset</Button>
+      </Stack>
+    </Stack>
+  </Modal>
+</Screen>

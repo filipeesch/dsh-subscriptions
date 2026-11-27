@@ -1,0 +1,12 @@
+<Journey id="manage-codex" start="subscriptions" breakpoint="mobile">
+  <ExpectVisible target="codex-manager" visible={false} />
+  <Tap target="codex-manage" />
+  <ExpectVisible target="codex-manager" visible={true} />
+  <Type target="codex-alias" value="Demo" />
+  <ExpectValue target="codex-alias" value="Demo" />
+  <ExpectVisible target="codex-pool-options" visible={false} />
+  <Tap target="codex-pool-models" />
+  <ExpectVisible target="codex-pool-options" visible={true} />
+  <Tap target="codex-manager-cancel" />
+  <ExpectVisible target="codex-manager" visible={false} />
+</Journey>

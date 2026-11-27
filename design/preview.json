@@ -1,0 +1,34 @@
+{
+  "screens": {
+    "subscriptions": {
+      "summary": "Baseline of Settings → Subscriptions in Subscription Hub.",
+      "details": "The current client code is the reference for the provider order, all three quota preferences, and the Codex dialogs. Account names, usage and dates are fictitious. Controls outside the Codex review flows show layout only; the preview does not sign in, fetch quotas, save preferences or consume credits."
+    }
+  },
+  "situations": [
+    {
+      "id": "codex-account-management",
+      "label": "Manage Codex accounts",
+      "parent": "subscriptions",
+      "target": { "screen": "subscriptions", "state": "manage-codex" }
+    },
+    {
+      "id": "codex-pool-allowlist",
+      "label": "Pool model allowlist open",
+      "parent": "subscriptions",
+      "target": { "screen": "subscriptions", "state": "pool-models-open" }
+    },
+    {
+      "id": "codex-reset-credits",
+      "label": "Codex reset credits open",
+      "parent": "subscriptions",
+      "target": { "screen": "subscriptions", "state": "codex-credits-open" }
+    },
+    {
+      "id": "codex-reset-confirmation",
+      "label": "Confirm a Codex reset",
+      "parent": "subscriptions",
+      "target": { "screen": "subscriptions", "state": "confirm-codex-reset" }
+    }
+  ]
+}

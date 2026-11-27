@@ -1,0 +1,10 @@
+<Journey id="review-codex-reset" start="subscriptions" breakpoint="desktop">
+  <ExpectVisible target="codex-credit-details" visible={false} />
+  <Tap target="codex-credits" />
+  <ExpectVisible target="codex-credit-details" visible={true} />
+  <Tap target="codex-use-credit" />
+  <ExpectVisible target="codex-reset" visible={true} />
+  <ExpectVisible target="codex-reset-consume" visible={true} />
+  <Tap target="codex-reset-cancel" />
+  <ExpectVisible target="codex-reset" visible={false} />
+</Journey>
