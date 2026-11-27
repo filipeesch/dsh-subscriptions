@@ -1,0 +1,55 @@
+{
+  "colorScheme": "dark",
+  "tokens": {
+    "color": {
+      "canvas": {
+        "$value": "#232324",
+        "$type": "color"
+      },
+      "surface": {
+        "$value": "#2c2c2e",
+        "$type": "color"
+      },
+      "text": {
+        "$value": "#f9fafb",
+        "$type": "color"
+      },
+      "muted": {
+        "$value": "#adb2b8",
+        "$type": "color"
+      },
+      "subtle": {
+        "$value": "#c6cbd4",
+        "$type": "color"
+      },
+      "border": {
+        "$value": "#ffffff33",
+        "$type": "color"
+      },
+      "stroke": {
+        "$value": "#ffffff1f",
+        "$type": "color"
+      },
+      "selected": {
+        "$value": "#454548",
+        "$type": "color"
+      },
+      "action": {
+        "$value": "#79aaff",
+        "$type": "color"
+      },
+      "on-action": {
+        "$value": "#0f1115",
+        "$type": "color"
+      },
+      "offline": {
+        "$value": "#43454a",
+        "$type": "color"
+      },
+      "danger": {
+        "$value": "#f25a5a",
+        "$type": "color"
+      }
+    }
+  }
+}

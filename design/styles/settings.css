@@ -1,0 +1,50 @@
+.settings-shell {
+  max-width: var(--dsx-size-panel);
+  width: 100%;
+}
+
+.settings-nav {
+  min-width: var(--dsx-size-nav);
+}
+
+.settings-content {
+  max-width: var(--dsx-size-content);
+  max-height: var(--dsx-size-content-height);
+  flex-grow: 1;
+  min-width: 0;
+  overflow: auto;
+}
+
+.quota-meter {
+  overflow: hidden;
+}
+
+.copy-note {
+  line-height: 18px;
+}
+
+.copy-body {
+  line-height: 22px;
+}
+
+.settings-nav-item {
+  padding: var(--dsx-spacing-sm);
+  line-height: 24px;
+}
+
+.field {
+  width: 100%;
+  line-height: 20px;
+}
+
+.account-dialog {
+  max-width: var(--dsx-size-manager);
+  max-height: 480px;
+  overflow: auto;
+  border-radius: var(--dsx-radius-panel);
+}
+
+.reset-dialog {
+  max-width: var(--dsx-size-confirm);
+  border-radius: var(--dsx-radius-panel);
+}

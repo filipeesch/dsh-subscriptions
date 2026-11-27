@@ -1,0 +1,11 @@
+{
+  "kitVersion": "1.0.0",
+  "entry": "subscriptions",
+  "breakpoints": {
+    "mobile": 390,
+    "tablet": 768,
+    "desktop": 1280
+  },
+  "stylesheets": ["styles/settings.css"],
+  "themes": { "dark": "themes/dark.json" }
+}
