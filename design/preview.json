@@ -1,34 +1,204 @@
 {
+  "groups": [
+    {
+      "id": "overview",
+      "label": "Overview",
+      "screens": ["subscriptions"]
+    },
+    {
+      "id": "first-provider-flow",
+      "label": "First provider",
+      "screens": [
+        "subscriptions-empty",
+        "add-first-provider",
+        "setup-first-ollama",
+        "first-subscription-saved",
+        "add-after-first-provider",
+        "edit-first-ollama-address"
+      ]
+    },
+    {
+      "id": "additional-provider-flow",
+      "label": "Additional provider",
+      "screens": [
+        "add-provider",
+        "setup-ollama",
+        "subscriptions-with-ollama",
+        "add-another-provider",
+        "edit-ollama-address"
+      ]
+    },
+    {
+      "id": "authorization-options",
+      "label": "Sign-in alternatives",
+      "screens": [
+        "setup-claude",
+        "claude-browser",
+        "setup-copilot",
+        "copilot-device",
+        "setup-grok",
+        "grok-browser",
+        "setup-antigravity",
+        "antigravity-browser",
+        "setup-codex",
+        "codex-browser",
+        "setup-first-claude",
+        "first-claude-browser"
+      ]
+    },
+    {
+      "id": "credential-options",
+      "label": "API key alternatives",
+      "screens": [
+        "setup-cursor",
+        "setup-first-cursor",
+        "setup-opencode-go",
+        "setup-kimi-code",
+        "setup-minimax",
+        "setup-minimax-cn"
+      ]
+    }
+  ],
   "screens": {
     "subscriptions": {
-      "summary": "Baseline of Settings → Subscriptions in Subscription Hub.",
-      "details": "The current client code is the reference for the provider order, all three quota preferences, and the Codex dialogs. Account names, usage and dates are fictitious. Controls outside the Codex review flows show layout only; the preview does not sign in, fetch quotas, save preferences or consume credits."
+      "summary": "Configured providers start collapsed. Expand one to see its existing account, usage, and settings controls.",
+      "details": "The default view has fictitious Codex and Kimi Code connections. Quota display preferences have a tinted section above the bordered list of configured providers. The provider-list branches show empty, loading, and failed status checks."
+    },
+    "add-provider": {
+      "summary": "One compact provider selector and one form below it.",
+      "details": "Selecting an option opens its inline fields in the prototype. The kit uses an anchored list and matching screen snapshots to simulate the implementation’s in-place select. Codex and Kimi Code are already configured in this fixture."
+    },
+    "setup-cursor": {
+      "summary": "Enter a masked key. The simulated Save action shows the saved-but-unusable result.",
+      "details": "No key is saved. Do not enter a real key."
+    },
+    "setup-ollama": {
+      "summary": "Ollama Cloud takes a key; a local server uses an address.",
+      "details": "Save simulates saving the address and returns to the same roster with Ollama added. The Cloud key form is a static example. The current Cloud route does not support unauthenticated local chat."
+    },
+    "subscriptions-with-ollama": {
+      "summary": "The collapsed Ollama row joins the existing Codex and Kimi Code rows.",
+      "details": "Quota display preferences stay outside the roster. The new row confirms an address was saved, not that the server is reachable."
+    },
+    "claude-browser": {
+      "summary": "Fictitious browser authorization. Expand the fallback to enter a callback URL or code."
+    },
+    "copilot-device": {
+      "summary": "Fictitious GitHub device authorization, with a sample code."
+    },
+    "setup-opencode-go": {
+      "summary": "OpenCode Go uses its existing key in Settings → Models. Check again demonstrates a key-not-found result."
+    },
+    "add-first-provider": {
+      "summary": "All providers are initially unconfigured in this first-use fixture.",
+      "details": "The first-use fixture simulates Ollama, Claude, Cursor, Codex and Kimi Code. Other options appear for review; use the default roster to try their setup paths."
+    },
+    "add-after-first-provider": {
+      "summary": "Read-only picker showing the configured providers after the simulated Ollama save."
+    },
+    "add-another-provider": {
+      "summary": "Read-only picker showing the configured providers after the simulated Ollama save."
     }
   },
   "situations": [
     {
-      "id": "codex-account-management",
-      "label": "Manage Codex accounts",
+      "id": "quota-pref-settings",
+      "label": "Quota preferences expanded",
       "parent": "subscriptions",
-      "target": { "screen": "subscriptions", "state": "manage-codex" }
+      "target": {
+        "screen": "subscriptions",
+        "state": "quota-preferences"
+      }
+    },
+    {
+      "id": "codex-expanded-details",
+      "label": "Codex row expanded",
+      "parent": "subscriptions",
+      "target": {
+        "screen": "subscriptions",
+        "state": "codex-expanded"
+      }
+    },
+    {
+      "id": "codex-account-management",
+      "label": "Codex account manager",
+      "parent": "subscriptions",
+      "target": {
+        "screen": "subscriptions",
+        "state": "manage-codex"
+      }
     },
     {
       "id": "codex-pool-allowlist",
-      "label": "Pool model allowlist open",
+      "label": "Codex pool allowlist",
       "parent": "subscriptions",
-      "target": { "screen": "subscriptions", "state": "pool-models-open" }
+      "target": {
+        "screen": "subscriptions",
+        "state": "pool-models-open"
+      }
     },
     {
       "id": "codex-reset-credits",
-      "label": "Codex reset credits open",
+      "label": "Codex reset credits",
       "parent": "subscriptions",
-      "target": { "screen": "subscriptions", "state": "codex-credits-open" }
+      "target": {
+        "screen": "subscriptions",
+        "state": "codex-credits-open"
+      }
     },
     {
       "id": "codex-reset-confirmation",
-      "label": "Confirm a Codex reset",
+      "label": "Codex reset confirmation",
       "parent": "subscriptions",
-      "target": { "screen": "subscriptions", "state": "confirm-codex-reset" }
+      "target": {
+        "screen": "subscriptions",
+        "state": "confirm-codex-reset"
+      }
+    },
+    {
+      "id": "review-open-provider-picker",
+      "label": "Provider selector open",
+      "parent": "setup-ollama",
+      "target": {
+        "screen": "setup-ollama",
+        "state": "picker-open"
+      }
+    },
+    {
+      "id": "ollama-local-setup",
+      "label": "Local server form",
+      "parent": "setup-ollama",
+      "target": {
+        "screen": "setup-ollama",
+        "state": "local"
+      }
+    },
+    {
+      "id": "cursor-retry",
+      "label": "Saved key not usable",
+      "parent": "setup-cursor",
+      "target": {
+        "screen": "setup-cursor",
+        "state": "unusable-key"
+      }
+    },
+    {
+      "id": "first-ollama-local-form",
+      "label": "Local server form",
+      "parent": "setup-first-ollama",
+      "target": {
+        "screen": "setup-first-ollama",
+        "state": "local"
+      }
+    },
+    {
+      "id": "first-cursor-key-unusable",
+      "label": "Saved key not usable",
+      "parent": "setup-first-cursor",
+      "target": {
+        "screen": "setup-first-cursor",
+        "state": "unusable-key"
+      }
     }
   ]
 }

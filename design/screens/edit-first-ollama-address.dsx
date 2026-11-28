@@ -1,0 +1,13 @@
+<Screen id="edit-first-ollama-address" title="Edit the first Ollama address" layout="settings" background="color.canvas">
+  <Stack direction="row" align="center" justify="between" gap="spacing.sm" wrap>
+    <Text variant="heading" fontSize="font.size.lg">Manage Ollama address</Text>
+    <Button id="back" variant="ghost" styleClass="provider-action" onPress={navigate("first-subscription-saved")}>Back to subscriptions</Button>
+  </Stack>
+  <Card variant="outlined" padding="spacing.lg" radius="radius.card" borderColor="color.border">
+      <Stack gap="spacing.md">
+        <Input id="ollama-local-url" label="Base URL" value="http://localhost:11434" />
+        <Text color="color.subtle">Save the address of a server you trust. Saving does not verify that the server is reachable.</Text>
+        <Stack align="end"><Button id="save-ollama-local" styleClass="provider-action" onPress={navigate("first-subscription-saved")}>Save address</Button></Stack>
+      </Stack>
+  </Card>
+</Screen>

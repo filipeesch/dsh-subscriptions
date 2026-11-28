@@ -1,0 +1,18 @@
+<Journey id="change-provider" start="add-provider" breakpoint="desktop" theme="dark">
+  <ExpectVisible target="provider-options" visible={false} />
+  <Tap target="provider-select" />
+  <ExpectVisible target="provider-options" visible={true} />
+  <Tap target="choose-cursor" />
+  <ExpectScreen screen="setup-cursor" />
+  <ExpectVisible target="cursor-key" visible={true} />
+  <Tap target="provider-select" />
+  <ExpectVisible target="provider-options" visible={true} />
+  <Tap target="choose-ollama" />
+  <ExpectScreen screen="setup-ollama" />
+  <ExpectVisible target="provider-options" visible={false} />
+  <ExpectVisible target="ollama-key" visible={true} />
+  <Tap target="cancel-ollama-cloud" />
+  <ExpectScreen screen="subscriptions" />
+  <ExpectVisible target="codex" visible={true} />
+  <ExpectVisible target="kimi-code" visible={true} />
+</Journey>

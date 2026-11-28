@@ -10,6 +10,17 @@ reported quota in **Settings → Subscriptions**.
 
 ## What it adds
 
+- **A roster of what you use, and one place to add more:** **Settings →
+  Subscriptions** lists only the providers this installation is configured for,
+  one collapsed row each, stating the provider and its connection as text — the
+  number of connected accounts, an API key, a local address, or that the
+  provider needs attention because a saved credential cannot be used. Expanding
+  a row reveals the controls that provider's card carried: its accounts, usage
+  windows, credential field, model settings, and connection settings. **+ Add
+  provider** opens one form — choose a provider, fill in that provider's own
+  fields, and confirm once — and a confirmed provider joins the roster as one
+  collapsed row. Cancel writes nothing. A status check that fails keeps the last
+  known rows and offers Retry instead of reading as "no providers configured".
 - **Five subscription model sources:** Connect ChatGPT/Codex, Claude, Grok,
   GitHub Copilot, or Google Antigravity and choose their models in DSH's picker.
   These routes use account sign-in, without provider API keys.
@@ -50,11 +61,11 @@ reported quota in **Settings → Subscriptions**.
   same-provider pools. Pools can use available quota to select an account and
   fail over before a reply starts. See
   [account management](docs/account-management.md).
-- **Quota while you work:** See reported usage windows and reset times on
-  provider cards and in an optional session-footer pill. The same view reads
-  OpenCode Go and Kimi Code usage through keys already configured in **Settings
-  → Models** (their model routes remain built into DSH), Ollama Cloud usage
-  through its `OLLAMA_API_KEY` credential, and Cursor usage through its
+- **Quota while you work:** See reported usage windows and reset times on each
+  provider's row in Settings and in an optional session-footer pill. The same
+  view reads OpenCode Go and Kimi Code usage through keys already configured in
+  **Settings → Models** (their model routes remain built into DSH), Ollama Cloud
+  usage through its `OLLAMA_API_KEY` credential, and Cursor usage through its
   `CURSOR_API_KEY` credential (money against the seat's ceiling on an enterprise
   plan, percentages on a personal one). Claude also reports the dollar budget an
   enterprise seat states, its weekly OAuth-apps lane, and the case where the
@@ -68,12 +79,17 @@ reported quota in **Settings → Subscriptions**.
 Captured against DSH 0.2.0-rc.2 and 0.2.1-rc.5 in the web UI with a local stub
 serving frozen provider responses, so each image shows a product state rather
 than a real account. Identities in the images are fabricated, and the quota
-percentages, catalogs, and reset countdowns are sample data.
+percentages, catalogs, and reset countdowns are sample data. The Subscriptions
+image renders the shipped settings section against the same fixture data, so it
+shows the page itself without the host's settings chrome.
 
 ### Subscriptions
 
 Per-provider quota windows, account controls, and the status-bar display
-preference live in **Settings → Subscriptions**.
+preference live in **Settings → Subscriptions**. Only configured providers are
+listed, one collapsed row each; expand a row for that provider's accounts,
+usage, and connection controls, or use **+ Add provider** to configure another.
+Quota display preferences sit in their own disclosure above the list.
 
 ![Subscriptions settings page](docs/images/subscriptions.png)
 

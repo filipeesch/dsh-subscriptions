@@ -1,0 +1,24 @@
+<Journey id="add-first-provider" start="subscriptions-empty" breakpoint="mobile">
+  <ExpectVisible target="empty-providers" visible={true} />
+  <Tap target="add-provider" />
+  <ExpectScreen screen="add-first-provider" />
+  <Tap target="cancel-add-provider" />
+  <ExpectScreen screen="subscriptions-empty" />
+  <Tap target="add-provider" />
+  <ExpectScreen screen="add-first-provider" />
+  <Tap target="provider-select" />
+  <ExpectVisible target="provider-options" visible={true} />
+  <Tap target="choose-ollama" />
+  <ExpectScreen screen="setup-first-ollama" />
+  <Tap target="ollama-local-tab" />
+  <Tap target="save-ollama-local" />
+  <ExpectScreen screen="first-subscription-saved" />
+  <ExpectVisible target="ollama-local" visible={true} />
+  <ExpectVisible target="manage-ollama" visible={false} />
+  <ExpectVisible target="quota-display-settings" visible={true} />
+  <Tap target="add-provider" />
+  <ExpectScreen screen="add-after-first-provider" />
+  <Tap target="cancel-add-provider" />
+  <ExpectScreen screen="first-subscription-saved" />
+  <ExpectVisible target="ollama-local" visible={true} />
+</Journey>

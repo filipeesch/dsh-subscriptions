@@ -1,3 +1,32 @@
+## v0.8.0 — 2026-11-27
+
+- **Settings shows only the providers you configured.** The Subscriptions page
+  is one bordered roster of the providers this installation actually uses, one
+  collapsed row each. A row states the provider and its connection as text — the
+  number of connected accounts, an API key, a local address, or that the
+  provider needs attention because a saved credential cannot be used — and
+  expanding it reveals the account, usage, credential, model, and connection
+  controls that card always carried. Nothing was removed; the controls moved one
+  level down. A collapsed row performs no usage read, so opening the page no
+  longer asks every provider for its quota. The display preferences moved into
+  their own tinted disclosure above the list, with the same options and the same
+  browser storage.
+- **One form adds a provider.** The **+ Add provider** action opens a form with
+  a single selector over all eleven providers, marking the ones already
+  configured and keeping them out of reach, because a further account is added
+  from that provider's row. Choosing a provider reveals its own fields without
+  writing anything, and the footer carries Cancel and that provider's own action
+  — Continue in browser, Get device code, Save, Check again, or Save address. A
+  local Ollama address is saved as an address, never as a connection: the form
+  states that saving does not check reachability, the stored Cloud key is not
+  sent there, and the row says the key is idle at that address. A key the route
+  rejects stays saved and the row states that the provider needs attention.
+- **Checking, empty, and failed are three different states.** While the page
+  reads the configured set it says so and withholds the add action; a failed
+  read keeps the rows of the last successful one and offers Retry; the empty
+  state appears only after a successful read reports nothing, so a broken
+  connection no longer reads as an empty installation.
+
 ## v0.7.0 — 2026-11-24
 
 - **The key routes own their API key in the card.** The Cursor and Ollama Cloud

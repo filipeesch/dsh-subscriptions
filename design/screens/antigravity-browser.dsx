@@ -1,0 +1,15 @@
+<Screen id="antigravity-browser" title="Google Antigravity · Await browser authorization" layout="settings" background="color.canvas">
+  <Text variant="heading" fontSize="font.size.lg">Waiting for Google Antigravity</Text>
+  <Card variant="outlined" padding="spacing.lg" radius="radius.card" borderColor="color.border">
+    <Stack gap="spacing.md">
+      <Text color="color.subtle">Finish signing in on the provider’s page.</Text>
+      <Disclosure id="antigravity-manual" label="Enter the callback URL or code" styleClass="provider-summary">
+        <Stack gap="spacing.sm" padding="spacing.sm">
+          <Input id="antigravity-callback" label="Callback URL or code" />
+          <Stack align="start"><Button id="antigravity-submit" styleClass="provider-action">Submit</Button></Stack>
+        </Stack>
+      </Disclosure>
+      <Stack align="end"><Button id="cancel-antigravity-login" variant="secondary" styleClass="provider-action" onPress={navigate("setup-antigravity")}>Cancel sign-in</Button></Stack>
+    </Stack>
+  </Card>
+</Screen>

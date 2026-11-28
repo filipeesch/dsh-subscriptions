@@ -1,0 +1,15 @@
+<Screen id="codex-browser" title="Codex · Await browser authorization" layout="settings" background="color.canvas">
+  <Text variant="heading" fontSize="font.size.lg">Waiting for Codex (ChatGPT)</Text>
+  <Card variant="outlined" padding="spacing.lg" radius="radius.card" borderColor="color.border">
+    <Stack gap="spacing.md">
+      <Text color="color.subtle">Finish signing in on the provider’s page.</Text>
+      <Disclosure id="codex-manual" label="Enter the callback URL or code" styleClass="provider-summary">
+        <Stack gap="spacing.sm" padding="spacing.sm">
+          <Input id="codex-callback" label="Callback URL or code" />
+          <Stack align="start"><Button id="codex-submit" styleClass="provider-action">Submit</Button></Stack>
+        </Stack>
+      </Disclosure>
+      <Stack align="end"><Button id="cancel-codex-login" variant="secondary" styleClass="provider-action" onPress={navigate("setup-codex")}>Cancel sign-in</Button></Stack>
+    </Stack>
+  </Card>
+</Screen>

@@ -1,0 +1,21 @@
+<Journey id="add-ollama-local" start="subscriptions" breakpoint="mobile" theme="dark">
+  <Tap target="add-provider" />
+  <ExpectScreen screen="add-provider" />
+  <Tap target="provider-select" />
+  <ExpectVisible target="provider-options" visible={true} />
+  <Tap target="choose-ollama" />
+  <ExpectScreen screen="setup-ollama" />
+  <ExpectVisible target="ollama-key" visible={true} />
+  <Tap target="ollama-local-tab" />
+  <ExpectVisible target="ollama-key" visible={false} />
+  <ExpectValue target="ollama-local-url" value="http://localhost:11434" />
+  <Tap target="save-ollama-local" />
+  <ExpectScreen screen="subscriptions-with-ollama" />
+  <ExpectVisible target="ollama-local" visible={true} />
+  <ExpectVisible target="codex" visible={true} />
+  <ExpectVisible target="kimi-code" visible={true} />
+  <ExpectVisible target="quota-display-settings" visible={true} />
+  <ExpectVisible target="manage-ollama" visible={false} />
+  <Tap target="ollama-local" />
+  <ExpectVisible target="manage-ollama" visible={true} />
+</Journey>

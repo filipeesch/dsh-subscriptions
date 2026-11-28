@@ -26,9 +26,18 @@ function message(error: unknown): string {
 export function OllamaCard({
   rpc,
   t,
+  variant = 'card',
+  onChanged,
+  onCredentialValid,
 }: {
   rpc: ConnectionHandle['rpc']
   t: Translate
+  /** `row` drops the card's own chrome so a roster row supplies the container. */
+  variant?: 'card' | 'row'
+  /** A committed change to the route that the page's rows must reflect. */
+  onChanged?: () => void
+  /** The route accepted the key it holds, so a rejected-key mark can clear. */
+  onCredentialValid?: () => void
 }) {
   const [view, setView] = useState<OllamaSettingsView>()
   // Bumped whenever this card's settings change: the credential field's
@@ -93,20 +102,8 @@ export function OllamaCard({
     void refreshStatus()
   }, [refreshStatus])
 
-  return (
-    <div style={styles.card}>
-      <div style={styles.header}>
-        <span
-          style={{
-            ...styles.dot,
-            background:
-              configured === true
-                ? 'var(--dsw-alias-state-success-primary)'
-                : 'var(--dsw-alias-label-dimmed)',
-          }}
-        />
-        <span style={styles.name}>{t('ollamaTitle')}</span>
-      </div>
+  const body = (
+    <>
       <p style={styles.status}>
         {view === undefined
           ? t('checking')
@@ -135,6 +132,9 @@ export function OllamaCard({
         rpc={rpc}
         t={t}
         route="ollama-cloud"
+        {...(onCredentialValid === undefined
+          ? {}
+          : { onValidated: onCredentialValid })}
         onChanged={() => {
           // No revision bump here: this is the field's own mutation, and
           // remounting it would discard the validation outcome it is about to
@@ -227,9 +227,28 @@ export function OllamaCard({
           onSaved={() => {
             setRevision((value) => value + 1)
             void refreshStatus()
+            onChanged?.()
           }}
         />
       )}
+    </>
+  )
+  if (variant === 'row') return <div style={styles.rowBody}>{body}</div>
+  return (
+    <div style={styles.card}>
+      <div style={styles.header}>
+        <span
+          style={{
+            ...styles.dot,
+            background:
+              configured === true
+                ? 'var(--dsw-alias-state-success-primary)'
+                : 'var(--dsw-alias-label-dimmed)',
+          }}
+        />
+        <span style={styles.name}>{t('ollamaTitle')}</span>
+      </div>
+      {body}
     </div>
   )
 }

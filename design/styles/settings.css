@@ -9,13 +9,15 @@
 
 .settings-content {
   max-width: var(--dsx-size-content);
-  max-height: var(--dsx-size-content-height);
   flex-grow: 1;
   min-width: 0;
-  overflow: auto;
 }
 
 .quota-meter {
+  min-height: var(--dsx-spacing-meter);
+  border-style: solid;
+  border-width: 1px;
+  border-color: var(--dsx-color-stroke);
   overflow: hidden;
 }
 
@@ -47,4 +49,60 @@
 .reset-dialog {
   max-width: var(--dsx-size-confirm);
   border-radius: var(--dsx-radius-panel);
+}
+
+.provider-action {
+  min-height: var(--dsx-size-touch);
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.provider-select {
+  min-height: var(--dsx-size-touch);
+}
+
+.provider-option {
+  min-height: var(--dsx-size-touch);
+}
+
+.provider-option-label {
+  flex-grow: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.provider-menu {
+  min-width: var(--dsx-size-provider-menu);
+  overflow: auto;
+}
+
+.provider-menu-note {
+  padding-inline: var(--dsx-spacing-md);
+}
+
+.quota-trigger {
+  min-height: var(--dsx-size-touch);
+  width: 100%;
+  text-align: start;
+}
+
+.roster-heading {
+  padding-top: var(--dsx-spacing-xs);
+}
+
+.provider-summary {
+  min-height: var(--dsx-size-touch);
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  width: 100%;
+  text-align: start;
+}
+
+.provider-dialog {
+  max-width: var(--dsx-size-confirm);
+  border-radius: var(--dsx-radius-panel);
+}
+
+.provider-tab {
+  min-height: var(--dsx-size-touch);
 }

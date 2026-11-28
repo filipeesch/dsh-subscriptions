@@ -339,12 +339,14 @@ script:
      readable;
    - the plugin's settings section renders inside the host's settings panel: the
      panel opens from the host's settings trigger, the nav lists the
-     Subscriptions entry, and the section body shows the intro copy, one card
-     per fixture-signed-in provider, the built-in provider usage cards, and the
-     status-bar quota display control with its three options: current / most
-     recent provider with usage, always show one provider (rotating through the
-     rest), and Hidden. Flipping that control to Hidden persists to
-     localStorage, and after a page reload the control still reads Hidden;
+     Subscriptions entry, and the section body shows the roster heading, one
+     collapsed row per configured provider — the ten the fixture profile
+     configures, and none for the provider it leaves without a key — and the
+     status-bar quota display control inside the page's disclosure, with its
+     three options: current / most recent provider with usage, always show one
+     provider (rotating through the rest), and Hidden. Flipping that control to
+     Hidden persists to localStorage, and after a page reload the control still
+     reads Hidden;
    - no slot rendered its crash face (`data-slot-error`), the console shows no
      `slot entry crashed in` or `HOST_CONTRACT_MISS` line, the page threw no
      uncaught exception, and the page requested nothing outside loopback. The
