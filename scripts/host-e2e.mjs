@@ -1857,6 +1857,14 @@ function checkSeenLog() {
 // ---------------------------------------------------------------------------
 // Host UI helpers
 
+/** The page's own message for a failed expression, when Chrome supplies one. */
+function exceptionDescription(details) {
+  const described = details?.exception?.description
+  if (typeof described === 'string' && described !== '')
+    return described.split('\n')[0]
+  return details?.text ?? 'Uncaught'
+}
+
 async function dismissOnboarding(cdp) {
   // Exact labels, and the confirmation actions before Skip. Skip is also the
   // footer control that opens the confirmation, so matching it first would
@@ -2219,8 +2227,11 @@ function connect(url) {
         returnByValue: true,
       })
       if (result.exceptionDetails !== undefined) {
+        // Name the expression: "Uncaught" alone gives nothing to act on.
+        const detail = exceptionDescription(result.exceptionDetails)
         throw new HarnessFailure(
-          `page expression failed: ${result.exceptionDetails.text ?? expression.slice(0, 80)}`,
+          `page expression failed: ${detail}
+  in ${expression.replace(/\s+/g, ' ').slice(0, 200)}`,
         )
       }
       return result.result?.value
