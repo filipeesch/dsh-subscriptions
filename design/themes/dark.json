@@ -38,7 +38,7 @@
         "$value": "#79aaff",
         "$type": "color"
       },
-      "on-action": {
+      "actionText": {
         "$value": "#0f1115",
         "$type": "color"
       },

@@ -1,0 +1,19 @@
+<Journey id="add-provider-browser" start="subscriptions" breakpoint="tablet">
+  <Tap target="add-provider" />
+  <ExpectScreen screen="add-provider" />
+  <Tap target="provider-select" />
+  <ExpectVisible target="provider-options" visible={true} />
+  <Tap target="choose-claude" />
+  <ExpectScreen screen="setup-claude" />
+  <Tap target="connect-claude" />
+  <ExpectScreen screen="claude-browser" />
+  <ExpectVisible target="claude-callback" visible={false} />
+  <Tap target="claude-manual" />
+  <ExpectVisible target="claude-callback" visible={true} />
+  <Tap target="cancel-claude-login" />
+  <ExpectScreen screen="setup-claude" />
+  <Tap target="cancel-add-provider" />
+  <ExpectScreen screen="subscriptions" />
+  <ExpectVisible target="codex" visible={true} />
+  <ExpectVisible target="codex-detail" visible={false} />
+</Journey>

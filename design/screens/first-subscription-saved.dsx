@@ -1,0 +1,39 @@
+<Screen id="first-subscription-saved" title="4. First provider saved" layout="settings" background="color.canvas">
+  <Box id="quota-preferences" padding="spacing.sm" radius="radius.md" background="color.selected">
+    <Disclosure id="quota-display-settings" label="Quota display preferences" styleClass="quota-trigger">
+      <Stack gap="spacing.tight" padding="spacing.sm">
+        <Select id="status-bar-quota" styleClass="field" label="Status-bar quota display" value="recent" options={[
+          { label: "Current / most recent provider with usage", value: "recent" },
+          { label: "Always show one provider, rotating through the rest", value: "always" },
+          { label: "Hidden", value: "hidden" }
+        ]} />
+        <Text color="color.subtle" variant="caption" styleClass="copy-note">Saved automatically in this browser. One provider is shown at a time. Models without a quota source keep the most recent provider selected in this view, or show nothing. Always show instead rotates through the providers with usage every 10 seconds while the current model has no quota source. Hiding does not affect usage details here.</Text>
+        <Select id="quota-percentages" styleClass="field" label="Quota percentages" value="used" options={[
+          { label: "Used (default)", value: "used" }, { label: "Remaining", value: "remaining" }
+        ]} />
+        <Text color="color.subtle" variant="caption" styleClass="copy-note">Applies to Settings and the status bar, independently of hiding. Warning colors always indicate high usage.</Text>
+        <Select id="usage-coloring" styleClass="field" label="Usage coloring" value="standard" options={[
+          { label: "Standard (default · 10-point lead)", value: "standard" },
+          { label: "Relaxed (15-point lead)", value: "relaxed" },
+          { label: "Remaining quota only (no yellow)", value: "remaining" }
+        ]} />
+        <Text color="color.subtle" variant="caption" styleClass="copy-note">Yellow when usage leads elapsed time by 10 points; red at 90% used takes priority. Saved in this browser; only colors change.</Text>
+      </Stack>
+    </Disclosure>
+  </Box>
+  <Stack id="subscriptions-heading" styleClass="roster-heading" direction="row" align="center" justify="between" gap="spacing.sm" wrap>
+    <Text variant="heading" fontSize="font.size.lg" fontWeight="font.weight.medium">Configured providers</Text>
+    <Button id="add-provider" styleClass="provider-action" onPress={navigate("add-after-first-provider")}>+ Add provider</Button>
+  </Stack>
+  <Text color="color.subtle">Ollama local address saved.</Text>
+  <Card id="configured-providers" variant="outlined" padding="spacing.xs" radius="radius.account" borderColor="color.border">
+    <Stack>
+      <Disclosure id="ollama-local" label="Ollama · Local address configured" styleClass="provider-summary">
+        <Stack gap="spacing.sm" padding="spacing.md" align="start">
+          <Text color="color.subtle">Base URL: http://localhost:11434</Text>
+          <Button id="manage-ollama" variant="secondary" styleClass="provider-action" onPress={navigate("edit-first-ollama-address")}>Manage connection</Button>
+        </Stack>
+      </Disclosure>
+    </Stack>
+  </Card>
+</Screen>

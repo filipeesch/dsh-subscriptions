@@ -1,0 +1,19 @@
+<Screen id="copilot-device" title="GitHub Copilot · Enter device code" layout="settings" background="color.canvas">
+  <Text variant="heading" fontSize="font.size.lg">Connect GitHub Copilot</Text>
+  <Card variant="outlined" padding="spacing.lg" radius="radius.card" borderColor="color.border">
+    <Stack gap="spacing.md">
+      <Text color="color.subtle">Enter this code on the GitHub verification page:</Text>
+      <Card variant="outlined" padding="spacing.md" radius="radius.md" borderColor="color.border">
+        <Stack direction="row" align="center" justify="between" gap="spacing.sm" wrap>
+          <Text variant="label">ABCD-EFGH</Text>
+          <Button id="copy-copilot-code" variant="secondary" styleClass="provider-action">Copy code</Button>
+        </Stack>
+      </Card>
+      <Text color="color.subtle">Waiting for authorization…</Text>
+      <Stack direction="row" justify="between" gap="spacing.sm" wrap>
+        <Button id="cancel-copilot-login" variant="secondary" styleClass="provider-action" onPress={navigate("setup-copilot")}>Cancel sign-in</Button>
+        <Button id="open-github-verification" styleClass="provider-action">Open GitHub</Button>
+      </Stack>
+    </Stack>
+  </Card>
+</Screen>

@@ -11,6 +11,12 @@ export const subscriptionCardStyles: Record<string, CSSProperties> = {
     gap: 6,
     color: 'var(--dsw-alias-label-primary)',
   },
+  /** A detail inside a roster row: the card's body without its own chrome. */
+  rowBody: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 6,
+  },
   header: { display: 'flex', alignItems: 'center', gap: 8 },
   dot: { width: 8, height: 8, borderRadius: '50%', flexShrink: 0 },
   name: {
@@ -21,6 +27,8 @@ export const subscriptionCardStyles: Record<string, CSSProperties> = {
   },
   status: {
     margin: 0,
+    minWidth: 0,
+    overflowWrap: 'anywhere',
     fontSize: 12,
     lineHeight: '18px',
     color: 'var(--dsw-alias-label-tertiary)',
@@ -63,8 +71,17 @@ export const subscriptionCardStyles: Record<string, CSSProperties> = {
     padding: '8px 10px',
     marginTop: 4,
   },
-  accountHeader: { display: 'flex', alignItems: 'center', gap: 8 },
+  /** The header wraps rather than widening the panel on a long identity. */
+  accountHeader: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    flexWrap: 'wrap',
+    gap: 8,
+    minWidth: 0,
+  },
   accountName: {
+    minWidth: 0,
+    overflowWrap: 'anywhere',
     fontSize: 13,
     lineHeight: '20px',
     color: 'var(--dsw-alias-label-primary)',
@@ -112,7 +129,9 @@ export const subscriptionCardStyles: Record<string, CSSProperties> = {
   usageMeta: {
     display: 'flex',
     justifyContent: 'space-between',
+    flexWrap: 'wrap',
     gap: 8,
+    minWidth: 0,
     fontSize: 12,
     lineHeight: '18px',
     color: 'var(--dsw-alias-label-tertiary)',

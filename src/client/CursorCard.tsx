@@ -38,9 +38,18 @@ function message(error: unknown): string {
 export function CursorCard({
   rpc,
   t,
+  variant = 'card',
+  onChanged,
+  onCredentialValid,
 }: {
   rpc: ConnectionHandle['rpc']
   t: Translate
+  /** `row` drops the card's own chrome so a roster row supplies the container. */
+  variant?: 'card' | 'row'
+  /** A committed change to the route that the page's rows must reflect. */
+  onChanged?: () => void
+  /** The route accepted the key it holds, so a rejected-key mark can clear. */
+  onCredentialValid?: () => void
 }) {
   const [view, setView] = useState<CursorSettingsView>()
   const [configured, setConfigured] = useState<boolean>()
@@ -123,6 +132,7 @@ export function CursorCard({
       })
       setSaved(true)
       await refreshStatus()
+      onChanged?.()
     } catch (failure) {
       setSaveError(message(failure))
     }
@@ -132,20 +142,8 @@ export function CursorCard({
     (window) => window.limitSource === 'provider',
   )
 
-  return (
-    <div style={styles.card}>
-      <div style={styles.header}>
-        <span
-          style={{
-            ...styles.dot,
-            background:
-              configured === true
-                ? 'var(--dsw-alias-state-success-primary)'
-                : 'var(--dsw-alias-label-dimmed)',
-          }}
-        />
-        <span style={styles.name}>{t('cursorTitle')}</span>
-      </div>
+  const body = (
+    <>
       <p style={styles.status}>
         {view === undefined
           ? t('checking')
@@ -163,7 +161,11 @@ export function CursorCard({
         route="cursor"
         onChanged={() => {
           void refreshStatus()
+          onChanged?.()
         }}
+        {...(onCredentialValid === undefined
+          ? {}
+          : { onValidated: onCredentialValid })}
       />
       {view !== undefined && (
         <CursorSourceLine
@@ -290,6 +292,24 @@ export function CursorCard({
           }}
         />
       )}
+    </>
+  )
+  if (variant === 'row') return <div style={styles.rowBody}>{body}</div>
+  return (
+    <div style={styles.card}>
+      <div style={styles.header}>
+        <span
+          style={{
+            ...styles.dot,
+            background:
+              configured === true
+                ? 'var(--dsw-alias-state-success-primary)'
+                : 'var(--dsw-alias-label-dimmed)',
+          }}
+        />
+        <span style={styles.name}>{t('cursorTitle')}</span>
+      </div>
+      {body}
     </div>
   )
 }

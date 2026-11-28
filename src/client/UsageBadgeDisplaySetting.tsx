@@ -18,14 +18,24 @@ type Translate = (
   params?: Record<string, unknown>,
 ) => string
 
-/** Browser-local display preference; never changes provider or account settings. */
-export function UsageBadgeDisplaySetting({ t }: { t: Translate }) {
+/**
+ * Browser-local display preference; never changes provider or account settings.
+ * @param props.t - section translate.
+ * @param props.variant - `plain` drops the card chrome for the page's band.
+ */
+export function UsageBadgeDisplaySetting({
+  t,
+  variant = 'card',
+}: {
+  t: Translate
+  variant?: 'card' | 'plain'
+}) {
   const mode = useUsageBadgeMode()
   const quotaMode = useQuotaDisplayMode()
   const preset = useUsageColorPreset()
   const [failed, setFailed] = useState(false)
   return (
-    <div style={styles.card}>
+    <div style={variant === 'card' ? styles.card : styles.plain}>
       <label style={styles.field}>
         <span>{t('usageBadgeDisplay')}</span>
         <select
@@ -135,6 +145,11 @@ export function UsageBadgeDisplaySetting({ t }: { t: Translate }) {
 }
 
 const styles: Record<string, CSSProperties> = {
+  plain: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 8,
+  },
   card: {
     border:
       '0.5px solid var(--dsw-alias-settings-card-stroke, var(--dsw-alias-border-l4))',

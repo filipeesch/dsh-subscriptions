@@ -142,13 +142,15 @@ ${formScope} button {
   line-height: 18px;
   cursor: pointer;
 }
-${formScope} button:hover:not(:disabled) {
+${formScope} button:hover:not(:disabled):not([aria-disabled='true']) {
   background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-3));
 }
-${formScope} button:active:not(:disabled) {
+${formScope} button:active:not(:disabled):not([aria-disabled='true']) {
   background: var(--dsw-alias-interactive-bg-active, var(--dsw-alias-bg-layer-3));
 }
-${formScope} button:disabled {
+/* A pending action keeps its focus and its guard, and looks unavailable. */
+${formScope} button:disabled,
+${formScope} button[aria-disabled='true'] {
   opacity: 0.4;
   cursor: default;
 }
@@ -169,7 +171,7 @@ ${formScope} button.dsh-subscription-primary {
   color: var(--dsw-alias-label-primary-foreground, var(--dsw-alias-bg-layer-1));
   font-weight: 500;
 }
-${formScope} button.dsh-subscription-primary:hover:not(:disabled) {
+${formScope} button.dsh-subscription-primary:hover:not(:disabled):not([aria-disabled='true']) {
   background: var(--dsw-alias-button-primary-hover, var(--dsw-alias-label-secondary));
 }
 ${formScope} button:focus-visible,
@@ -183,6 +185,19 @@ ${formScope} summary {
 }
 ${formScope} summary:hover {
   color: var(--dsw-alias-label-secondary, var(--dsw-alias-label-primary));
+}
+/* Every control the add form adds takes the design kit's 44 px touch size; the
+   older detail controls keep their compact geometry. */
+${formScope} .dsh-add-provider-form input:not([type="checkbox"]),
+${formScope} .dsh-add-provider-form select {
+  height: 44px;
+}
+${formScope} .dsh-add-provider-form :is(button, summary) {
+  min-height: 44px;
+}
+${formScope} .dsh-add-provider-form summary {
+  display: flex;
+  align-items: center;
 }
 `
 

@@ -172,13 +172,13 @@ test('restyle leaves the ten-second rotation and meter observation plumbing inta
     badge,
     /<UsageMeter\b[\s\S]*?observedAt=\{observedAt\}\s+stale=\{stale\}/,
   )
-  // The settings page hands the reading's observation to the shared row; the
-  // row is what mounts the meter, so both halves of the plumbing are asserted
-  // where they now live.
-  const settings = source('SubscriptionsSection.tsx')
+  // The provider's row detail hands the reading's observation to the shared row;
+  // the row is what mounts the meter, so both halves of the plumbing are
+  // asserted where they now live.
+  const detail = source('OAuthProviderDetail.tsx')
   assert.match(
-    settings,
-    /<UsageWindowRow\b[\s\S]*?observedAt=\{observedAt\[usageKey\]\}\s+stale=\{\s*usageError !== undefined \|\| usage\.stale === true\s*\}/,
+    detail,
+    /<UsageWindowRow\b[\s\S]*?observedAt=\{props\.observedAt\[usageKey\]\}\s+stale=\{\s*usageError !== undefined \|\| usage\.stale === true\s*\}/,
   )
   const row = source('UsageWindowRow.tsx')
   assert.match(
@@ -189,8 +189,9 @@ test('restyle leaves the ten-second rotation and meter observation plumbing inta
 
 test('Codex disclosure, chevron and guarded confirmation wiring survive the restyle', () => {
   const settings = source('SubscriptionsSection.tsx')
+  const detail = source('OAuthProviderDetail.tsx')
   const disclosure = source('reset-credits-view.tsx')
-  assert.match(settings, /<ResetCreditsDisclosure/)
+  assert.match(detail, /<ResetCreditsDisclosure/)
   assert.match(
     disclosure,
     /<details[\s\S]*?className="subscriptions-reset-credits"/,
@@ -207,8 +208,8 @@ test('Codex disclosure, chevron and guarded confirmation wiring survive the rest
   assert.match(disclosure, /aria-disabled=\{useAction.disabled\}/)
   assert.match(disclosure, /if \(!useAction.disabled\) useAction.onUse\(\)/)
   assert.match(
-    settings,
-    /if \(!resetDisabled\)\s+void prepareReset\(account\.key\)/,
+    detail,
+    /if \(!resetDisabled\)\s+props\.onPrepareReset\(account\.key\)/,
   )
   assert.match(settings, /resetDialogRef.current\?\.showModal\(\)/)
   assert.match(settings, /aria-labelledby="subscriptions-reset-title"/)
@@ -216,7 +217,7 @@ test('Codex disclosure, chevron and guarded confirmation wiring survive the rest
   assert.match(settings, /void consumeReset\(\)/)
   const owner: Record<string, string> = {
     resetCreditsTitle: disclosure,
-    resetUseButton: settings,
+    resetUseButton: detail,
     resetUseConfirmTitle: settings,
     resetUseAcknowledge: settings,
     resetUseConfirm: settings,

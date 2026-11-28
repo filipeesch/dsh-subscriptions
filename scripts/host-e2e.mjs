@@ -19,9 +19,9 @@
 //      plus backdrop blur) in both themes, while the collapsed pill stays
 //      transparent.
 //   5. The plugin's settings section renders inside the host's settings
-//      panel: nav entry, intro copy, provider cards for the signed-in
-//      fixture profile, the usage-display control, and the preference it
-//      writes survives a reload.
+//      panel: nav entry, the roster heading, one collapsed row per provider
+//      the fixture profile configured, the display control in the page's
+//      disclosure, and the preference it writes survives a reload.
 //   6. No slot entry crashed, no host contract lookup missed, and the page
 //      threw no uncaught exception.
 //   7. Every provider request from the server was a planned fixture
@@ -790,68 +790,109 @@ async function checkSettingsSection(cdp) {
     )
   }
 
-  // Product: the section copy, provider cards, and display control render
-  // with the dictionary's wording. The fixture profile signs every provider
-  // in, so each card reports one connected account; that line arrives with
-  // the section's status RPC, so poll until it lands and judge the last
-  // snapshot when the deadline passes.
+  // Product: the roster, its rows, and the display control render with the
+  // dictionary's wording. The fixture profile signs all five OAuth providers in
+  // and configures Cursor, Ollama, OpenCode Go, Kimi Code, and MiniMax, so the
+  // roster lists ten rows and no row for MiniMax CN, whose key the fixture
+  // leaves out. The rows arrive with the configured-set read, so poll until the
+  // lines land and judge the last snapshot when the deadline passes.
   const missingExpression = `(() => {
     const scope = document.querySelector(${JSON.stringify(outlet)})
-    if (scope === null) return ['section outlet missing']
+    if (scope === null) return { missing: ['section outlet missing'], unexpected: [] }
     const text = scope.textContent ?? ''
+    const headers = [...scope.querySelectorAll('button[aria-expanded]')]
+      .map(button => (button.textContent ?? '').trim())
     const wanted = [
-      ${JSON.stringify(t.intro)},
+      ${JSON.stringify(t.rosterTitle)},
+      ${JSON.stringify(t.rosterAdd)},
+      ${JSON.stringify(t.rosterPreferences)},
       ${JSON.stringify(t.usageBadgeDisplay)},
       ${JSON.stringify(t.usageBadgeDisplayRecent)},
       ${JSON.stringify(t.usageBadgeDisplayAlways)},
       ${JSON.stringify(t.usageBadgeDisplayHidden)},
       ${JSON.stringify(t.usageBadgeDisplayHint)},
       'Codex (ChatGPT)', 'Claude', 'Grok (X Premium)', 'GitHub Copilot', 'Google Antigravity',
-      ${JSON.stringify(t.loggedInCount.replace('{count}', '1'))},
-      'OpenCode Go', 'Kimi Code', 'MiniMax',
+      'Cursor', 'Ollama', 'OpenCode Go', 'Kimi Code', 'MiniMax',
+      ${JSON.stringify(t.rosterAccountOne)},
       ${JSON.stringify(t.externalUsageConnected)},
+      ${JSON.stringify(t.rosterCloudKey)},
     ]
-    return wanted.filter(line => !text.includes(line))
+    const unwanted = ['MiniMax CN', ${JSON.stringify(t.rosterEmptyTitle)}]
+    // Row cardinality comes from the disclosure headers themselves: a provider
+    // name elsewhere in the outlet is not a row.
+    const expectedRows = ['Codex (ChatGPT)', 'Claude', 'Grok (X Premium)', 'GitHub Copilot', 'Google Antigravity', 'Cursor', 'Ollama', 'OpenCode Go', 'Kimi Code', 'MiniMax']
+    const rowProblems = expectedRows
+      .filter((name) => !headers.some((line) => line.startsWith(name + ' · ')))
+      .map((name) => 'no row for ' + name)
+    if (headers.length !== expectedRows.length)
+      rowProblems.push(headers.length + ' rows, expected ' + expectedRows.length)
+    return {
+      missing: wanted.filter(line => !text.includes(line)).concat(rowProblems),
+      unexpected: unwanted.filter(line => text.includes(line)),
+    }
   })()`
-  let missing
+  let view
   const deadline = Date.now() + DIALOG_SETTLE_MS
   for (;;) {
-    missing = await cdp.evaluate(missingExpression)
-    if (missing.length === 0 || Date.now() >= deadline) break
+    view = await cdp.evaluate(missingExpression)
+    if (
+      (view.missing.length === 0 && view.unexpected.length === 0) ||
+      Date.now() >= deadline
+    )
+      break
     await delay(250)
   }
-  if (missing.length > 0) {
+  if (view.missing.length > 0) {
     throw new ProductFailure(
-      `the ${t.nav} section is missing rendered copy:\n  ${missing.join('\n  ')}`,
+      `the ${t.nav} section is missing rendered copy:\n  ${view.missing.join('\n  ')}`,
+    )
+  }
+  if (view.unexpected.length > 0) {
+    throw new ProductFailure(
+      `the ${t.nav} roster lists providers the fixture did not configure:\n  ${view.unexpected.join('\n  ')}`,
     )
   }
   console.log(
-    `ok: settings section ${t.nav} renders intro, provider cards, and the display control`,
+    `ok: settings section ${t.nav} renders the roster, one row per configured provider, and the display control`,
   )
   await captureNamedScreenshot(cdp, 'settings')
   await checkMiniMaxRows(cdp, outlet)
-  const minimaxCard = await cdp.evaluate(`(() => {
-    const name = [...document.querySelectorAll(${JSON.stringify(`${outlet} span`)})].find(span => span.textContent === 'MiniMax')
-    if (!name) return false
-    name.parentElement.parentElement.scrollIntoView({ block: 'center' })
+  // The check above expanded the MiniMax row; bring it into view so the capture
+  // shows the rows the fixture reports for it.
+  const minimaxRow = await cdp.evaluate(`(() => {
+    const scope = document.querySelector(${JSON.stringify(outlet)})
+    const name = [...scope.querySelectorAll('span')].find(span => span.textContent === 'MiniMax')
+    const row = name?.closest('div')
+    if (!row) return false
+    row.scrollIntoView({ block: 'center' })
     return true
   })()`)
-  if (!minimaxCard)
-    throw new ProductFailure('MiniMax settings card missing before screenshot')
+  if (!minimaxRow)
+    throw new ProductFailure('MiniMax roster row missing before screenshot')
   await captureNamedScreenshot(cdp, 'settings-minimax')
-  // The Claude card carries the read-only banked-reset disclosure. Bring it
-  // into view and expand it, so its summary and per-grant rows are captured
-  // rather than left below the fold.
-  const claudeCard = await cdp.evaluate(`(() => {
-    const name = [...document.querySelectorAll(${JSON.stringify(`${outlet} span`)})].find(span => span.textContent === 'Claude')
-    const card = name?.parentElement?.parentElement
-    if (!card) return false
-    card.scrollIntoView({ block: 'center' })
-    for (const details of card.querySelectorAll('details')) if (!details.open) details.querySelector('summary')?.click()
+  // The Claude row carries the read-only banked-reset disclosure inside its
+  // expanded body. Expand the row, then that disclosure, so its summary and
+  // per-grant rows are captured rather than left collapsed.
+  const claudeRow = await cdp.evaluate(`(() => {
+    const scope = document.querySelector(${JSON.stringify(outlet)})
+    const name = [...scope.querySelectorAll('span')].find(span => span.textContent === 'Claude')
+    const header = name?.closest('button')
+    if (!header) return false
+    if (header.getAttribute('aria-expanded') !== 'true') header.click()
     return true
   })()`)
-  if (!claudeCard)
-    throw new ProductFailure('Claude settings card missing before screenshot')
+  if (!claudeRow)
+    throw new ProductFailure('Claude roster row missing before screenshot')
+  await delay(400)
+  const claudeResets = await cdp.evaluate(`(() => {
+    const region = document.querySelector('#dsh-roster-region-claude')
+    if (!region) return false
+    for (const details of region.querySelectorAll('details')) if (!details.open) details.querySelector('summary')?.click()
+    region.scrollIntoView({ block: 'center' })
+    return true
+  })()`)
+  if (!claudeResets)
+    throw new ProductFailure('the Claude row did not expand to its controls')
   await delay(300)
   await captureNamedScreenshot(cdp, 'settings-claude-resets')
   if (process.env.HOST_E2E_COLOR_CHECK === '1') {
@@ -878,6 +919,14 @@ async function checkSettingsSection(cdp) {
     )
   }
 
+  // Product: the display controls live in the page's disclosure above the
+  // roster, so open it the way a reader does before touching them.
+  await cdp.evaluate(`(() => {
+    const scope = document.querySelector(${JSON.stringify(outlet)})
+    const summary = scope?.querySelector('details > summary')
+    if (summary && summary.parentElement.open !== true) summary.click()
+    return true
+  })()`)
   // Product: the display control is a select bound to the preference the
   // unit spec covers; flipping it persists to localStorage.
   const select = `document.querySelector(${JSON.stringify(`${outlet} select[aria-label="${t.usageBadgeDisplay}"]`)})`
@@ -1066,10 +1115,17 @@ async function checkMiniMaxRows(cdp, settingsOutlet) {
     }
     if (matches.length !== 1) return { cards: matches.length, rows: [] }
     const card = matches[0]
-    for (const details of card.querySelectorAll('details')) if (!details.open) details.querySelector('summary')?.click()
+    // On the settings page the rows live in the row's expanded body, so open the
+    // disclosure first and read the meters from the region it controls.
+    const body = settings ? (card.nextElementSibling ?? card) : card
+    if (settings) {
+      const header = card.querySelector('button[aria-expanded]')
+      if (header && header.getAttribute('aria-expanded') !== 'true') header.click()
+    }
+    for (const details of body.querySelectorAll('details')) if (!details.open) details.querySelector('summary')?.click()
     const rows = ${
       settings
-        ? `[...card.querySelectorAll('[role="img"][data-usage-color]')].map(meter => ({ label: meter.previousElementSibling?.firstElementChild?.textContent, value: meter.previousElementSibling?.lastElementChild?.textContent, meter }))`
+        ? `[...body.querySelectorAll('[role="img"][data-usage-color]')].map(meter => ({ label: meter.previousElementSibling?.firstElementChild?.textContent, value: meter.previousElementSibling?.lastElementChild?.textContent, meter }))`
         : `[...card.querySelectorAll('dt')].map(dt => ({ label: dt.textContent, value: dt.nextElementSibling?.textContent, meter: dt.nextElementSibling?.nextElementSibling }))`
     }
     return { cards: matches.length, rows: rows.map(({ label, value, meter }) => {

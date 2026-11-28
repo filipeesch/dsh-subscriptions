@@ -1,4 +1,7 @@
 <Journey id="manage-codex" start="subscriptions" breakpoint="mobile">
+  <ExpectVisible target="codex-detail" visible={false} />
+  <Tap target="codex" />
+  <ExpectVisible target="codex-detail" visible={true} />
   <ExpectVisible target="codex-manager" visible={false} />
   <Tap target="codex-manage" />
   <ExpectVisible target="codex-manager" visible={true} />

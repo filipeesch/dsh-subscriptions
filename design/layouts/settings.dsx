@@ -1,0 +1,25 @@
+<Layout>
+  <Stack align="center" padding={{ mobile: "spacing.sm", tablet: "spacing.lg" }}>
+    <Stack id="settings-shell" styleClass="settings-shell" background="color.surface" radius="radius.panel" gap="spacing.md" padding={{ mobile: "spacing.inset", tablet: "spacing.xl" }}>
+      <Stack direction="row" align="center" justify="between" gap="spacing.sm" wrap>
+        <Text variant="heading" fontSize="font.size.lg" fontWeight="font.weight.medium">Settings</Text>
+        <Button id="open-configuration" size="sm" styleClass="provider-action" variant="secondary">Open configuration file</Button>
+      </Stack>
+      <Stack direction={{ mobile: "column", tablet: "row" }} gap={{ mobile: "spacing.md", tablet: "spacing.xl" }}>
+        <Stack id="settings-nav" styleClass="settings-nav" direction={{ mobile: "row", tablet: "column" }} gap="spacing.xs" wrap>
+          <Text styleClass="settings-nav-item">General</Text>
+          <Text styleClass="settings-nav-item">Models</Text>
+          <Text styleClass="settings-nav-item">Built-in plugins</Text>
+          <Text styleClass="settings-nav-item">Agent presets</Text>
+          <Stack id="settings-selected" direction="row" align="center" gap="spacing.sm" padding="spacing.sm" background="color.selected" radius="radius.md">
+            <Icon name="settings" size="spacing.icon" color="color.text" />
+            <Text fontSize="font.size.md" fontWeight="font.weight.medium">Subscriptions</Text>
+          </Stack>
+        </Stack>
+        <Stack id="settings-content" styleClass="settings-content" gap="spacing.md">
+          <ContentSlot />
+        </Stack>
+      </Stack>
+    </Stack>
+  </Stack>
+</Layout>

@@ -108,17 +108,21 @@ function buttonStyle(disabled: boolean): CSSProperties {
  *   is reported while the key stays saved.
  * @param props.onChanged - called after a save or a removal commits; it must not
  *   remount this field, or the pending validation outcome would be lost.
+ * @param props.onValidated - called when the route's read accepts the key just
+ *   saved, so an owner that remembered a rejected key can drop that mark.
  */
 export function KeyCredentialField({
   rpc,
   t,
   route,
   onChanged,
+  onValidated,
 }: {
   rpc: ConnectionHandle['rpc']
   t: Translate
   route: KeyRoute
   onChanged?: () => void
+  onValidated?: () => void
 }) {
   const [view, setView] = useState<KeyCredentialView>()
   const [draft, setDraft] = useState('')
@@ -254,6 +258,11 @@ export function KeyCredentialField({
         return
       }
       setPhase('done')
+      try {
+        onValidated?.()
+      } catch {
+        // The owner's refresh is best-effort; the key is already proven.
+      }
     } catch (error) {
       if (generation.current !== mine) return
       setActionError(t('credentialSaveFailed', { message: message(error) }))

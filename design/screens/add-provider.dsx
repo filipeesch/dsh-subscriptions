@@ -1,0 +1,34 @@
+<Screen id="add-provider" title="1. Choose another provider" layout="settings" background="color.canvas">
+  <Text id="add-provider-heading" variant="heading" fontSize="font.size.lg" fontWeight="font.weight.medium">Add provider</Text>
+  <Card id="add-provider-form" variant="outlined" padding="spacing.lg" radius="radius.card" borderColor="color.border">
+    <Stack gap="spacing.lg">
+      <Stack gap="spacing.xs">
+        <Text variant="label" id="provider-label">Provider</Text>
+        <Button id="provider-select" variant="secondary" styleClass="provider-select" fullWidth onPress={open("provider-options")}>
+          <Text align="left" styleClass="provider-option-label">Select a provider</Text>
+          <Icon name="chevron-down" size="spacing.icon" />
+        </Button>
+      </Stack>
+      <Stack direction="row" justify="end" gap="spacing.sm" wrap>
+        <Button id="cancel-add-provider" variant="secondary" styleClass="provider-action" onPress={navigate("subscriptions")}>Cancel</Button>
+        <Button id="save-provider" styleClass="provider-action" disabled>Save</Button>
+      </Stack>
+    </Stack>
+  </Card>
+  <Popover id="provider-options" anchor="provider-select" title="Choose a provider · 11 options" padding="spacing.sm" styleClass="provider-menu">
+    <Stack gap="spacing.xs">
+      <Text color="color.subtle" variant="caption" styleClass="provider-menu-note">Scroll to see all providers.</Text>
+      <Button id="choose-claude" variant="ghost" styleClass="provider-option" fullWidth onPress={navigate("setup-claude")}><Text align="left" styleClass="provider-option-label">Claude</Text></Button>
+      <Button id="choose-codex" variant="ghost" styleClass="provider-option" fullWidth disabled><Text align="left" styleClass="provider-option-label">Codex (ChatGPT) · Configured</Text></Button>
+      <Button id="choose-cursor" variant="ghost" styleClass="provider-option" fullWidth onPress={navigate("setup-cursor")}><Text align="left" styleClass="provider-option-label">Cursor</Text></Button>
+      <Button id="choose-copilot" variant="ghost" styleClass="provider-option" fullWidth onPress={navigate("setup-copilot")}><Text align="left" styleClass="provider-option-label">GitHub Copilot</Text></Button>
+      <Button id="choose-antigravity" variant="ghost" styleClass="provider-option" fullWidth onPress={navigate("setup-antigravity")}><Text align="left" styleClass="provider-option-label">Google Antigravity</Text></Button>
+      <Button id="choose-grok" variant="ghost" styleClass="provider-option" fullWidth onPress={navigate("setup-grok")}><Text align="left" styleClass="provider-option-label">Grok (X Premium)</Text></Button>
+      <Button id="choose-kimi-code" variant="ghost" styleClass="provider-option" fullWidth disabled><Text align="left" styleClass="provider-option-label">Kimi Code · Configured</Text></Button>
+      <Button id="choose-minimax" variant="ghost" styleClass="provider-option" fullWidth onPress={navigate("setup-minimax")}><Text align="left" styleClass="provider-option-label">MiniMax</Text></Button>
+      <Button id="choose-minimax-cn" variant="ghost" styleClass="provider-option" fullWidth onPress={navigate("setup-minimax-cn")}><Text align="left" styleClass="provider-option-label">MiniMax CN</Text></Button>
+      <Button id="choose-ollama" variant="ghost" styleClass="provider-option" fullWidth onPress={navigate("setup-ollama")}><Text align="left" styleClass="provider-option-label">Ollama</Text></Button>
+      <Button id="choose-opencode-go" variant="ghost" styleClass="provider-option" fullWidth onPress={navigate("setup-opencode-go")}><Text align="left" styleClass="provider-option-label">OpenCode Go</Text></Button>
+    </Stack>
+  </Popover>
+</Screen>

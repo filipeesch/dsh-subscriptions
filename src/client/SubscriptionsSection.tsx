@@ -1,44 +1,62 @@
 /**
- * Subscriptions settings section: one card per subscription provider with an
- * OAuth login/logout flow driven by the node half's
- * `/api/subscriptions-auth.<endpoint>` RPC routes. Login state lives server-side; the page polls `status` only while
- * a login attempt is busy, so an idle page never polls. All state is local
- * React state — the page has no store.
+ * Subscriptions settings page: the roster of configured providers, the
+ * preference band above it, and the add-provider form that replaces it while it
+ * is open.
+ *
+ * The page owns every fact the roster needs. One configured-set read decides
+ * which providers have a row — the OAuth routes' accounts from `status`, the
+ * external routes from `externalStatus`, and Ollama's stored connection from
+ * `ollamaSettings` — and it is replaced only on success, so a failed read keeps
+ * the rows the last successful one reported. A row's detail is not mounted until
+ * the row is expanded, so a collapsed roster performs no usage read.
+ *
+ * Every login state lives server-side; the page polls `status` only while an
+ * attempt is busy, so an idle page never polls. All state is local React state —
+ * the page has no store.
  *
  * Every color resolves through a `--dsw-alias-*` design token (the ui-theme
- * design-platform.css values flip under `body[data-ds-dark-theme]`), and
- * every user-visible string goes through the locale-bound `t` of the
- * 'settings.subscriptions' namespace. Buttons and inputs take the
- * native settings vocabulary with shared, scoped control states.
+ * design-platform.css values flip under `body[data-ds-dark-theme]`), and every
+ * user-visible string goes through the locale-bound `t` of the
+ * 'settings.subscriptions' namespace.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
 import { en } from './locales.js'
-import { resetActionBlock } from './reset-action.js'
-import { visibleUsageWindows } from './usage-window-filter.js'
+import type { SubscriptionsKey } from './locales.js'
+import type { ProviderId } from '../providers/ids.js'
 import { ProviderAccountManager } from './ProviderAccountManager.js'
 import { providerSettingsCss } from './provider-settings-styles.js'
-import { ExternalUsageCards } from './ExternalUsageCards.js'
-import { OllamaCard } from './OllamaCard.js'
-import { CursorCard } from './CursorCard.js'
-import { UsageWindowRow } from './UsageWindowRow.js'
-import {
-  ResetCreditsDisclosure,
-  ResetCreditsErrorLine,
-  showsResetCredits,
-} from './reset-credits-view.js'
 import { UsageBadgeDisplaySetting } from './UsageBadgeDisplaySetting.js'
 import { USAGE_BADGE_REFRESH_EVENT } from './usage-badge-preferences.js'
-import { subscriptionCardStyles as cardStyles } from './subscription-card-styles.js'
-import type { ProviderId } from '../providers/ids.js'
-import type { SubscriptionsKey } from './locales.js'
-
+import { sectionStyles, rosterStyles } from './subscription-section-styles.js'
+import { ProviderRoster } from './ProviderRoster.js'
+import { AddProviderForm } from './AddProviderForm.js'
+import { CursorCard } from './CursorCard.js'
+import { OllamaCard } from './OllamaCard.js'
+import { ExternalUsageDetail } from './ExternalUsageDetail.js'
+import type { ExternalSource } from './ExternalUsageDetail.js'
+import { OAuthProviderDetail as OAuthDetail } from './OAuthProviderDetail.js'
+import type { OllamaSettingsView } from './ollama-draft.js'
+import { configuredRows, ROSTER_PROVIDERS } from './provider-roster.js'
+import type {
+  ConfiguredRow,
+  ConfirmedRow,
+  RosterProviderId,
+  RosterSnapshot,
+  RowState,
+} from './provider-roster.js'
+import type { KeyCredentialView } from './KeyCredentialField.js'
 import {
   callSubscriptionsAuth,
   SubscriptionsAuthError,
 } from './subscriptions-rpc.js'
 export { callSubscriptionsAuth } from './subscriptions-rpc.js'
+export {
+  clientVersionText,
+  PlanWindowsAbsentNote,
+} from './OAuthProviderDetail.js'
+export type { ClientVersionSource } from './OAuthProviderDetail.js'
 
 /** Poll cadence while a provider login attempt is busy. */
 const POLL_INTERVAL_MS = 2000
@@ -63,17 +81,10 @@ export interface ProviderStatus {
   accounts: AccountStatus[]
   detail?: string
   /** The CLI version the route presents (Codex, Claude), and where it came from. */
-  clientVersion?: { version: string; source: ClientVersionSource }
-}
-
-/** Where a presented CLI version came from; the tag names the source so a stale one is visible. */
-export type ClientVersionSource = 'npm' | 'local' | 'fallback' | 'config'
-
-const CLIENT_VERSION_SOURCES: Record<ClientVersionSource, SubscriptionsKey> = {
-  npm: 'clientVersionNpm',
-  local: 'clientVersionLocal',
-  fallback: 'clientVersionFallback',
-  config: 'clientVersionConfig',
+  clientVersion?: {
+    version: string
+    source: 'npm' | 'local' | 'fallback' | 'config'
+  }
 }
 
 /** `status` endpoint value: the node half owns this shape. */
@@ -162,14 +173,10 @@ export interface SubscriptionsSectionInjected {
  */
 export type SubscriptionsSectionProps = Partial<SubscriptionsSectionInjected>
 
-/** Card display metadata, in page order (names are brand names, not translated). */
-const PROVIDERS: readonly { id: SubscriptionProvider; name: string }[] = [
-  { id: 'codex', name: 'Codex (ChatGPT)' },
-  { id: 'claude', name: 'Claude' },
-  { id: 'grok', name: 'Grok (X Premium)' },
-  { id: 'copilot', name: 'GitHub Copilot' },
-  { id: 'antigravity', name: 'Google Antigravity' },
-]
+/** The OAuth-session routes, in the page's order. */
+const OAUTH_PROVIDERS = ROSTER_PROVIDERS.filter(
+  (entry) => entry.family === 'oauth',
+) as readonly { id: SubscriptionProvider; name: string }[]
 
 /** Human text of an action failure, SubscriptionsAuthError or not. */
 function messageOf(error: unknown): string {
@@ -201,203 +208,18 @@ function fallbackTranslate(
 ): string {
   let text: string = en[key]
   for (const [name, value] of Object.entries(params ?? {})) {
-    text = text.replaceAll(`{${name}}`, String(value))
+    text = text.replaceAll('{' + name + '}', String(value))
   }
   return text
 }
 
-const styles: Record<string, CSSProperties> = {
-  section: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 12,
-    maxWidth: 560,
-    color: 'var(--dsw-alias-label-primary)',
-  },
-  intro: {
-    margin: 0,
-    color: 'var(--dsw-alias-label-tertiary)',
-    fontSize: 14,
-    lineHeight: '22px',
-  },
-  card: {
-    ...cardStyles.card,
-    border:
-      '0.5px solid var(--dsw-alias-settings-card-stroke, var(--dsw-alias-border-l4))',
-    borderRadius: 'var(--dsw-radius-xl, 20px)',
-    background:
-      'var(--dsw-alias-settings-card-fill, var(--dsw-alias-bg-layer-2))',
-  },
-  cardHeader: cardStyles.header,
-  dot: cardStyles.dot,
-  name: cardStyles.name,
-  statusLine: cardStyles.status,
-  clientVersion: {
-    fontSize: 12,
-    lineHeight: '18px',
-    color: 'var(--dsw-alias-label-tertiary)',
-    fontVariantNumeric: 'tabular-nums',
-  },
-  errorLine: cardStyles.error,
-  actions: cardStyles.actions,
-  usage: {
-    ...cardStyles.usage,
-    borderTop: '0.5px solid var(--dsw-alias-border-l2)',
-  },
-  usageHeader: cardStyles.usageHeader,
-  usageTitle: cardStyles.usageTitle,
-  usagePlan: cardStyles.usagePlan,
-  usageRefresh: {
-    minHeight: 22,
-    height: 22,
-    padding: '0 8px',
-    marginLeft: 'auto',
-  },
-  usageRow: cardStyles.usageRow,
-  usageMeta: cardStyles.usageMeta,
-  accountRow: {
-    ...cardStyles.account,
-    border: '0.5px solid var(--dsw-alias-border-l2)',
-    borderRadius: 'var(--dsw-radius-lg, 16px)',
-  },
-  accountHeader: cardStyles.accountHeader,
-  accountName: cardStyles.accountName,
-  starButton: {
-    border: 'none',
-    padding: 0,
-    width: 28,
-    font: 'inherit',
-    fontSize: 14,
-    lineHeight: '20px',
-    cursor: 'pointer',
-    color: 'var(--dsw-alias-state-warn-label)',
-  },
-  deviceCode: {
-    marginTop: 4,
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 6,
-    border: '0.5px solid var(--dsw-alias-border-l2)',
-    borderRadius: 'var(--dsw-radius-lg, 16px)',
-    padding: '10px 12px',
-    background: 'var(--dsw-alias-bg-layer-1)',
-  },
-  deviceCodeText: {
-    fontFamily: 'monospace',
-    fontSize: 18,
-    lineHeight: '24px',
-    letterSpacing: 2,
-    color: 'var(--dsw-alias-label-primary)',
-    userSelect: 'all',
-  },
-  manual: { fontSize: 13, lineHeight: '20px' },
-  manualRow: {
-    display: 'flex',
-    flexWrap: 'wrap',
-    gap: 8,
-    alignItems: 'center',
-    marginTop: 8,
-  },
-  manualInput: { flex: '1 1 200px', minWidth: 0 },
-  modalOverlay: {
-    position: 'fixed',
-    inset: 0,
-    zIndex: 1000,
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: 16,
-    background: 'var(--dsw-alias-bg-mask-1, #0006)',
-    backdropFilter: 'var(--dsw-mask-blur, none)',
-  },
-  modal: {
-    width: 460,
-    maxWidth: '100%',
-    maxHeight: '90vh',
-    overflowY: 'auto',
-    boxSizing: 'border-box',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 12,
-    padding: '16px 18px',
-    borderRadius: 'var(--dsw-radius-panel, 28px)',
-    background: 'var(--dsw-alias-bg-layer-2)',
-    border: 0,
-    boxShadow: 'var(--dsw-elevation-prominent)',
-  },
-  modalHeader: { display: 'flex', alignItems: 'center', gap: 8 },
-  modalTitle: {
-    fontWeight: 500,
-    fontSize: 16,
-    lineHeight: '24px',
-    color: 'var(--dsw-alias-label-primary)',
-  },
-}
-
-/** Status dot color for one provider state. */
-function dotColor(status: ProviderStatus | undefined): string {
-  if (status?.busy === true) return 'var(--dsw-alias-state-warn-label)'
-  if ((status?.accounts.length ?? 0) > 0)
-    return 'var(--dsw-alias-state-success-primary)'
-  return 'var(--dsw-alias-label-dimmed)'
-}
-
-/**
- * One-line status text for one provider state.
- * @param t - section translate.
- * @param status - the provider's last reported state.
- * @returns the localized status line.
- */
-function statusText(
-  t: SubscriptionsSectionInjected['t'],
-  status: ProviderStatus | undefined,
-): string {
-  if (status === undefined) return t('checking')
-  if (status.busy) return t('loginInProgress')
-  if (status.accounts.length > 0)
-    return t('loggedInCount', { count: status.accounts.length })
-  return t('notLoggedIn')
-}
-
-/**
- * The CLI version a route presents, beside the provider name; nothing for
- * routes without one. The source word (npm / local / built-in / configured)
- * is the fix for upstream issue #108: a failed npm lookup must read as a
- * fallback, never as a plan limit.
- */
-export function clientVersionText(
-  t: SubscriptionsSectionInjected['t'],
-  clientVersion: ProviderStatus['clientVersion'],
-): string {
-  if (clientVersion === undefined) return ''
-  return t('clientVersion', {
-    version: clientVersion.version,
-    source: t(CLIENT_VERSION_SOURCES[clientVersion.source]),
-  })
-}
-
-/** Meter fill color lives with the pace logic: fresh 90%+ is red, pace presets add a yellow lead threshold. */
-export { usageBarColor } from './usage-pace.js'
-
-/**
- * The line a card states when its reading carries a budget but no plan window:
- * the account is metered differently, not broken. Exported so a static render
- * can assert the sentence the card mounts.
- * @param props.t - section translate.
- * @returns the note the card shows under the window rows.
- */
-export function PlanWindowsAbsentNote({
-  t,
-}: {
-  t: SubscriptionsSectionInjected['t']
-}) {
-  return <p style={styles.statusLine}>{t('usagePlanWindowsAbsent')}</p>
-}
+/** The page's own styles; the roster, the form, and the detail carry theirs. */
+const styles = sectionStyles as Record<string, CSSProperties>
 
 /**
  * The Subscriptions settings page component.
  * @param props - the slot inject face ({@link SubscriptionsSectionInjected}).
- * @returns the section body, or a notice while the RPC face is absent.
+ * @returns the roster, or the add form while it is open.
  */
 export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const { rpc } = props
@@ -426,10 +248,8 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       >
     >
   >({})
-  const [copiedCode, setCopiedCode] = useState<
-    SubscriptionProvider | undefined
-  >(undefined)
-  /** Usage snapshots keyed `${provider}:${accountKey}` — every account tracks its own windows. */
+  const [copiedCode, setCopiedCode] = useState<SubscriptionProvider>()
+  /** Usage snapshots keyed `provider:accountKey` — every account tracks its own windows. */
   const [usages, setUsages] = useState<Record<string, ProviderUsage>>({})
   const [observedAt, setObservedAt] = useState<Record<string, number>>({})
   const [usageErrors, setUsageErrors] = useState<Record<string, string>>({})
@@ -446,23 +266,51 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   const [resetMessage, setResetMessage] = useState('')
   const [resetAccount, setResetAccount] = useState<string>()
   const resetDialogRef = useRef<HTMLDialogElement>(null)
+  const [managedProvider, setManagedProvider] = useState<{
+    id: SubscriptionProvider
+    name: string
+  }>()
+  // The configured set: one snapshot committed only when every read answers, so
+  // a half-answered reconciliation can never drop or invent a row. The form's
+  // confirmations stand in until the next successful read lands.
+  const [snapshot, setSnapshot] = useState<RosterSnapshot>()
+  const [ollamaSettings, setOllamaSettings] = useState<OllamaSettingsView>()
+  /** The last full roster read's failure: it owns the row set and its Retry. */
+  const [rosterError, setRosterError] = useState<string>()
+  /** A status-only poll failure: the OAuth half is unknown, the rows are not. */
+  const [statusError, setStatusError] = useState<string>()
+  const [confirmed, setConfirmed] = useState<
+    ReadonlyMap<RosterProviderId, ConfirmedRow>
+  >(new Map())
+  const [attention, setAttention] = useState<ReadonlySet<RosterProviderId>>(
+    new Set(),
+  )
+  const [expanded, setExpanded] = useState<ReadonlySet<RosterProviderId>>(
+    new Set(),
+  )
+  const [addMode, setAddMode] = useState(false)
+  const [outcome, setOutcome] = useState<string>()
+  const headingRef = useRef<HTMLHeadingElement>(null)
+  const returnFocus = useRef(false)
+
   useEffect(() => {
     if (resetConfirmation) resetDialogRef.current?.showModal()
     else resetDialogRef.current?.close()
   }, [resetConfirmation])
+
   const resetInflight = useRef(false)
   const mountedRef = useRef(true)
   const pollersRef = useRef(
     new Map<SubscriptionProvider, ReturnType<typeof setInterval>>(),
   )
-  /** Accounts with a `usage` call in flight; guards the auto-fetch effect against re-entry. */
   /** In-flight usage reads per key, holding the promise so a forced read can wait one out. */
   const usageInflightRef = useRef(new Map<string, Promise<void>>())
   const usageRosterSignatureRef = useRef<string>()
-  const [managedProvider, setManagedProvider] = useState<{
-    id: SubscriptionProvider
-    name: string
-  }>()
+  /** Publication tickets: only the newest read of each kind may commit. */
+  const rosterSeq = useRef(0)
+  const statusSeq = useRef(0)
+  /** The published snapshot, read by callbacks that must not depend on state. */
+  const snapshotRef = useRef<RosterSnapshot>()
   const setProviderError = useCallback(
     (provider: SubscriptionProvider, message: string | undefined): void => {
       if (!mountedRef.current) return
@@ -484,37 +332,47 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     }
   }, [])
 
-  /** Refetch every provider's status; stop a provider's poller once its attempt settles. */
-  const refresh = useCallback(async (): Promise<void> => {
-    if (rpc === undefined) return
-    let response: StatusResponse
-    try {
-      response = await callSubscriptionsAuth<StatusResponse>(rpc, 'status', {})
-    } catch (error) {
-      // A failed poll must not kill the page; busy providers keep polling and
-      // the action paths report their own errors. But staying silent turns a
-      // persistent failure into an endless "Checking…" — show it instead.
-      const message = error instanceof Error ? error.message : String(error)
-      for (const { id } of PROVIDERS) setProviderError(id, message)
-      return
-    }
-    if (!mountedRef.current) return
-    setStatuses(response.providers)
-    const signature = PROVIDERS.map(
-      ({ id }) =>
-        `${id}:${response.providers[id].accounts
-          .map((account) => `${account.key}:${account.isDefault}`)
-          .join(',')}`,
-    ).join(';')
-    if (signature !== usageRosterSignatureRef.current) {
-      usageRosterSignatureRef.current = signature
-      window.dispatchEvent(new Event(USAGE_BADGE_REFRESH_EVENT))
-    }
-    // The poll recovered: drop any error line a previous failed poll left.
-    for (const { id } of PROVIDERS) setProviderError(id, undefined)
-    for (const { id } of PROVIDERS) {
-      const status = response.providers[id]
-      if (status.accounts.length > 0 || !status.busy) {
+  /**
+   * Publish one provider-status answer. This is the only place the OAuth state
+   * moves, so a status poll and a roster read cannot disagree about it, and it
+   * is what a sign-in attempt is judged by — never the roster read's other
+   * halves.
+   * @param providers - every OAuth provider's status.
+   * @returns whether the set of accounts changed, which invalidates the rows.
+   */
+  const applyStatus = useCallback(
+    (providers: StatusResponse['providers']): boolean => {
+      setStatuses(providers)
+      // The answer recovered: drop a poll-only failure, which is this half's own
+      // error and not the last full read's.
+      setStatusError(undefined)
+      // A settled provider has no action error left to show; a busy one keeps
+      // the error of the action that failed while its attempt still runs.
+      for (const { id } of OAUTH_PROVIDERS) {
+        if (providers[id].busy) continue
+        setProviderError(id, undefined)
+      }
+      // The snapshot only moves on a full read, so an account added while that
+      // read fails would otherwise leave the row stating the old count.
+      for (const { id } of OAUTH_PROVIDERS) {
+        const count = providers[id].accounts.length
+        const snapshotCount =
+          snapshotRef.current?.statuses[id]?.accounts.length ?? 0
+        if (count === snapshotCount) continue
+        setConfirmed((prev) => {
+          const next = new Map(prev)
+          next.set(id, {
+            state: count > 1 ? 'accounts-many' : 'accounts-one',
+            accounts: count,
+          })
+          return next
+        })
+      }
+      for (const { id } of OAUTH_PROVIDERS) {
+        const provider = providers[id]
+        // A busy provider keeps its poller until the attempt itself settles: an
+        // account already connected must not stop a second one being added.
+        if (provider.busy) continue
         stopPolling(id)
         // The attempt settled (success, timeout, or cancel): drop the code card.
         setDeviceCodes((prev) => {
@@ -524,20 +382,132 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
           return next
         })
       }
+      const signature = OAUTH_PROVIDERS.map(
+        ({ id }) =>
+          id +
+          ':' +
+          providers[id].accounts
+            .map((account) => account.key + ':' + account.isDefault)
+            .join(','),
+      ).join(';')
+      if (signature === usageRosterSignatureRef.current) return false
+      const known = usageRosterSignatureRef.current !== undefined
+      usageRosterSignatureRef.current = signature
+      window.dispatchEvent(new Event(USAGE_BADGE_REFRESH_EVENT))
+      // The first answer is the roster's own read; later changes come from an
+      // attempt settling, and only then does the row set need re-reading.
+      return known
+    },
+    [stopPolling, setProviderError],
+  )
+
+  /**
+   * Read the whole configured set and commit it as one snapshot. Every required
+   * answer must arrive: a partial answer is a failed read, so the rows of the
+   * last successful read stay exactly as they were. A success also drops this
+   * session's confirmations, because the routes are authoritative again.
+   *
+   * Reads overlap — a poll tick, an action, and a retry can all be in flight — so
+   * each answer carries a ticket and only the newest one may publish. Without
+   * that, a slow answer that predates a removal could resurrect the removed row.
+   *
+   * The Ollama credential is described only when an address could make a stored
+   * Cloud key idle — a describe call proves presence without spending the key,
+   * which is the one question `externalStatus` cannot answer at that address.
+   * A host without the credential service reports nothing and the row keeps its
+   * address state.
+   */
+  const refresh = useCallback(async (): Promise<void> => {
+    if (rpc === undefined) return
+    const rosterTicket = ++rosterSeq.current
+    const statusTicket = ++statusSeq.current
+    try {
+      const [status, external, ollama] = await Promise.all([
+        callSubscriptionsAuth<StatusResponse>(rpc, 'status', {}),
+        callSubscriptionsAuth<Record<string, { configured: boolean }>>(
+          rpc,
+          'externalStatus',
+          {},
+        ),
+        callSubscriptionsAuth<OllamaSettingsView>(rpc, 'ollamaSettings', {}),
+      ])
+      if (!mountedRef.current) return
+      if (statusTicket === statusSeq.current) applyStatus(status.providers)
+      const baseURL = ollama.settings?.baseURL
+      const keyIdleHere =
+        baseURL !== undefined &&
+        baseURL !== '' &&
+        external['ollama-cloud']?.configured !== true
+      const keyStored = keyIdleHere
+        ? await callSubscriptionsAuth<KeyCredentialView>(rpc, 'keyCredential', {
+            route: 'ollama-cloud',
+          })
+            .then((view) => view.configured === true)
+            .catch(() => false)
+        : false
+      if (!mountedRef.current || rosterTicket !== rosterSeq.current) return
+      const next: RosterSnapshot = {
+        statuses: status.providers,
+        routes: {
+          configured: external,
+          ollama: {
+            ...(baseURL === undefined ? {} : { baseURL }),
+            keyStored,
+          },
+        },
+      }
+      snapshotRef.current = next
+      setSnapshot(next)
+      setOllamaSettings(ollama)
+      setRosterError(undefined)
+      setStatusError(undefined)
+      setConfirmed(new Map())
+    } catch (error) {
+      // A failed read must not kill the page; busy providers keep polling. It
+      // keeps the rows it already reported and is shown as a failure, but only
+      // when no newer read has already answered.
+      if (mountedRef.current && rosterTicket === rosterSeq.current)
+        setRosterError(messageOf(error))
     }
-  }, [rpc, stopPolling, setProviderError])
+  }, [rpc, applyStatus])
+
+  /**
+   * Poll the OAuth providers' status only. A sign-in attempt is judged by this
+   * answer, so it keeps working when the roster's other halves fail; a changed
+   * account set re-reads the roster.
+   */
+  const pollStatus = useCallback(async (): Promise<void> => {
+    if (rpc === undefined) return
+    const ticket = ++statusSeq.current
+    try {
+      const status = await callSubscriptionsAuth<StatusResponse>(
+        rpc,
+        'status',
+        {},
+      )
+      if (!mountedRef.current || ticket !== statusSeq.current) return
+      if (applyStatus(status.providers)) void refresh()
+    } catch (error) {
+      // The OAuth half is unknown now: state it, keep the rows the last full read
+      // reported, and let a later successful poll clear the line on its own.
+      if (mountedRef.current && ticket === statusSeq.current)
+        setStatusError(messageOf(error))
+    }
+  }, [rpc, applyStatus, refresh])
 
   const startPolling = useCallback(
     (provider: SubscriptionProvider): void => {
+      // Central guard: nothing starts an interval for a component that is gone.
+      if (!mountedRef.current) return
       if (pollersRef.current.has(provider)) return
       pollersRef.current.set(
         provider,
         setInterval(() => {
-          void refresh()
+          void pollStatus()
         }, POLL_INTERVAL_MS),
       )
     },
-    [refresh],
+    [pollStatus],
   )
 
   // Initial load; every busy provider (e.g. an attempt started before a page
@@ -547,7 +517,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     void refresh().then(() => {
       if (!mountedRef.current) return
       setStatuses((current) => {
-        for (const { id } of PROVIDERS) {
+        for (const { id } of OAUTH_PROVIDERS) {
           if (current[id]?.busy === true) startPolling(id)
         }
         return current
@@ -570,7 +540,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       force = false,
     ): Promise<void> => {
       if (rpc === undefined) return
-      const key = `${provider}:${account}`
+      const key = provider + ':' + account
       const pending = usageInflightRef.current.get(key)
       // A forced read must never be dropped behind a poll that started before the
       // state changed. The refresh after a credit redemption is the only thing
@@ -662,22 +632,30 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     }
   }
 
-  // Fetch usage once an account is logged in; drop the snapshots of accounts
-  // that vanished so a re-login refetches. A failed lookup does not auto-retry
-  // — the per-account Refresh button is the retry path.
+  // Drop the snapshots of accounts that vanished so a re-login refetches.
   useEffect(() => {
     const live = new Set<string>()
-    for (const { id } of PROVIDERS) {
+    for (const { id } of OAUTH_PROVIDERS) {
       for (const account of statuses[id]?.accounts ?? []) {
-        const key = `${id}:${account.key}`
-        live.add(key)
-        if (usages[key] === undefined && usageErrors[key] === undefined)
-          void loadUsage(id, account.key)
+        live.add(id + ':' + account.key)
       }
     }
     setUsages((prev) => dropStale(prev, live))
     setUsageErrors((prev) => dropStale(prev, live))
-  }, [statuses, usages, usageErrors, loadUsage])
+  }, [statuses, usages, usageErrors])
+
+  // Read usage for an expanded row only: a collapsed roster performs no usage
+  // read, and expanding a row starts the read its card performed on mount.
+  useEffect(() => {
+    for (const { id } of OAUTH_PROVIDERS) {
+      if (!expanded.has(id)) continue
+      for (const account of statuses[id]?.accounts ?? []) {
+        const key = id + ':' + account.key
+        if (usages[key] === undefined && usageErrors[key] === undefined)
+          void loadUsage(id, account.key)
+      }
+    }
+  }, [expanded, statuses, usages, usageErrors, loadUsage])
 
   const login = useCallback(
     async (
@@ -700,7 +678,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
           response.authorizeUrl === ''
         ) {
           // Instant login (e.g. imported from Claude Code credentials)
-          await refresh()
+          await pollStatus()
           return
         }
         if (typeof response.authorizeUrl !== 'string') {
@@ -737,7 +715,7 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
         setProviderError(provider, messageOf(error))
       }
     },
-    [rpc, t, setProviderError, startPolling, refresh],
+    [rpc, t, setProviderError, startPolling, pollStatus],
   )
 
   const cancel = useCallback(
@@ -747,17 +725,25 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       try {
         await callSubscriptionsAuth<{ ok: true }>(rpc, 'cancel', { provider })
       } catch (error) {
+        // The attempt may still be running: keep observing it so the form is not
+        // left waiting with nothing polling, and keep the failure on screen.
         setProviderError(provider, messageOf(error))
       }
-      await refresh()
+      // The settings page can close while this request is in flight; a poller
+      // started now would outlive the component and read forever.
+      if (!mountedRef.current) return
+      // Whatever the cancel answered, the attempt is only over when the host says
+      // so; the poller stops itself on the first settled answer.
+      startPolling(provider)
+      await pollStatus()
     },
-    [rpc, stopPolling, setProviderError, refresh],
+    [rpc, stopPolling, startPolling, setProviderError, pollStatus],
   )
 
   const submitManual = useCallback(
-    async (provider: SubscriptionProvider): Promise<void> => {
+    async (provider: SubscriptionProvider, value?: string): Promise<void> => {
       if (rpc === undefined) return
-      const input = manualDrafts[provider].trim()
+      const input = (value ?? manualDrafts[provider]).trim()
       if (input === '') return
       setProviderError(provider, undefined)
       try {
@@ -770,9 +756,9 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       } catch (error) {
         setProviderError(provider, messageOf(error))
       }
-      await refresh()
+      await pollStatus()
     },
-    [rpc, manualDrafts, setProviderError, refresh],
+    [rpc, manualDrafts, setProviderError, pollStatus],
   )
 
   const logout = useCallback(
@@ -798,9 +784,9 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       } catch (error) {
         setProviderError(provider, messageOf(error))
       }
-      await refresh()
+      await pollStatus()
     },
-    [rpc, t, setProviderError, refresh],
+    [rpc, t, setProviderError, pollStatus],
   )
 
   const setDefault = useCallback(
@@ -815,9 +801,9 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
       } catch (error) {
         setProviderError(provider, messageOf(error))
       }
-      await refresh()
+      await pollStatus()
     },
-    [rpc, setProviderError, refresh],
+    [rpc, setProviderError, pollStatus],
   )
 
   const copyDeviceCode = useCallback(
@@ -840,6 +826,182 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
     [],
   )
 
+  /** Which of the three list states the last read left the roster in. */
+  const answered = snapshot !== undefined
+  /** A full-read failure owns the row set; a poll failure only withholds status. */
+  const failure = rosterError ?? statusError
+  const phase = answered
+    ? 'ready'
+    : failure === undefined
+      ? 'checking'
+      : 'failed'
+  const rows = configuredRows({
+    statuses: snapshot?.statuses ?? {},
+    routes: snapshot?.routes,
+    confirmed,
+    attention,
+  })
+  const configuredIdSet = new Set(rows.map((row) => row.id))
+
+  const confirmAddition = useCallback(
+    (provider: RosterProviderId, state: RowState, message: string): void => {
+      // The confirmation is authoritative: the row must not wait for the read
+      // that reconciles it, or a failed read would hide what the route confirmed.
+      setConfirmed((prev) => {
+        const next = new Map(prev)
+        next.set(provider, {
+          state,
+          ...(state === 'accounts-one' ? { accounts: 1 } : {}),
+          ...(state === 'accounts-many' ? { accounts: 2 } : {}),
+        })
+        return next
+      })
+      setAttention((prev) => {
+        if (!prev.has(provider)) return prev
+        const next = new Set(prev)
+        next.delete(provider)
+        return next
+      })
+      setOutcome(message)
+      setAddMode(false)
+      returnFocus.current = true
+      void refresh()
+    },
+    [refresh],
+  )
+
+  /**
+   * Leave the form without adding anything. The form unmounts while the reader's
+   * focus is inside it, so the roster heading takes focus back — a cancel must not
+   * drop a keyboard reader onto the page body.
+   */
+  const cancelAddition = useCallback((): void => {
+    setAddMode(false)
+    returnFocus.current = true
+  }, [])
+
+  const markAttention = useCallback(
+    (provider: RosterProviderId): void => {
+      setAttention((prev) => new Set(prev).add(provider))
+      void refresh()
+    },
+    [refresh],
+  )
+
+  /** A route the reader has since proven: drop the rejected-credential mark. */
+  const clearAttention = useCallback((provider: RosterProviderId): void => {
+    setAttention((prev) => {
+      if (!prev.has(provider)) return prev
+      const next = new Set(prev)
+      next.delete(provider)
+      return next
+    })
+  }, [])
+
+  // Focus returns to the roster heading whenever the form closes, on a
+  // confirmation or a cancel, so the reader keeps their place.
+  useEffect(() => {
+    if (addMode || !returnFocus.current) return
+    returnFocus.current = false
+    headingRef.current?.focus()
+  }, [addMode])
+
+  function toggleRow(row: RosterProviderId): void {
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(row)) next.delete(row)
+      else next.add(row)
+      return next
+    })
+  }
+
+  function openAdd(): void {
+    setOutcome(undefined)
+    setAddMode(true)
+  }
+
+  function renderDetail(row: ConfiguredRow) {
+    if (rpc === undefined) return null
+    if (row.family === 'oauth') {
+      const id = row.id as SubscriptionProvider
+      return OAuthDetail({
+        t,
+        provider: id,
+        status: statuses[id],
+        error: errors[id],
+        usages,
+        observedAt,
+        usageErrors,
+        usageLoading,
+        deviceCode: deviceCodes[id],
+        copiedCode: copiedCode === id,
+        manualDraft: manualDrafts[id],
+        resetBusy,
+        resetAccount,
+        resetMessage,
+        onManualDraft: (value) =>
+          setManualDrafts((prev) => ({ ...prev, [id]: value })),
+        onManualSubmit: () => {
+          void submitManual(id)
+        },
+        onLogin: (method) => {
+          void login(id, method)
+        },
+        onCancel: () => {
+          void cancel(id)
+        },
+        onLogout: (account, display) => {
+          void logout(id, account, display, row.name)
+        },
+        onSetDefault: (account) => {
+          void setDefault(id, account)
+        },
+        onCopyDeviceCode: (code) => copyDeviceCode(id, code),
+        onRefreshUsage: (account) => {
+          void loadUsage(id, account, true)
+        },
+        onManage: () => setManagedProvider({ id, name: row.name }),
+        onPrepareReset: (account) => {
+          void prepareReset(account)
+        },
+      })
+    }
+    if (row.family === 'cursor')
+      return (
+        <CursorCard
+          rpc={rpc}
+          t={t}
+          variant="row"
+          onChanged={() => {
+            // A key saved or removed here changes which rows exist.
+            void refresh()
+          }}
+          onCredentialValid={() => {
+            clearAttention('cursor')
+            void refresh()
+          }}
+        />
+      )
+    if (row.family === 'ollama')
+      return (
+        <OllamaCard
+          rpc={rpc}
+          t={t}
+          variant="row"
+          onChanged={() => {
+            void refresh()
+          }}
+          onCredentialValid={() => {
+            clearAttention('ollama')
+            void refresh()
+          }}
+        />
+      )
+    return (
+      <ExternalUsageDetail rpc={rpc} t={t} source={row.id as ExternalSource} />
+    )
+  }
+
   if (rpc === undefined) {
     return <p style={styles.intro}>{t('unavailable')}</p>
   }
@@ -847,326 +1009,57 @@ export function SubscriptionsSection(props: SubscriptionsSectionProps) {
   return (
     <div className="dsh-subscriptions-settings" style={styles.section}>
       <style>{providerSettingsCss}</style>
-      <p style={styles.intro}>{t('intro')}</p>
-      <UsageBadgeDisplaySetting t={t} />
-      {PROVIDERS.map(({ id, name }) => {
-        const status = statuses[id]
-        const busy = status?.busy === true
-        const deviceCode = deviceCodes[id]
-        const accounts = status?.accounts ?? []
-        return (
-          <div key={id} style={styles.card}>
-            <div style={styles.cardHeader}>
-              <span style={{ ...styles.dot, background: dotColor(status) }} />
-              <span style={styles.name}>{name}</span>
-              {status?.clientVersion !== undefined && (
-                <span
-                  style={styles.clientVersion}
-                  title={t('clientVersionHint')}
-                >
-                  {clientVersionText(t, status.clientVersion)}
-                </span>
-              )}
-            </div>
-            <p style={styles.statusLine}>{statusText(t, status)}</p>
-            {status?.detail !== undefined && status.detail !== '' && (
-              <p style={styles.statusLine}>{status.detail}</p>
-            )}
-            {errors[id] !== undefined && (
-              <p style={styles.errorLine}>{errors[id]}</p>
-            )}
-            {accounts.map((account) => {
-              const usageKey = `${id}:${account.key}`
-              const usage = usages[usageKey]
-              const shownWindows = visibleUsageWindows(
-                id,
-                usage?.windows,
-                status?.visibleModels,
-              )
-              const usageError = usageErrors[usageKey]
-              const display = account.account ?? account.key
-              const sortedCredits = [...(usage?.resetCredits ?? [])].sort(
-                (a, b) => (a.expiresAt ?? Infinity) - (b.expiresAt ?? Infinity),
-              )
-              const nextReset = sortedCredits.find(
-                (c) => c.expiresAt === undefined || c.expiresAt > Date.now(),
-              )
-              const resetBlock = usage
-                ? resetActionBlock(usage)
-                : 'resetUseRefresh'
-              const resetDisabled = resetBusy || resetBlock !== undefined
-              // Providers without a usage endpoint answer supported:false — no block.
-              const showUsage =
-                usage?.supported !== false &&
-                (usage !== undefined ||
-                  usageError !== undefined ||
-                  usageLoading[usageKey] === true)
-              return (
-                <div key={account.key} style={styles.accountRow}>
-                  <div style={styles.accountHeader}>
-                    <button
-                      type="button"
-                      style={styles.starButton}
-                      title={
-                        account.isDefault ? t('defaultBadge') : t('setDefault')
-                      }
-                      onClick={() => {
-                        if (!account.isDefault) void setDefault(id, account.key)
-                      }}
-                    >
-                      {account.isDefault ? '★' : '☆'}
-                    </button>
-                    <span style={styles.accountName}>{display}</span>
-                    {account.plan !== undefined && (
-                      <span style={styles.usagePlan}>{account.plan}</span>
-                    )}
-                    {account.expiresAt !== undefined && (
-                      <span style={styles.statusLine}>
-                        {t('accountExpires', {
-                          date: new Date(account.expiresAt).toLocaleString(),
-                        })}
-                      </span>
-                    )}
-                    <button
-                      type="button"
-                      style={{ marginLeft: 'auto', flexShrink: 0 }}
-                      onClick={() => {
-                        void logout(id, account.key, display, name)
-                      }}
-                    >
-                      {t('logout')}
-                    </button>
-                  </div>
-                  {showUsage && (
-                    <div style={styles.usage}>
-                      <div style={styles.usageHeader}>
-                        <span style={styles.usageTitle}>{t('usageTitle')}</span>
-                        {usage?.plan !== undefined && (
-                          <span style={styles.usagePlan}>
-                            {t('usagePlan', { plan: usage.plan })}
-                          </span>
-                        )}
-                        <button
-                          type="button"
-                          style={styles.usageRefresh}
-                          disabled={usageLoading[usageKey] === true}
-                          onClick={() => {
-                            void loadUsage(id, account.key, true)
-                          }}
-                        >
-                          {t('usageRefresh')}
-                        </button>
-                      </div>
-                      {usage === undefined && usageError === undefined && (
-                        <p style={styles.statusLine}>{t('usageLoading')}</p>
-                      )}
-                      {usageError !== undefined && (
-                        <p style={styles.errorLine}>
-                          {t('usageError', { message: usageError })}
-                        </p>
-                      )}
-                      {usage?.windows !== undefined &&
-                        usage.windows.length === 0 && (
-                          <p style={styles.statusLine}>{t('usageEmpty')}</p>
-                        )}
-                      {usage?.windows !== undefined &&
-                        usage.windows.length > 0 &&
-                        shownWindows.length === 0 && (
-                          <p style={styles.statusLine}>
-                            {t('usageNoVisibleModels')}
-                          </p>
-                        )}
-                      {shownWindows.map((window, index) => (
-                        <UsageWindowRow
-                          key={index}
-                          window={window}
-                          t={t}
-                          observedAt={observedAt[usageKey]}
-                          stale={
-                            usageError !== undefined || usage.stale === true
-                          }
-                        />
-                      ))}
-                      {usage?.planWindowsAbsent === true &&
-                        shownWindows.some(
-                          (window) => window.usedAmount !== undefined,
-                        ) && <PlanWindowsAbsentNote t={t} />}
-                      {(id === 'codex' || id === 'claude') &&
-                        usage?.resetCreditsError !== undefined && (
-                          <ResetCreditsErrorLine
-                            provider={id}
-                            message={usage.resetCreditsError}
-                            t={t}
-                          />
-                        )}
-                      {(id === 'codex' || id === 'claude') &&
-                        showsResetCredits(id, usage?.resetCredits) && (
-                          <ResetCreditsDisclosure
-                            mode={id === 'claude' ? 'grants' : 'credits'}
-                            credits={sortedCredits}
-                            t={t}
-                            {...(nextReset !== undefined
-                              ? { nextCredit: nextReset }
-                              : {})}
-                            {...(id === 'codex'
-                              ? {
-                                  useAction: {
-                                    accountKey: account.key,
-                                    busy:
-                                      resetBusy && resetAccount === account.key,
-                                    disabled: resetDisabled,
-                                    title: t(
-                                      resetBusy
-                                        ? 'resetUseChecking'
-                                        : (resetBlock ?? 'resetUseReady'),
-                                    ),
-                                    label: t('resetUseButton'),
-                                    onUse: () => {
-                                      if (!resetDisabled)
-                                        void prepareReset(account.key)
-                                    },
-                                  },
-                                }
-                              : {})}
-                            {...(resetAccount === account.key &&
-                            resetMessage !== ''
-                              ? { statusMessage: resetMessage }
-                              : {})}
-                          />
-                        )}
-                    </div>
-                  )}
-                </div>
-              )
-            })}
-            <div style={styles.actions}>
-              {!busy && accounts.length === 0 && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    void login(id)
-                  }}
-                >
-                  {t('login')}
-                </button>
-              )}
-              {!busy && accounts.length > 0 && id === 'claude' && (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      void login(id, 'oauth')
-                    }}
-                  >
-                    {t('addAccountOAuth')}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      void login(id, 'keychain')
-                    }}
-                  >
-                    {t('addAccountKeychain')}
-                  </button>
-                </>
-              )}
-              {!busy && accounts.length > 0 && id !== 'claude' && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    void login(id)
-                  }}
-                >
-                  {t('addAccount')}
-                </button>
-              )}
-              {/* Login and cancellation must not race a second settings writer. */}
-              {!busy && (
-                <button
-                  type="button"
-                  aria-haspopup="dialog"
-                  onClick={() => setManagedProvider({ id, name })}
-                >
-                  {t('accountsManage')}
-                </button>
-              )}
-              {busy && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    void cancel(id)
-                  }}
-                >
-                  {t('cancel')}
-                </button>
-              )}
-            </div>
-            {!busy && accounts.length > 0 && (
-              <p style={styles.statusLine}>{t('addAccountHint')}</p>
-            )}
-
-            {busy && deviceCode !== undefined && (
-              <div style={styles.deviceCode}>
-                <span style={styles.statusLine}>{t('deviceCodePrompt')}</span>
-                <span style={styles.deviceCodeText}>{deviceCode.userCode}</span>
-                <div style={styles.actions}>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      copyDeviceCode(id, deviceCode.userCode)
-                    }}
-                  >
-                    {copiedCode === id
-                      ? t('deviceCodeCopied')
-                      : t('deviceCodeCopy')}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      window.open(
-                        deviceCode.verificationUrl,
-                        '_blank',
-                        'noopener',
-                      )
-                    }}
-                  >
-                    {t('deviceCodeOpenPage')}
-                  </button>
-                </div>
+      {addMode ? (
+        <AddProviderForm
+          rpc={rpc}
+          t={t}
+          configured={configuredIdSet}
+          ollamaSettings={ollamaSettings}
+          statuses={statuses}
+          deviceCodes={deviceCodes}
+          errors={errors}
+          copiedCode={copiedCode}
+          onStartLogin={(provider, method) => login(provider, method)}
+          onCancelAttempt={(provider) => {
+            void cancel(provider)
+          }}
+          onManualSubmit={(provider, value) => {
+            void submitManual(provider, value)
+          }}
+          onCopyDeviceCode={copyDeviceCode}
+          onCancel={cancelAddition}
+          onConfirmed={confirmAddition}
+          onNeedsAttention={markAttention}
+        />
+      ) : (
+        <>
+          <div style={rosterStyles.band}>
+            <details>
+              <summary style={rosterStyles.bandTrigger}>
+                {t('rosterPreferences')}
+              </summary>
+              <div style={rosterStyles.bandBody}>
+                <UsageBadgeDisplaySetting t={t} variant="plain" />
               </div>
-            )}
-            {busy && deviceCode === undefined && (
-              <details style={styles.manual}>
-                <summary>{t('manualSummary')}</summary>
-                <div style={styles.manualRow}>
-                  <input
-                    style={styles.manualInput}
-                    value={manualDrafts[id]}
-                    placeholder={t('manualPlaceholder')}
-                    onChange={(event) =>
-                      setManualDrafts((prev) => ({
-                        ...prev,
-                        [id]: event.target.value,
-                      }))
-                    }
-                  />
-                  <button
-                    type="button"
-                    onClick={() => {
-                      void submitManual(id)
-                    }}
-                  >
-                    {t('submit')}
-                  </button>
-                </div>
-              </details>
-            )}
+            </details>
           </div>
-        )
-      })}
-      <CursorCard rpc={rpc} t={t} />
-      <OllamaCard rpc={rpc} t={t} />
-      <ExternalUsageCards rpc={rpc} t={t} />
+          {ProviderRoster({
+            t,
+            rows,
+            phase,
+            ...(failure === undefined ? {} : { error: failure }),
+            ...(outcome === undefined ? {} : { outcome }),
+            expanded,
+            onToggle: toggleRow,
+            onAdd: openAdd,
+            onRetry: () => {
+              void refresh()
+            },
+            headingRef,
+            renderDetail,
+          })}
+        </>
+      )}
       {managedProvider && (
         <ProviderAccountManager
           provider={managedProvider.id}
