@@ -1107,6 +1107,8 @@ function dialogSections(cdp) {
 async function checkMiniMaxRows(cdp, settingsOutlet) {
   const settings = settingsOutlet !== undefined
   const expression = `(() => {
+    // Interpolated, not read from the driver's scope: the page runs this text.
+    const onSettingsPage = ${settings ? 'true' : 'false'}
     const root = document.querySelector(${JSON.stringify(settingsOutlet ?? USAGE_DIALOG)})
     const matches = root === null ? [] : ${
       settings
@@ -1117,8 +1119,8 @@ async function checkMiniMaxRows(cdp, settingsOutlet) {
     const card = matches[0]
     // On the settings page the rows live in the row's expanded body, so open the
     // disclosure first and read the meters from the region it controls.
-    const body = settings ? (card.nextElementSibling ?? card) : card
-    if (settings) {
+    const body = onSettingsPage ? (card.nextElementSibling ?? card) : card
+    if (onSettingsPage) {
       const header = card.querySelector('button[aria-expanded]')
       if (header && header.getAttribute('aria-expanded') !== 'true') header.click()
     }
